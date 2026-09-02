@@ -1,0 +1,35 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="gdscript-lsp"
+config/features=PackedStringArray("4.6", "Forward Plus")
+config/icon="res://icon.svg"
+
+[dotnet]
+
+project/assembly_name="gdscript-lsp"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/code_completions/plugin.cfg", "res://addons/editor_console/plugin.cfg")
+
+[physics]
+
+3d/physics_engine="Jolt Physics"
+
+[plugin]
+
+code_completion/import/default_imports=[]
+
+[rendering]
+
+rendering_device/driver.windows="d3d12"

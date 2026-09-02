@@ -1,0 +1,17 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+/.deps/
+/build/
+/build-asan/
+/.sconsign.dblite
+*.os
+/addons/gdscript_lsp/bin/
+__pycache__/
+*.pyc
+
+/addons/addon_lib/
+/addons/code_completions/
+/addons/editor_console/
+/addons/syntax_plus/
+/addons/zyx_popup_wrapper/

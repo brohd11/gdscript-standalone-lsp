@@ -1,0 +1,58 @@
+{
+  "header": {
+    "version_major": 4,
+    "version_minor": 6,
+    "version_patch": 3
+  },
+  "builtin_classes": [
+    {
+      "name": "String",
+      "methods": [{"name": "length", "return_type": "int"}],
+      "constructors": [
+        {},
+        {"arguments": [{"name": "from", "type": "int"}]}
+      ]
+    },
+    {
+      "name": "Callable",
+      "methods": [{"name": "call", "is_vararg": true, "return_type": "Variant"}]
+    },
+    {
+      "name": "Rect2",
+      "constructors": [{}, {"arguments": [{"name": "from", "type": "Rect2"}]}]
+    }
+  ],
+  "classes": [
+    {
+      "name": "Object",
+      "inherits": "",
+      "methods": [{"name": "get_class", "return_value": {"type": "String"}}]
+    },
+    {
+      "name": "RefCounted",
+      "inherits": "Object",
+      "methods": [
+        {"name": "reference_method", "return_value": {"type": "bool"}},
+        {
+          "name": "native_takes",
+          "arguments": [
+            {"name": "value", "type": "int"},
+            {"name": "label", "type": "String", "default_value": "\"ok\""}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Engine",
+      "inherits": "Object",
+      "methods": [{"name": "get_version_info", "return_value": {"type": "Dictionary"}}],
+      "enums": [{"name": "Mode", "values": [{"name": "MODE_ONE", "value": 1}]}]
+    }
+  ],
+  "utility_functions": [
+    {"name": "print", "is_vararg": true, "arguments": [{"name": "arg1", "type": "Variant"}]}
+  ],
+  "singletons": [{"name": "Engine", "type": "Engine"}],
+  "global_constants": [],
+  "global_enums": [{"name": "TestGlobal", "values": [{"name": "TEST_VALUE", "value": 1}]}]
+}

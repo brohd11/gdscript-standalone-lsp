@@ -1,0 +1,20 @@
+{
+  "header": {"version_major": 4, "version_minor": 6, "version_patch": 3},
+  "builtin_classes": [],
+  "classes": [
+    {"name": "Object", "inherits": ""},
+    {
+      "name": "RefCounted",
+      "inherits": "Object",
+      "methods": [
+        {
+          "name": "legacy_optional",
+          "arguments": [
+            {"name": "value", "type": "int"},
+            {"name": "label", "type": "String"}
+          ]
+        }
+      ]
+    }
+  ]
+}

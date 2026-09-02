@@ -1,0 +1,53 @@
+AddonLib:
+    kind: clone
+    tag: "main"
+    version: "2.1.0"
+    url: https://github.com/brohd11/godot-addon-lib.git
+    path: addons/addon_lib/brohd
+
+EditorConsole:
+    kind: clone
+    tag: "main"
+    version: "0.7.0"
+    url: https://github.com/brohd11/godot-editor-console.git
+    path: addons/editor_console
+
+CodeCompletions:
+    kind: clone
+    tag: "main"
+    version: "0.3.0"
+    url: https://github.com/brohd11/godot-code-completions.git
+    path: addons/code_completions
+
+YAMLParser:
+    version: "2.1.0"
+    url: https://github.com/brohd11/Godot-YAML-Parser.git
+    path: addons/addon_lib/yaml_parser
+
+godot-tree-sitter-gd:
+    path: addons/addon_lib/tree_sitter_gd
+    version: "1.0.5"
+    is_dependency: true
+    tag: "v1.0.5"
+    url: https://github.com/brohd11/godot-tree-sitter-gd/releases/download/v1.0.5/tree-sitter-gd-v1.0.5.zip
+
+EditorNodeRef:
+    kind: clone
+    version: "0.3.3"
+    tag: "main"
+    url: https://github.com/brohd11/godot-editor-node-ref.git
+    path: addons/addon_lib/editor_node_ref
+
+SyntaxPlus:
+    kind: clone
+    version: "1.0.2"
+    tag: "main"
+    url: https://github.com/brohd11/godot-gd-syntax-plus.git
+    path: addons/syntax_plus
+
+ZyxPopupWrapper:
+    kind: clone
+    version: "0.3.2"
+    tag: "main"
+    url: https://github.com/brohd11/godot-zyx-popup-wrapper.git
+    path: addons/zyx_popup_wrapper

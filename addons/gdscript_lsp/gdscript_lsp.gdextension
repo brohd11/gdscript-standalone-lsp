@@ -1,0 +1,14 @@
+[configuration]
+
+entry_symbol = "gdscript_lsp_init"
+compatibility_minimum = "4.6"
+reloadable = true
+
+[libraries]
+
+linux.debug.x86_64 = "res://addons/gdscript_lsp/bin/libgdscript_lsp.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/gdscript_lsp/bin/libgdscript_lsp.linux.template_release.x86_64.so"
+windows.debug.x86_64 = "res://addons/gdscript_lsp/bin/libgdscript_lsp.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/gdscript_lsp/bin/libgdscript_lsp.windows.template_release.x86_64.dll"
+macos.debug = "res://addons/gdscript_lsp/bin/libgdscript_lsp.macos.template_debug.framework"
+macos.release = "res://addons/gdscript_lsp/bin/libgdscript_lsp.macos.template_release.framework"

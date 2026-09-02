@@ -1,0 +1,80 @@
+{
+  "godot_version_prefix": "4.6.",
+  "cases": [
+    {
+      "script": "oracle/duplicate_member.gd",
+      "godot_pattern": "same name as a previously declared variable",
+      "lsp_code": "duplicate-symbol"
+    },
+    {
+      "script": "oracle/unknown_type.gd",
+      "godot_pattern": "Could not find type .* in the current scope",
+      "lsp_code": "unknown-type"
+    },
+    {
+      "script": "oracle/type_mismatch.gd",
+      "godot_pattern": "Cannot assign a value of type .*int",
+      "lsp_code": "type-mismatch"
+    },
+    {
+      "script": "oracle/syntax_error.gd",
+      "godot_pattern": "Expected closing .* after function parameters",
+      "lsp_code": "syntax-error"
+    },
+    {
+      "script": "oracle/undefined_identifier.gd",
+      "godot_pattern": "Identifier .* not declared in the current scope",
+      "lsp_code": "undefined-identifier"
+    },
+    {
+      "script": "oracle/undefined_function.gd",
+      "godot_pattern": "Function .* not found in base self",
+      "lsp_code": "undefined-function"
+    },
+    {
+      "script": "oracle/unknown_member.gd",
+      "godot_pattern": "Cannot find member .* in base .*String",
+      "lsp_code": "unknown-member"
+    },
+    {
+      "script": "oracle/not_callable.gd",
+      "godot_pattern": "Function .*value.* not found in base self",
+      "lsp_code": "not-callable"
+    },
+    {
+      "script": "oracle/argument_count.gd",
+      "godot_pattern": "Too few arguments for .*accepts",
+      "lsp_code": "argument-count"
+    },
+    {
+      "script": "oracle/argument_type.gd",
+      "godot_pattern": "Invalid argument for .*accepts",
+      "lsp_code": "argument-type"
+    },
+    {
+      "script": "oracle/return_type.gd",
+      "godot_pattern": "Cannot return value of type .*String.*int",
+      "lsp_code": "return-type-mismatch"
+    },
+    {
+      "script": "oracle/return_void_value.gd",
+      "godot_pattern": "A void function cannot return a value",
+      "lsp_code": "return-value-in-void"
+    },
+    {
+      "script": "oracle/return_missing_value.gd",
+      "godot_pattern": "Cannot return value of type .*null.*return type is .*int",
+      "lsp_code": "missing-return-value"
+    },
+    {
+      "script": "oracle/return_missing_path.gd",
+      "godot_pattern": "Not all code paths return a value",
+      "lsp_code": "missing-return-path"
+    },
+    {
+      "script": "oracle/valid.gd",
+      "godot_pattern": null,
+      "lsp_code": null
+    }
+  ]
+}
