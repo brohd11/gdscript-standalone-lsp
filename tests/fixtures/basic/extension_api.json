@@ -22,6 +22,14 @@
       "methods": [{"name": "call", "is_vararg": true, "return_type": "Variant"}]
     },
     {
+      "name": "Dictionary",
+      "methods": [
+        {"name": "keys", "return_type": "Array"},
+        {"name": "values", "return_type": "Array"},
+        {"name": "size", "return_type": "int"}
+      ]
+    },
+    {
       "name": "Array",
       "methods": [{"name": "append_array", "arguments": [{"name": "array", "type": "Array"}]}]
     },

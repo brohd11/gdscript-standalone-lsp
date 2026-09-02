@@ -1,5 +1,18 @@
 extends RefCounted
 
+const OUTER_VALUE = 4
+enum LocalState { READY }
+
+class Nested:
+	var values = []
+
+	func offset_popup(offset_y := -1):
+	# A comment-only line must not establish the function body's indentation.
+		values.clear()
+
+	func later() -> int:
+		return OUTER_VALUE
+
 var checked_accessor: int:
 	set(value):
 		print(value)
@@ -29,6 +42,7 @@ func inspect(child: DiagnosticChild, dynamic: Variant, data: Dictionary, flag: b
 	var callable := func(value: int) -> int:
 		return captured + value
 	var typed_callable: Callable = callable
+	var empty_callable := Callable()
 	callable.call(2)
 	typed_callable.call(2)
 	var path_parts: PackedStringArray = "res://folder/file".trim_prefix("res://").split("/")
@@ -40,7 +54,11 @@ func inspect(child: DiagnosticChild, dynamic: Variant, data: Dictionary, flag: b
 	var hash_type: HashingContext.HashType = HashingContext.HASH_SHA256
 	var error: Error = ERR_ALREADY_EXISTS
 	var another := new()
-	print(mode, hash_type, error, packed_again, another)
+	var characters := char(65)
+	var state_count := len(LocalState.keys())
+	print(mode, hash_type, error, packed_again, another, characters, state_count, empty_callable)
+	var inline_callback := func(): if flag: print("inline")
+	inline_callback.call()
 	for item in [1, 2]:
 		print(item)
 	match data:
@@ -50,6 +68,9 @@ func inspect(child: DiagnosticChild, dynamic: Variant, data: Dictionary, flag: b
 		return 1
 	else:
 		return 2
+
+func nullable_return() -> RefCounted:
+	return
 
 func strict_bool_to_int() -> int:
 	return false

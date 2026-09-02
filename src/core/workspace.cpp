@@ -1,4 +1,5 @@
 #include "core/workspace.hpp"
+#include "core/gdscript_api.hpp"
 #include "core/semantic_analyzer.hpp"
 #include "core/text.hpp"
 #include "core/uri.hpp"
@@ -71,9 +72,17 @@ std::optional<std::string> completion_receiver(std::string_view prefix) {
 		if (!std::isalnum(static_cast<unsigned char>(prefix[i])) && prefix[i] != '_') return std::nullopt;
 	}
 	size_t start = dot;
-	while (start > 0 && (std::isalnum(static_cast<unsigned char>(prefix[start - 1])) || prefix[start - 1] == '_')) --start;
+	while (start > 0 && (std::isalnum(static_cast<unsigned char>(prefix[start - 1])) ||
+			prefix[start - 1] == '_' || prefix[start - 1] == '.')) --start;
 	auto receiver = prefix.substr(start, dot - start);
-	if (!is_identifier(receiver)) return std::nullopt;
+	if (receiver.empty()) return std::nullopt;
+	for (size_t part_start = 0; part_start < receiver.size();) {
+		auto separator = receiver.find('.', part_start);
+		auto part = receiver.substr(part_start, separator == std::string_view::npos ? receiver.size() - part_start : separator - part_start);
+		if (!is_identifier(part)) return std::nullopt;
+		if (separator == std::string_view::npos) break;
+		part_start = separator + 1;
+	}
 	return std::string(receiver);
 }
 
@@ -132,6 +141,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 	uid_paths_.clear();
 	unsafe_property_access_ = WarningLevel::Ignore;
 	unsafe_method_access_ = WarningLevel::Ignore;
+	unsafe_call_argument_ = WarningLevel::Ignore;
 	native_api_ = {};
 	stats_ = {};
 
@@ -216,6 +226,7 @@ void Workspace::read_project_settings() {
 	autoloads_.clear();
 	unsafe_property_access_ = WarningLevel::Ignore;
 	unsafe_method_access_ = WarningLevel::Ignore;
+	unsafe_call_argument_ = WarningLevel::Ignore;
 	std::istringstream stream(read_file(root_ / "project.godot"));
 	std::string line;
 	std::string section;
@@ -242,6 +253,7 @@ void Workspace::read_project_settings() {
 			}();
 			if (name == "gdscript/warnings/unsafe_property_access") unsafe_property_access_ = warning_level;
 			else if (name == "gdscript/warnings/unsafe_method_access") unsafe_method_access_ = warning_level;
+			else if (name == "gdscript/warnings/unsafe_call_argument") unsafe_call_argument_ = warning_level;
 		}
 	}
 }
@@ -456,9 +468,7 @@ ResolvedType Workspace::resolve_static_reference(std::string expression, const C
 	std::string suffix;
 	auto resolve_path = [&](std::string reference) {
 		auto resolved = resolve_path_reference(std::move(reference), context ? context->symbol.id : "res://");
-		auto *record = find_class(resolved);
-		return record ? ResolvedType{TypeKind::ScriptClass, record->symbol.name, resolved, false} :
-			ResolvedType::unknown(resolved);
+		return type_for_resource_path(std::move(resolved), context);
 	};
 
 	bool loaded_path = false;
@@ -572,6 +582,24 @@ const Symbol *Workspace::find_member(const ClassRecord &record, std::string_view
 	return nullptr;
 }
 
+const ClassRecord *Workspace::enclosing_class(const ClassRecord &record) const {
+	auto script_end = record.symbol.id.find(".gd");
+	auto separator = record.symbol.id.rfind('.');
+	if (script_end == std::string::npos || separator == std::string::npos || separator <= script_end + 2) return nullptr;
+	return find_class(record.symbol.id.substr(0, separator));
+}
+
+const Symbol *Workspace::find_lexical_member(const ClassRecord &record, std::string_view name) const {
+	for (auto *scope = enclosing_class(record); scope; scope = enclosing_class(*scope)) {
+		for (const auto &member : scope->members) {
+			if (member.name != name) continue;
+			if (member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum ||
+					member.kind == SymbolKind::Class || member.is_static) return &member;
+		}
+	}
+	return nullptr;
+}
+
 std::string Workspace::native_base(const ClassRecord &record) const {
 	std::unordered_set<std::string> seen;
 	auto *current = &record;
@@ -612,8 +640,8 @@ ResolvedType Workspace::type_from_name(std::string name, const ClassRecord *cont
 		return result;
 	}
 	if (name.starts_with("res://")) {
-		auto *record = find_class(name);
-		return {TypeKind::ScriptClass, record ? record->symbol.name : name, name, true};
+		if (auto *record = find_class(name)) return {TypeKind::ScriptClass, record->symbol.name, name, true};
+		return type_for_resource_path(name, context);
 	}
 	if (global_classes_.contains(name)) return {TypeKind::ScriptClass, name, global_classes_.at(name), true};
 	if (context && classes_.contains(context->symbol.id + "." + name)) {
@@ -644,10 +672,29 @@ ResolvedType Workspace::type_from_name(std::string name, const ClassRecord *cont
 	return ResolvedType::unknown(name);
 }
 
+ResolvedType Workspace::type_for_resource_path(std::string resource, const ClassRecord *context) const {
+	resource = resolve_path_reference(std::move(resource), context ? context->symbol.id : "res://");
+	auto extension = std::filesystem::path(resource).extension().string();
+	if (extension == ".gd") {
+		auto *record = find_class(resource);
+		return {TypeKind::ScriptClass, record ? record->symbol.name : resource, resource, false};
+	}
+	if (extension == ".tscn" || extension == ".scn") {
+		return {TypeKind::NativeClass, "PackedScene", "native:PackedScene", true};
+	}
+	if (!extension.empty() && native_api_.has_class("Resource")) {
+		return {TypeKind::NativeClass, "Resource", "native:Resource", true};
+	}
+	return ResolvedType::unknown(resource);
+}
+
 const Symbol *Workspace::resolve_identifier(const Document &document, const ClassRecord *context,
 		std::string_view name, Position position) const {
 	if (auto *local = document.find_local(name, position)) return local;
-	if (context) if (auto *member = find_member(*context, name)) return member;
+	if (context) {
+		if (auto *member = find_member(*context, name)) return member;
+		if (auto *member = find_lexical_member(*context, name)) return member;
+	}
 	return nullptr;
 }
 
@@ -663,7 +710,7 @@ ResolvedType Workspace::type_of_symbol(const Symbol &symbol, const Document &doc
 	if (!symbol.declared_type.empty()) result = type_from_name(symbol.declared_type, context);
 	else if (symbol.kind == SymbolKind::Event) result = {TypeKind::Signal, "Signal"};
 	else if (symbol.kind == SymbolKind::Enum) result = {TypeKind::Enum, symbol.name, symbol.id};
-	else if (!symbol.initializer.empty()) result = infer_expression(symbol.initializer, *declaration_document, context,
+	else if (!symbol.initializer.empty() && (symbol.kind == SymbolKind::Constant || symbol.is_inferred)) result = infer_expression(symbol.initializer, *declaration_document, context,
 		declaration_document == &document ? position : symbol.range.start, stack);
 	else if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Constructor) result = {TypeKind::Variant, "Variant"};
 	else result = {TypeKind::Variant, "Variant"};
@@ -694,9 +741,7 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 		auto argument = trim(std::string_view(call).substr(1, call.size() - 2));
 		if (argument.size() < 2 || (argument.front() != '"' && argument.front() != '\'') || argument.back() != argument.front()) continue;
 		auto id = resolve_path_reference(argument, document.resource_path());
-		auto result = type_from_name(id, context);
-		result.instance = false;
-		return result;
+		return type_for_resource_path(id, context);
 	}
 	if (auto call = member_call(expression); call && call->second == "new") {
 		auto result = type_from_name(call->first, context);
@@ -799,6 +844,12 @@ bool Workspace::is_assignable(const ResolvedType &expected, const ResolvedType &
 	return false;
 }
 
+bool Workspace::is_potential_downcast(const ResolvedType &expected, const ResolvedType &actual) const {
+	if (!expected.known() || !actual.known() || expected.kind == TypeKind::Variant || actual.kind == TypeKind::Variant) return false;
+	if (is_assignable(expected, actual)) return false;
+	return is_assignable(actual, expected);
+}
+
 std::vector<CompletionItem> Workspace::completion(const std::string &uri, Position position) const {
 	std::shared_lock lock(mutex_);
 	std::vector<CompletionItem> result;
@@ -817,6 +868,14 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 		std::vector<std::string> stack;
 		auto *context = document->class_at(position);
 		auto receiver = infer_expression(*receiver_text, *document, context, position, stack);
+		if (receiver.kind == TypeKind::Variant) {
+			if (auto *symbol = resolve_identifier(*document, context, *receiver_text, position);
+					symbol && symbol->declared_type.empty() && !symbol->initializer.empty()) {
+				stack.push_back(symbol->id);
+				receiver = infer_expression(symbol->initializer, *document, context, symbol->range.start, stack);
+				stack.pop_back();
+			}
+		}
 		if (receiver.kind == TypeKind::ScriptClass) {
 			if (auto *record = find_class(receiver.symbol_id)) {
 				for (auto *member : all_members(*record)) add_symbol(*member);
@@ -836,11 +895,29 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 					result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
 				}
 			}
+		} else if (receiver.kind == TypeKind::Enum) {
+			for (const auto &[id, record] : classes_) {
+				(void)id;
+				for (const auto &member : record->members) if (member.id == receiver.symbol_id) {
+					for (const auto &value : member.children) add_symbol(value);
+				}
+			}
+			for (auto *member : native_api_.members("Dictionary")) {
+				if (names.insert(member->name).second) {
+					result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
+				}
+			}
 		}
 	} else {
 		for (auto *local : document->locals_at(position)) add_symbol(*local);
 		if (auto *record = document->class_at(position)) {
 			for (auto *member : all_members(*record)) add_symbol(*member);
+			for (auto *scope = enclosing_class(*record); scope; scope = enclosing_class(*scope)) {
+				for (const auto &member : scope->members) {
+					if (member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum ||
+							member.kind == SymbolKind::Class || member.is_static) add_symbol(member);
+				}
+			}
 			auto base = native_base(*record);
 			if (!base.empty()) {
 				for (auto *member : native_api_.members(base)) {
@@ -857,9 +934,9 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 		for (const auto &[name, path] : autoloads_) {
 			if (names.insert(name).second) result.push_back({name, "autoload " + path, {}, SymbolKind::Variable, name});
 		}
-		if (names.insert("is_instance_of").second) {
-			result.push_back({"is_instance_of", "func is_instance_of(value: Variant, type: Variant) -> bool", {},
-				SymbolKind::Method, "is_instance_of"});
+		for (const auto &function : gdscript_builtin_functions()) if (names.insert(std::string(function.name)).second) {
+			result.push_back({std::string(function.name), std::string(function.detail), {}, SymbolKind::Method,
+				std::string(function.name)});
 		}
 	}
 	std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) { return a.label < b.label; });

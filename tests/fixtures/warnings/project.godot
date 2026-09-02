@@ -1,0 +1,5 @@
+[application]
+config/name="Warning fixture"
+
+[debug]
+gdscript/warnings/unsafe_call_argument=2

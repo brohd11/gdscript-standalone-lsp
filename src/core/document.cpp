@@ -4,6 +4,7 @@
 #include <tree_sitter/api.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <functional>
 
@@ -99,6 +100,12 @@ bool has_named_child(TSNode node, std::string_view wanted) {
 	return false;
 }
 
+bool is_inferred_type(std::string_view value) {
+	std::string compact;
+	for (char character : value) if (!std::isspace(static_cast<unsigned char>(character))) compact += character;
+	return compact == ":=";
+}
+
 std::string extends_text(TSNode node, std::string_view source) {
 	if (ts_node_is_null(node)) return {};
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
@@ -123,7 +130,8 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.range = node_range(node, source);
 	symbol.selection_range = node_range(name_node, source);
 	symbol.declared_type = trim(node_text(field(node, "type"), source));
-	if (symbol.declared_type == ":=") symbol.declared_type.clear();
+	symbol.is_inferred = is_inferred_type(symbol.declared_type);
+	if (symbol.is_inferred) symbol.declared_type.clear();
 	symbol.initializer = trim(node_text(field(node, "value"), source));
 	symbol.is_static = !ts_node_is_null(field(node, "static")) || has_named_child(node, "static_keyword");
 	symbol.is_local = local;
@@ -149,7 +157,8 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 			local.range = node_range(child, source);
 			local.selection_range = node_range(left, source);
 			local.declared_type = trim(node_text(field(child, "type"), source));
-			if (local.declared_type == ":=") local.declared_type.clear();
+			local.is_inferred = is_inferred_type(local.declared_type);
+			if (local.is_inferred) local.declared_type.clear();
 			// The iterable is not an initializer for the loop variable. Its element
 			// type is inferred by the semantic analyzer instead.
 			local.initializer.clear();
@@ -176,7 +185,8 @@ Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view so
 		auto typed = first_descendant(node, "typed_parameter");
 		result.declared_type = trim(node_text(field(typed, "type"), source));
 	}
-	if (result.declared_type == ":=") result.declared_type.clear();
+	result.is_inferred = is_inferred_type(result.declared_type);
+	if (result.is_inferred) result.declared_type.clear();
 	result.initializer = trim(node_text(field(node, "value"), source));
 	result.is_local = true;
 	result.is_parameter = true;

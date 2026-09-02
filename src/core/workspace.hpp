@@ -75,6 +75,7 @@ private:
 	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
 	WarningLevel unsafe_property_access_ = WarningLevel::Ignore;
 	WarningLevel unsafe_method_access_ = WarningLevel::Ignore;
+	WarningLevel unsafe_call_argument_ = WarningLevel::Ignore;
 
 	void rebuild_registry();
 	void read_project_settings();
@@ -90,11 +91,15 @@ private:
 	ResolvedType resolve_static_symbol(const Symbol &symbol, std::unordered_set<std::string> &stack) const;
 	std::string native_base(const ClassRecord &record) const;
 	ResolvedType type_from_name(std::string name, const ClassRecord *context) const;
+	ResolvedType type_for_resource_path(std::string resource_path, const ClassRecord *context) const;
 	ResolvedType type_of_symbol(const Symbol &symbol, const Document &document, Position position,
 		std::vector<std::string> &stack) const;
 	ResolvedType infer_expression(std::string expression, const Document &document, const ClassRecord *context,
 		Position position, std::vector<std::string> &stack) const;
 	bool is_assignable(const ResolvedType &expected, const ResolvedType &actual) const;
+	bool is_potential_downcast(const ResolvedType &expected, const ResolvedType &actual) const;
+	const ClassRecord *enclosing_class(const ClassRecord &record) const;
+	const Symbol *find_lexical_member(const ClassRecord &record, std::string_view name) const;
 	const Symbol *resolve_identifier(const Document &document, const ClassRecord *context,
 		std::string_view name, Position position) const;
 };

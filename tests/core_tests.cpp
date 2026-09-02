@@ -288,9 +288,12 @@ int main() {
 	auto u_file_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_file.gd"));
 	auto u_file_diagnostics = repository_workspace.diagnostics(u_file_uri);
-	expect(u_file_diagnostics.size() == 1 && u_file_diagnostics.front().code == "return-type-mismatch" &&
-		u_file_diagnostics.front().range.start.line == 428,
-		"u_file.gd retains only its genuine line 429 return mismatch");
+	if (!u_file_diagnostics.empty()) for (const auto &item : u_file_diagnostics) {
+		std::cerr << "u_file.gd:" << item.range.start.line + 1 << ':' << item.range.start.character + 1 << ": "
+			<< item.code << ": " << item.message << '\n';
+	}
+	expect(u_file_diagnostics.empty(),
+		"u_file.gd does not statically narrow ordinary Variant variables");
 	auto command_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/editor_console/src/default_commands/script/script.gd"));
 	expect(repository_workspace.diagnostics(command_uri).empty(),
@@ -301,7 +304,12 @@ int main() {
 			"addons/addon_lib/brohd/dock_manager/dock_manager.gd",
 			"addons/code_completions/src/class/editor_code_completion_singleton.gd",
 			"addons/addon_lib/brohd/alib_runtime/utils/gdscript/parser/utils/code_edit_parser.gd",
-			"addons/syntax_plus/src/highlighter/highlighter_logic.gd"}) {
+			"addons/syntax_plus/src/highlighter/highlighter_logic.gd",
+			"addons/addon_lib/brohd/alib_editor/file_system/fs_tab/filesystem_tab.gd",
+			"addons/addon_lib/brohd/alib_editor/misc/scene_viewer/scene_viewer.gd",
+			"addons/editor_console/src/container/line_edit.gd",
+			"addons/addon_lib/brohd/alib_editor/misc/git_service/git_data_draw.gd",
+			"addons/addon_lib/brohd/collections/class/collection_button.gd"}) {
 		auto uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(path));
 		auto reported = repository_workspace.diagnostics(uri);
 		if (!reported.empty()) {
@@ -316,10 +324,16 @@ int main() {
 	auto position_type = repository_workspace.resolve_type(popup_uri, {413, 30}, "ItemParams.Position.TOP");
 	expect(position_type.kind == TypeKind::Builtin && position_type.name == "int",
 		"qualified nested enum values resolve as integers");
+	auto enum_completion = repository_workspace.completion(popup_uri, {413, 39});
+	expect(has_item(enum_completion, "TOP") && has_item(enum_completion, "BOTTOM") && has_item(enum_completion, "keys"),
+		"qualified enum completion includes values and Dictionary methods");
 	auto u_node_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_node.gd"));
 	expect(has_item(repository_workspace.completion(u_node_uri, {28, 2}), "is_instance_of"),
 		"GDScript-specific builtins are offered in completion");
+	auto global_completion = repository_workspace.completion(u_node_uri, {28, 2});
+	expect(has_item(global_completion, "len") && has_item(global_completion, "char"),
+		"all modeled GDScript builtins are offered in completion");
 	auto dock_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/addon_lib/brohd/dock_manager/dock_manager.gd"));
 	auto dock_symbols = repository_workspace.document_symbols(dock_uri);
@@ -346,6 +360,30 @@ int main() {
 	expect(typed_dictionary_type.kind == TypeKind::Builtin && typed_dictionary_type.name == "Dictionary" &&
 		typed_dictionary_type.arguments.size() == 2 && typed_dictionary_type.display() == "Dictionary[String, Dictionary]",
 		"typed dictionaries retain arguments while using the Dictionary base type");
+	auto yaml_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/addon_lib/yaml_parser/yaml.gd"));
+	expect(has_item(repository_workspace.completion(yaml_uri, {823, 8}), "depth"),
+		"completion keeps initializer hints for ordinary Variant variables without making them statically typed");
+	auto scene_resource_uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(
+		"addons/addon_lib/brohd/dock_manager/dock_popup/dock_popup_handler.gd"));
+	auto scene_resource_type = repository_workspace.resolve_type(scene_resource_uri, {11, 20}, "DOCK_POPUP");
+	expect(scene_resource_type.kind == TypeKind::NativeClass && scene_resource_type.name == "PackedScene",
+		"preloaded scene constants resolve as PackedScene resources");
+
+	auto downcast_fixture = std::filesystem::weakly_canonical("tests/fixtures/warnings");
+	Workspace downcast_workspace;
+	expect(downcast_workspace.open(downcast_fixture, fixture / "extension_api.json", &error),
+		"warning workspace opens: " + error);
+	auto downcast_uri = downcast_workspace.uri_for_path(downcast_fixture / "main.gd");
+	auto downcast_diagnostics = downcast_workspace.diagnostics(downcast_uri);
+	expect(diagnostic_count(downcast_diagnostics, "unsafe-call-argument") == 1,
+		"unsafe call arguments use the project warning level");
+	expect(diagnostic_count(downcast_diagnostics, "unsafe-cast") == 0,
+		"broader object assignments and returns remain accepted like Godot");
+	auto unsafe_call = std::find_if(downcast_diagnostics.begin(), downcast_diagnostics.end(),
+		[](const auto &item) { return item.code == "unsafe-call-argument"; });
+	expect(unsafe_call != downcast_diagnostics.end() && unsafe_call->severity == DiagnosticSeverity::Error,
+		"unsafe call diagnostic severity follows project.godot");
 
 	if (failures == 0) std::cout << "core tests passed\n";
 	return failures == 0 ? 0 : 1;

@@ -1,10 +1,12 @@
 #include "core/semantic_analyzer.hpp"
 
 #include "core/document.hpp"
+#include "core/gdscript_api.hpp"
 #include "core/text.hpp"
 #include "core/workspace.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -50,12 +52,14 @@ enum class MemberAccessKind {
 	Method,
 };
 
-const CallableSignature *gdscript_builtin_function(std::string_view name) {
-	static const std::unordered_map<std::string, CallableSignature> functions = {
-		{"is_instance_of", {"bool", {{"value", "Variant", false}, {"type", "Variant", false}}, false}},
-	};
-	auto found = functions.find(std::string(name));
-	return found == functions.end() ? nullptr : &found->second;
+bool inferred_annotation(std::string_view value) {
+	std::string compact;
+	for (char character : value) if (!std::isspace(static_cast<unsigned char>(character))) compact += character;
+	return compact == ":=";
+}
+
+bool nullable_return_type(const ResolvedType &type) {
+	return type.kind == TypeKind::Variant || type.kind == TypeKind::NativeClass || type.kind == TypeKind::ScriptClass;
 }
 
 std::optional<std::string> string_literal_value(std::string value) {
@@ -139,7 +143,17 @@ private:
 
 	Value resolve_name(std::string_view name, Position position, bool call_target, Range range) {
 		for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
-			if (auto found = scope->find(std::string(name)); found != scope->end()) return found->second;
+			if (auto found = scope->find(std::string(name)); found != scope->end()) {
+				if (call_target && !found->second.callable) {
+					if (auto *utility = workspace.native_api_.find_utility_function(name)) {
+						return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
+					}
+					if (auto *builtin = find_gdscript_builtin_function(name)) {
+						return {{TypeKind::Callable, "Callable"}, {builtin->signature}, true, true};
+					}
+				}
+				return found->second;
+			}
 		}
 		if (name == "self" && current_class) {
 			return {{TypeKind::ScriptClass, current_class->symbol.name, current_class->symbol.id, true}, {}, true, false};
@@ -160,7 +174,15 @@ private:
 			return result;
 		}
 		if (current_class) {
-			if (auto *member = workspace.find_member(*current_class, name)) return symbol_value(*member, position);
+			if (auto *member = workspace.find_member(*current_class, name)) {
+				auto result = symbol_value(*member, position);
+				if (call_target && result.callable) {
+					if (auto *utility = workspace.native_api_.find_utility_function(name)) result.signatures.push_back(*utility);
+					if (auto *builtin = find_gdscript_builtin_function(name)) result.signatures.push_back(builtin->signature);
+				}
+				return result;
+			}
+			if (auto *member = workspace.find_lexical_member(*current_class, name)) return symbol_value(*member, position);
 			auto native = workspace.native_base(*current_class);
 			if (!native.empty()) {
 				if (auto *member = workspace.native_api_.find_member(native, name)) return native_member_value(*member);
@@ -177,8 +199,8 @@ private:
 		if (auto *utility = workspace.native_api_.find_utility_function(name)) {
 			return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
 		}
-		if (auto *builtin = gdscript_builtin_function(name)) {
-			return {{TypeKind::Callable, "Callable"}, {*builtin}, true, true};
+		if (auto *builtin = find_gdscript_builtin_function(name)) {
+			return {{TypeKind::Callable, "Callable"}, {builtin->signature}, true, true};
 		}
 		if (name == "range") {
 			return {{TypeKind::Callable, "Callable"}, {
@@ -206,11 +228,15 @@ private:
 		if (type.known()) {
 			type.instance = false;
 			Value result{type, {}, true, false};
-			if (type.kind == TypeKind::Builtin) {
+			if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
 				if (auto *constructors = workspace.native_api_.constructors(type.name)) {
 					result.signatures = *constructors;
 					for (auto &signature : result.signatures) signature.return_type = type.name;
 					result.callable = !result.signatures.empty();
+				}
+				if (type.kind == TypeKind::Callable && result.signatures.empty()) {
+					result.signatures.push_back({"Callable", {}, false});
+					result.callable = true;
 				}
 			}
 			return result;
@@ -290,6 +316,7 @@ private:
 					for (const auto &value : member.children) if (value.name == name) return symbol_value(value, range.start);
 				}
 			}
+			if (auto *member = workspace.native_api_.find_member("Dictionary", name)) return native_member_value(*member);
 		}
 		if (receiver.type.instance && (receiver.type.kind == TypeKind::ScriptClass ||
 				receiver.type.kind == TypeKind::NativeClass)) {
@@ -313,7 +340,7 @@ private:
 	std::vector<const SyntaxNode *> argument_nodes(const SyntaxNode *arguments) const {
 		std::vector<const SyntaxNode *> result;
 		if (!arguments) return result;
-		for (const auto &child : arguments->children) result.push_back(&child);
+		for (const auto &child : arguments->children) if (child.kind != "comment") result.push_back(&child);
 		return result;
 	}
 
@@ -356,6 +383,30 @@ private:
 				return {result_type, {}, true, false};
 			}
 		}
+		for (auto *signature : arity_matches) {
+			bool compatible = true;
+			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
+				auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+				if (expected.known() && values[index].type.known() &&
+						!workspace.is_assignable(expected, values[index].type) &&
+						!workspace.is_potential_downcast(expected, values[index].type)) {
+					compatible = false;
+					break;
+				}
+			}
+			if (!compatible) continue;
+			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
+				auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+				if (!workspace.is_potential_downcast(expected, values[index].type) ||
+						workspace.unsafe_call_argument_ == WarningLevel::Ignore) continue;
+				add("unsafe-call-argument", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
+					"\", but the value has the broader type \"" + values[index].type.display() + "\".", nodes[index]->range,
+					workspace.unsafe_call_argument_ == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
+			}
+			auto result_type = workspace.type_from_name(signature->return_type, current_class);
+			if (!result_type.known()) result_type = {TypeKind::Variant, "Variant"};
+			return {result_type, {}, true, false};
+		}
 		auto *signature = arity_matches.front();
 		for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
 			auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
@@ -385,9 +436,9 @@ private:
 		return {{TypeKind::Variant, "Variant"}, {}, true, false};
 	}
 
-	Value apply_attribute_parts(Value current, const SyntaxNode &node, size_t start) {
-		for (size_t index = start; index < node.children.size(); ++index) {
-			const auto &part = node.children[index];
+	Value apply_attribute_nodes(Value current, const std::vector<const SyntaxNode *> &parts) {
+		for (const auto *part_ptr : parts) {
+			const auto &part = *part_ptr;
 			if (part.kind == "identifier") {
 				current = member_value(current, text(document, part), part.range);
 			} else if (part.kind == "attribute_call") {
@@ -416,6 +467,29 @@ private:
 			}
 		}
 		return current;
+	}
+
+	Value apply_attribute_parts(Value current, const SyntaxNode &node, size_t start) {
+		std::vector<const SyntaxNode *> parts;
+		for (size_t index = start; index < node.children.size(); ++index) parts.push_back(&node.children[index]);
+		return apply_attribute_nodes(std::move(current), parts);
+	}
+
+	Value evaluate_with_attribute_suffix(const SyntaxNode &node, std::vector<const SyntaxNode *> suffix) {
+		if (node.kind == "attribute" && !node.children.empty() && node.children.front().kind == "binary_operator") {
+			std::vector<const SyntaxNode *> combined;
+			for (size_t index = 1; index < node.children.size(); ++index) combined.push_back(&node.children[index]);
+			combined.insert(combined.end(), suffix.begin(), suffix.end());
+			return evaluate_with_attribute_suffix(node.children.front(), std::move(combined));
+		}
+		if (node.kind == "binary_operator") {
+			auto *left = field(node, "left");
+			auto *right = field(node, "right");
+			auto left_value = left ? evaluate(*left) : Value{};
+			auto right_value = right ? evaluate_with_attribute_suffix(*right, std::move(suffix)) : Value{};
+			return binary_result(node, std::move(left_value), std::move(right_value));
+		}
+		return apply_attribute_nodes(evaluate(node), suffix);
 	}
 
 	Value evaluate(const SyntaxNode &node, bool call_target = false) {
@@ -474,7 +548,15 @@ private:
 			const SyntaxNode *callee_node = nullptr;
 			for (const auto &child : node.children) if (child.field != "arguments") { callee_node = &child; break; }
 			auto callee = callee_node ? evaluate(*callee_node, callee_node->kind == "identifier") : Value{};
-			return call_value(std::move(callee), field(node, "arguments"), node.range);
+			auto result = call_value(std::move(callee), field(node, "arguments"), node.range);
+			if (callee_node && callee_node->kind == "identifier" &&
+					(text(document, *callee_node) == "load" || text(document, *callee_node) == "preload")) {
+				auto nodes = argument_nodes(field(node, "arguments"));
+				if (nodes.size() == 1) if (auto path = string_literal_value(text(document, *nodes.front()))) {
+					return {workspace.type_for_resource_path(*path, current_class), {}, true, false};
+				}
+			}
+			return result;
 		}
 		if (node.kind == "base_call") {
 			auto *identifier = first_identifier(node);
@@ -492,13 +574,9 @@ private:
 		if (node.kind == "attribute") {
 			if (node.children.empty()) return {};
 			if (node.children.front().kind == "binary_operator" && node.children.size() > 1) {
-				auto &binary = node.children.front();
-				auto *left = field(binary, "left");
-				auto *right = field(binary, "right");
-				auto left_value = left ? evaluate(*left) : Value{};
-				auto right_value = right ? evaluate(*right) : Value{};
-				right_value = apply_attribute_parts(std::move(right_value), node, 1);
-				return binary_result(binary, std::move(left_value), std::move(right_value));
+				std::vector<const SyntaxNode *> suffix;
+				for (size_t index = 1; index < node.children.size(); ++index) suffix.push_back(&node.children[index]);
+				return evaluate_with_attribute_suffix(node.children.front(), std::move(suffix));
 			}
 			return apply_attribute_parts(evaluate(node.children.front()), node, 1);
 		}
@@ -530,11 +608,16 @@ private:
 			ResolvedType type{TypeKind::Variant, "Variant"};
 			if (function) for (const auto &child : function->children) {
 				if (child.is_parameter && child.name == text(document, *identifier)) {
-					type = workspace.type_from_name(child.declared_type, current_class);
+					if (child.is_inferred) {
+						std::vector<std::string> stack;
+						type = workspace.type_of_symbol(child, document, child.range.start, stack);
+					} else {
+						type = workspace.type_from_name(child.declared_type, current_class);
+					}
 					if (!type.known()) type = {TypeKind::Variant, "Variant"};
 					break;
 				}
-			} else if (auto *type_node = field(parameter, "type"); type_node && text(document, *type_node) != ":=") {
+			} else if (auto *type_node = field(parameter, "type"); type_node && !inferred_annotation(text(document, *type_node))) {
 				type = workspace.type_from_name(text(document, *type_node), current_class);
 				if (!type.known()) {
 					add("unknown-type", "Could not find type \"" + text(document, *type_node) + "\" in the current scope.",
@@ -594,9 +677,14 @@ private:
 		auto *name_node = field(node, "name");
 		if (!name_node) return;
 		ResolvedType type{TypeKind::Variant, "Variant"};
-		if (auto *type_node = field(node, "type"); type_node && text(document, *type_node) != ":=") {
-			type = workspace.type_from_name(text(document, *type_node), current_class);
-		} else if (initializer.type.known()) {
+		if (auto *type_node = field(node, "type")) {
+			auto declared = text(document, *type_node);
+			if (inferred_annotation(declared)) {
+				if (initializer.type.known()) type = initializer.type;
+			} else {
+				type = workspace.type_from_name(declared, current_class);
+			}
+		} else if (node.kind == "const_statement" && initializer.type.known()) {
 			type = initializer.type;
 		}
 		if (!type.known()) type = {TypeKind::Variant, "Variant"};
@@ -607,10 +695,12 @@ private:
 		auto *type_node = field(node, "type");
 		if (!type_node) return;
 		auto declared = text(document, *type_node);
-		if (declared.empty() || declared == ":=") return;
+		if (declared.empty() || inferred_annotation(declared)) return;
 		auto expected = workspace.type_from_name(declared, current_class);
 		if (!expected.known() || !initializer.type.known() || initializer.type.kind == TypeKind::Variant) return;
-		if (!workspace.is_assignable(expected, initializer.type)) {
+		if (workspace.is_potential_downcast(expected, initializer.type)) {
+			return;
+		} else if (!workspace.is_assignable(expected, initializer.type)) {
 			add("type-mismatch", "Cannot assign a value of type \"" + initializer.type.display() +
 				"\" to \"" + declared + "\".", node.range);
 		}
@@ -648,11 +738,13 @@ private:
 			if (expected_return.kind == TypeKind::Void && value_node) {
 				evaluate(*value_node);
 				add("return-value-in-void", "A void function cannot return a value.", node.range);
-			} else if (expected_return.kind != TypeKind::Void && !value_node) {
+			} else if (expected_return.kind != TypeKind::Void && !value_node && !nullable_return_type(expected_return)) {
 				add("missing-return-value", "A value of type \"" + expected_return.display() + "\" must be returned.", node.range);
 			} else if (value_node) {
 				auto actual = evaluate(*value_node).type;
-				if (actual.known() && actual.kind != TypeKind::Variant && !workspace.is_assignable(expected_return, actual)) {
+				if (actual.known() && actual.kind != TypeKind::Variant && workspace.is_potential_downcast(expected_return, actual)) {
+					return;
+				} else if (actual.known() && actual.kind != TypeKind::Variant && !workspace.is_assignable(expected_return, actual)) {
 					add("return-type-mismatch", "Cannot return \"" + actual.display() + "\" from a function returning \"" +
 						expected_return.display() + "\".", value_node->range);
 				}
@@ -753,7 +845,7 @@ private:
 				if (auto *value = field(node, "value")) initializer = evaluate(*value);
 				check_declared_assignment(node, initializer);
 				ResolvedType property_type;
-				if (auto *type_node = field(node, "type"); type_node && text(document, *type_node) != ":=") {
+				if (auto *type_node = field(node, "type"); type_node && !inferred_annotation(text(document, *type_node))) {
 					property_type = workspace.type_from_name(text(document, *type_node), current_class);
 				}
 				std::function<void(const SyntaxNode &)> accessors = [&](const SyntaxNode &candidate) {

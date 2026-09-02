@@ -81,6 +81,7 @@ struct Symbol {
 	bool is_local = false;
 	bool is_parameter = false;
 	bool is_variadic = false;
+	bool is_inferred = false;
 	std::vector<Symbol> children;
 };
 
