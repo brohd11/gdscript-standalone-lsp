@@ -149,7 +149,10 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 			local.range = node_range(child, source);
 			local.selection_range = node_range(left, source);
 			local.declared_type = trim(node_text(field(child, "type"), source));
-			local.initializer = trim(node_text(field(child, "right"), source));
+			if (local.declared_type == ":=") local.declared_type.clear();
+			// The iterable is not an initializer for the loop variable. Its element
+			// type is inferred by the semantic analyzer instead.
+			local.initializer.clear();
 			local.is_local = true;
 			function.children.push_back(std::move(local));
 		}
@@ -173,6 +176,7 @@ Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view so
 		auto typed = first_descendant(node, "typed_parameter");
 		result.declared_type = trim(node_text(field(typed, "type"), source));
 	}
+	if (result.declared_type == ":=") result.declared_type.clear();
 	result.initializer = trim(node_text(field(node, "value"), source));
 	result.is_local = true;
 	result.is_parameter = true;

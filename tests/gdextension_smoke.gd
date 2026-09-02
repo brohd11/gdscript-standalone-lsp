@@ -5,7 +5,7 @@ var diagnostics_signal_received := false
 
 func _initialize() -> void:
 	var load_status := GDExtensionManager.load_extension("res://addons/gdscript_lsp/gdscript_lsp.gdextension")
-	if load_status != GDExtensionManager.LOAD_STATUS_OK:
+	if load_status not in [GDExtensionManager.LOAD_STATUS_OK, GDExtensionManager.LOAD_STATUS_ALREADY_LOADED]:
 		push_error("could not load GDExtension: %s" % load_status)
 		quit(1)
 		return

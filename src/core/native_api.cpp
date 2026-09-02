@@ -64,7 +64,21 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 			member.signature = callable_signature(entry, arity_known);
 		}
 		else member.detail = member.name + ": " + member.type;
-		target.members[member.name] = std::move(member);
+		auto member_name = member.name;
+		target.members[member_name] = std::move(member);
+		if (kind == SymbolKind::Enum) {
+			const auto &enumeration = target.members.at(member_name);
+			for (const auto &value_name : enumeration.enum_values) {
+				NativeMember value;
+				value.owner = target.name;
+				value.name = value_name;
+				value.type = "enum::" + target.name + "." + member_name;
+				value.kind = SymbolKind::Constant;
+				value.is_static = true;
+				value.detail = value_name + ": " + value.type;
+				target.members.try_emplace(value_name, std::move(value));
+			}
+		}
 	}
 }
 
@@ -76,6 +90,7 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 	singletons_.clear();
 	global_symbols_.clear();
 	global_enums_.clear();
+	global_enum_values_.clear();
 	version_.clear();
 	std::ifstream stream(path);
 	if (!stream) {
@@ -139,7 +154,11 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 			auto value_name = value.value("name", "");
 			if (!value_name.empty()) {
 				global_symbols_.insert(value_name);
-				if (!name.empty()) global_enums_[name].insert(value_name);
+				if (!name.empty()) {
+					global_enums_[name].insert(value_name);
+					auto [found, inserted] = global_enum_values_.emplace(value_name, name);
+					if (!inserted && found->second != name) found->second.clear();
+				}
 			}
 		}
 	}
@@ -213,9 +232,20 @@ bool NativeApi::is_global_enum(std::string_view name) const {
 	return global_enums_.contains(std::string(name));
 }
 
+std::optional<std::string> NativeApi::global_enum_for_value(std::string_view value) const {
+	auto found = global_enum_values_.find(std::string(value));
+	if (found == global_enum_values_.end() || found->second.empty()) return std::nullopt;
+	return found->second;
+}
+
 bool NativeApi::global_enum_has_value(std::string_view enum_name, std::string_view value) const {
 	auto found = global_enums_.find(std::string(enum_name));
 	return found != global_enums_.end() && found->second.contains(std::string(value));
+}
+
+bool NativeApi::has_enum(std::string_view class_name, std::string_view enum_name) const {
+	auto *member = find_member(class_name, enum_name);
+	return member && member->kind == SymbolKind::Enum;
 }
 
 bool NativeApi::enum_has_value(std::string_view class_name, std::string_view enum_name, std::string_view value) const {

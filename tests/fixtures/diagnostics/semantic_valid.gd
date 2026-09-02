@@ -28,7 +28,19 @@ func inspect(child: DiagnosticChild, dynamic: Variant, data: Dictionary, flag: b
 	var captured := 1
 	var callable := func(value: int) -> int:
 		return captured + value
+	var typed_callable: Callable = callable
 	callable.call(2)
+	typed_callable.call(2)
+	var path_parts: PackedStringArray = "res://folder/file".trim_prefix("res://").split("/")
+	var ordinary_array: Array = path_parts
+	var packed_again: PackedStringArray = ordinary_array
+	path_parts.append_array(ordinary_array)
+	ordinary_array.append_array(path_parts)
+	var mode: FileAccess.ModeFlags = FileAccess.WRITE
+	var hash_type: HashingContext.HashType = HashingContext.HASH_SHA256
+	var error: Error = ERR_ALREADY_EXISTS
+	var another := new()
+	print(mode, hash_type, error, packed_again, another)
 	for item in [1, 2]:
 		print(item)
 	match data:
@@ -38,3 +50,9 @@ func inspect(child: DiagnosticChild, dynamic: Variant, data: Dictionary, flag: b
 		return 1
 	else:
 		return 2
+
+func strict_bool_to_int() -> int:
+	return false
+
+func strict_int_to_bool() -> bool:
+	return 1

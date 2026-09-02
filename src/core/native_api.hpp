@@ -57,7 +57,9 @@ public:
 	std::optional<std::string> singleton_type(std::string_view name) const;
 	bool has_global_symbol(std::string_view name) const;
 	bool is_global_enum(std::string_view name) const;
+	std::optional<std::string> global_enum_for_value(std::string_view value) const;
 	bool global_enum_has_value(std::string_view enum_name, std::string_view value) const;
+	bool has_enum(std::string_view class_name, std::string_view enum_name) const;
 	bool enum_has_value(std::string_view class_name, std::string_view enum_name, std::string_view value) const;
 	const std::unordered_map<std::string, NativeClass> &classes() const { return classes_; }
 	std::string version() const { return version_; }
@@ -68,6 +70,7 @@ private:
 	std::unordered_map<std::string, std::string> singletons_;
 	std::unordered_set<std::string> global_symbols_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> global_enums_;
+	std::unordered_map<std::string, std::string> global_enum_values_;
 	std::string version_;
 };
 

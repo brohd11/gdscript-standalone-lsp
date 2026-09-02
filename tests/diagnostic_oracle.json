@@ -75,6 +75,11 @@
       "script": "oracle/valid.gd",
       "godot_pattern": null,
       "lsp_code": null
+    },
+    {
+      "script": "oracle/valid_strict_conversions.gd",
+      "godot_pattern": null,
+      "lsp_code": null
     }
   ]
 }

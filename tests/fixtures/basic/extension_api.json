@@ -7,7 +7,11 @@
   "builtin_classes": [
     {
       "name": "String",
-      "methods": [{"name": "length", "return_type": "int"}],
+      "methods": [
+        {"name": "length", "return_type": "int"},
+        {"name": "trim_prefix", "return_type": "String", "arguments": [{"name": "prefix", "type": "String"}]},
+        {"name": "split", "return_type": "PackedStringArray", "arguments": [{"name": "delimiter", "type": "String"}]}
+      ],
       "constructors": [
         {},
         {"arguments": [{"name": "from", "type": "int"}]}
@@ -16,6 +20,14 @@
     {
       "name": "Callable",
       "methods": [{"name": "call", "is_vararg": true, "return_type": "Variant"}]
+    },
+    {
+      "name": "Array",
+      "methods": [{"name": "append_array", "arguments": [{"name": "array", "type": "Array"}]}]
+    },
+    {
+      "name": "PackedStringArray",
+      "methods": [{"name": "append_array", "arguments": [{"name": "array", "type": "PackedStringArray"}]}]
     },
     {
       "name": "Rect2",
@@ -47,6 +59,16 @@
       "inherits": "Object",
       "methods": [{"name": "get_version_info", "return_value": {"type": "Dictionary"}}],
       "enums": [{"name": "Mode", "values": [{"name": "MODE_ONE", "value": 1}]}]
+    },
+    {
+      "name": "FileAccess",
+      "inherits": "RefCounted",
+      "enums": [{"name": "ModeFlags", "values": [{"name": "READ", "value": 1}, {"name": "WRITE", "value": 2}]}]
+    },
+    {
+      "name": "HashingContext",
+      "inherits": "RefCounted",
+      "enums": [{"name": "HashType", "values": [{"name": "HASH_SHA256", "value": 2}]}]
     }
   ],
   "utility_functions": [
@@ -54,5 +76,8 @@
   ],
   "singletons": [{"name": "Engine", "type": "Engine"}],
   "global_constants": [],
-  "global_enums": [{"name": "TestGlobal", "values": [{"name": "TEST_VALUE", "value": 1}]}]
+  "global_enums": [
+    {"name": "TestGlobal", "values": [{"name": "TEST_VALUE", "value": 1}]},
+    {"name": "Error", "values": [{"name": "OK", "value": 0}, {"name": "ERR_ALREADY_EXISTS", "value": 32}]}
+  ]
 }

@@ -6,4 +6,4 @@ var missing: DoesNotExist
 var bad: int = "wrong"
 
 func inspect(value: MissingParameter = 1) -> void:
-	var local_bad: bool = 42
+	var local_bad: int = "wrong"

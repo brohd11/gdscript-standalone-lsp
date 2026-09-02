@@ -1,8 +1,10 @@
 #include "core/text.hpp"
+#include "core/uri.hpp"
 #include "core/workspace.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -10,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 using json = nlohmann::json;
 using namespace gdscript_lsp;
@@ -134,62 +137,147 @@ void apply_content_changes(std::string &text, const json &changes) {
 	}
 }
 
+std::optional<std::filesystem::path> find_project_root(std::filesystem::path candidate) {
+	if (candidate.empty()) return std::nullopt;
+	std::error_code error;
+	candidate = std::filesystem::absolute(candidate, error).lexically_normal();
+	if (error) return std::nullopt;
+	if (std::filesystem::is_regular_file(candidate, error)) candidate = candidate.parent_path();
+	while (!candidate.empty()) {
+		if (std::filesystem::is_regular_file(candidate / "project.godot", error)) {
+			auto canonical = std::filesystem::weakly_canonical(candidate, error);
+			return error ? std::optional<std::filesystem::path>(candidate) : std::optional<std::filesystem::path>(canonical);
+		}
+		auto parent = candidate.parent_path();
+		if (parent == candidate) break;
+		candidate = std::move(parent);
+	}
+	return std::nullopt;
+}
+
+void add_project_root(std::vector<std::filesystem::path> &roots, const std::filesystem::path &candidate) {
+	auto root = find_project_root(candidate);
+	if (!root) return;
+	if (std::find(roots.begin(), roots.end(), *root) == roots.end()) roots.push_back(std::move(*root));
+}
+
+void add_project_uri(std::vector<std::filesystem::path> &roots, const std::string &uri) {
+	if (auto path = path_for_file_uri(uri)) add_project_root(roots, *path);
+}
+
+std::optional<std::filesystem::path> project_from_initialize(const json &params, std::string &error) {
+	std::vector<std::filesystem::path> roots;
+	auto folders = params.find("workspaceFolders");
+	if (folders != params.end() && folders->is_array()) {
+		for (const auto &folder : *folders) {
+			if (folder.is_object()) add_project_uri(roots, folder.value("uri", ""));
+		}
+	}
+	if (roots.size() > 1) {
+		error = "multiple Godot project roots are not supported by one server process";
+		return std::nullopt;
+	}
+	if (roots.size() == 1) return roots.front();
+
+	if (auto root_uri = params.find("rootUri"); root_uri != params.end() && root_uri->is_string()) {
+		add_project_uri(roots, root_uri->get<std::string>());
+	}
+	if (roots.empty()) {
+		if (auto root_path = params.find("rootPath"); root_path != params.end() && root_path->is_string()) {
+			add_project_root(roots, root_path->get<std::string>());
+		}
+	}
+	if (roots.empty()) {
+		std::error_code current_error;
+		auto current = std::filesystem::current_path(current_error);
+		if (!current_error) add_project_root(roots, current);
+	}
+	if (roots.empty()) {
+		error = "no Godot project found; open a folder containing project.godot or pass --project";
+		return std::nullopt;
+	}
+	return roots.front();
+}
+
+std::filesystem::path discover_api(const std::filesystem::path &project, const std::filesystem::path &configured,
+	const char *executable_path) {
+	if (!configured.empty()) return configured;
+	if (const char *environment_api = std::getenv("GDSCRIPT_LSP_API"); environment_api && *environment_api) {
+		return environment_api;
+	}
+	for (const auto &candidate : {
+		project / ".godot/addons/gdscript_parser/extension_api.json",
+		project / "addons/gdscript_lsp/data/godot-4.6-extension-api.json"}) {
+		if (std::filesystem::exists(candidate)) return candidate;
+	}
+	std::error_code error;
+	std::filesystem::path executable = executable_path;
+	if (!executable.has_parent_path()) {
+		if (const char *path_value = std::getenv("PATH")) {
+#ifdef _WIN32
+			constexpr char separator = ';';
+#else
+			constexpr char separator = ':';
+#endif
+			std::string_view paths = path_value;
+			while (!paths.empty()) {
+				auto end = paths.find(separator);
+				auto directory = paths.substr(0, end);
+				auto candidate = std::filesystem::path(directory.empty() ? "." : directory) / executable;
+				if (std::filesystem::is_regular_file(candidate, error)) {
+					executable = std::move(candidate);
+					break;
+				}
+				if (end == std::string_view::npos) break;
+				paths.remove_prefix(end + 1);
+			}
+		}
+	}
+	executable = std::filesystem::weakly_canonical(executable, error);
+	if (error) return {};
+	for (const auto &candidate : {
+		executable.parent_path().parent_path() / "addons/gdscript_lsp/data/godot-4.6-extension-api.json",
+		executable.parent_path().parent_path() / "share/gdscript-lsp/godot-4.6-extension-api.json"}) {
+		if (std::filesystem::exists(candidate)) return candidate;
+	}
+	return {};
+}
+
+json initialize_result() {
+	return {
+		{"capabilities", {
+			{"positionEncoding", "utf-16"},
+			{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
+			{"completionProvider", {{"triggerCharacters", json::array({"."})}, {"resolveProvider", false}}},
+			{"hoverProvider", true},
+			{"definitionProvider", true},
+			{"documentSymbolProvider", true},
+			{"diagnosticProvider", {{"identifier", "gdscript-lsp"}, {"interFileDependencies", true},
+				{"workspaceDiagnostics", false}}}
+		}},
+		{"serverInfo", {{"name", "gdscript-lsp"}, {"version", "0.1.0"}}}
+	};
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
 	std::filesystem::path project;
-	std::filesystem::path api;
+	std::filesystem::path configured_api;
 	for (int index = 1; index < argc; ++index) {
 		std::string argument = argv[index];
 		if (argument == "--project" && index + 1 < argc) project = argv[++index];
-		else if (argument == "--api" && index + 1 < argc) api = argv[++index];
+		else if (argument == "--api" && index + 1 < argc) configured_api = argv[++index];
 		else if (argument == "--version") {
 			std::cout << "gdscript-lsp 0.1.0 (Godot 4.6)\n";
 			return 0;
 		}
 	}
-	if (project.empty()) {
-		std::cerr << "usage: gdscript-lsp --project <path> [--api <extension_api.json>]\n";
-		return 2;
-	}
-	if (api.empty()) {
-		if (const char *environment_api = std::getenv("GDSCRIPT_LSP_API")) api = environment_api;
-	}
-	if (api.empty()) {
-		for (const auto &candidate : {
-				project / ".godot/addons/gdscript_parser/extension_api.json",
-				project / "addons/gdscript_lsp/data/godot-4.6-extension-api.json"}) {
-			if (std::filesystem::exists(candidate)) {
-				api = candidate;
-				break;
-			}
-		}
-	}
-	if (api.empty()) {
-		std::error_code ec;
-		auto executable = std::filesystem::weakly_canonical(argv[0], ec);
-		for (const auto &candidate : {
-				executable.parent_path().parent_path() / "addons/gdscript_lsp/data/godot-4.6-extension-api.json",
-				executable.parent_path().parent_path() / "share/gdscript-lsp/godot-4.6-extension-api.json"}) {
-			if (std::filesystem::exists(candidate)) {
-				api = candidate;
-				break;
-			}
-		}
-	}
-
 	Workspace workspace;
 	std::string error;
-	if (!workspace.open(project, api, &error)) {
-		std::cerr << "gdscript-lsp: " << error << '\n';
-		return 1;
-	}
-	const auto &stats = workspace.stats();
-	std::cerr << "gdscript-lsp: indexed " << stats.document_count << " documents / " << stats.class_count
-			  << " classes in " << stats.elapsed_ms << " ms; syntax errors: " << stats.syntax_error_count << '\n';
-
 	std::unordered_map<std::string, std::string> buffers;
 	std::unordered_set<std::string> cancelled;
+	bool initialized = false;
 	bool shutdown = false;
 	auto publish_diagnostics = [&](const std::string &uri) {
 		json items = json::array();
@@ -218,26 +306,36 @@ int main(int argc, char **argv) {
 			continue;
 		}
 		if (method == "initialize") {
-			respond(id, {
-				{"capabilities", {
-					{"positionEncoding", "utf-16"},
-					{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
-					{"completionProvider", {{"triggerCharacters", json::array({"."})}, {"resolveProvider", false}}},
-					{"hoverProvider", true},
-					{"definitionProvider", true},
-					{"documentSymbolProvider", true},
-					{"diagnosticProvider", {{"identifier", "gdscript-lsp"}, {"interFileDependencies", true},
-						{"workspaceDiagnostics", false}}}
-				}},
-				{"serverInfo", {{"name", "gdscript-lsp"}, {"version", "0.1.0"}}}
-			});
+			error.clear();
+			if (initialized) {
+				respond_error(id, -32600, "initialize may only be sent once");
+				continue;
+			}
+			auto selected_project = project.empty() ? project_from_initialize(params, error) : find_project_root(project);
+			if (!selected_project) {
+				if (error.empty()) error = "project.godot not found at or above " + project.string();
+				respond_error(id, -32602, error);
+				continue;
+			}
+			auto api = discover_api(*selected_project, configured_api, argv[0]);
+			if (!workspace.open(*selected_project, api, &error)) {
+				respond_error(id, -32603, "could not index Godot project: " + error);
+				continue;
+			}
+			initialized = true;
+			const auto &stats = workspace.stats();
+			std::cerr << "gdscript-lsp: indexed " << stats.document_count << " documents / " << stats.class_count
+					  << " classes in " << stats.elapsed_ms << " ms; syntax errors: " << stats.syntax_error_count << '\n';
+			respond(id, initialize_result());
+		} else if (method == "exit") {
+			return shutdown ? 0 : 1;
+		} else if (!initialized) {
+			if (request) respond_error(id, -32002, "Server not initialized");
 		} else if (method == "initialized") {
 			publish_all_diagnostics();
 		} else if (method == "shutdown") {
 			shutdown = true;
 			respond(id, nullptr);
-		} else if (method == "exit") {
-			return shutdown ? 0 : 1;
 		} else if (method == "textDocument/didOpen") {
 			auto document = params["textDocument"];
 			auto uri = document.value("uri", "");

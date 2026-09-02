@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 
 def packet(value):
@@ -27,14 +29,22 @@ binary = pathlib.Path(sys.argv[1]).resolve()
 root = pathlib.Path("tests/fixtures/basic").resolve()
 uri = (root / "consumer.gd").as_uri()
 process = subprocess.Popen(
-    [str(binary), "--project", str(root), "--api", str(root / "extension_api.json")],
+    [str(binary), "--api", str(root / "extension_api.json")],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
 
 requests = [
-    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": root.as_uri()}},
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "rootUri": root.as_uri(),
+            "workspaceFolders": [{"uri": root.as_uri(), "name": "basic"}],
+        },
+    },
     {
         "jsonrpc": "2.0",
         "id": 2,
@@ -75,10 +85,11 @@ assert process.wait(timeout=5) == 0
 native_root = pathlib.Path("tests/fixtures/native").resolve()
 native_uri = (native_root / "main.gd").as_uri()
 process = subprocess.Popen(
-    [str(binary), "--project", str(native_root)],
+    [binary.name],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
+    env={**os.environ, "PATH": str(binary.parent) + os.pathsep + os.environ.get("PATH", "")},
 )
 for request in [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": native_root.as_uri()}},
@@ -117,9 +128,9 @@ process = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-process.stdin.write(
-    packet({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": diagnostic_root.as_uri()}})
-)
+# The explicit project remains authoritative even if a fixed-root integration
+# sends unrelated initialization metadata.
+process.stdin.write(packet({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": root.as_uri()}}))
 process.stdin.write(
     packet(
         {
@@ -205,4 +216,94 @@ process.stdin.flush()
 shutdown = read_packet(process.stdout)
 assert shutdown["id"] == 5 and shutdown["result"] is None
 assert process.wait(timeout=5) == 0
+
+
+def initialize_server(params, *, args=(), cwd=None):
+    server = subprocess.Popen(
+        [str(binary), *map(str, args)],
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    server.stdin.write(packet({"jsonrpc": "2.0", "id": 100, "method": "initialize", "params": params}))
+    server.stdin.flush()
+    return server, read_packet(server.stdout)
+
+
+def stop_server(server):
+    server.stdin.write(packet({"jsonrpc": "2.0", "id": 101, "method": "shutdown", "params": {}}))
+    server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+    server.stdin.flush()
+    response = read_packet(server.stdout)
+    assert response["id"] == 101 and response["result"] is None
+    assert server.wait(timeout=5) == 0
+
+
+# Older clients may only send rootPath, and clients with no root metadata may
+# rely on the server process working directory.
+server, response = initialize_server({"rootPath": str(root), "rootUri": None}, cwd="/tmp")
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+stop_server(server)
+
+server, response = initialize_server({"rootUri": None, "workspaceFolders": None}, cwd=root)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+stop_server(server)
+
+# File URI decoding must accept the percent escapes emitted for paths with spaces.
+with tempfile.TemporaryDirectory(prefix="gdscript lsp ") as temporary:
+    linked_root = pathlib.Path(temporary) / "linked project"
+    linked_root.symlink_to(root, target_is_directory=True)
+    server, response = initialize_server({"rootUri": linked_root.as_uri()}, cwd="/tmp")
+    assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+    stop_server(server)
+
+# A request before initialize gets the standard lifecycle error, without
+# preventing a subsequent valid initialization.
+server = subprocess.Popen(
+    [str(binary)], cwd="/tmp", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}},
+        }
+    )
+)
+server.stdin.write(
+    packet({"jsonrpc": "2.0", "id": 103, "method": "initialize", "params": {"rootUri": root.as_uri()}})
+)
+server.stdin.flush()
+assert read_packet(server.stdout)["error"]["code"] == -32002
+assert read_packet(server.stdout)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+stop_server(server)
+
+# Ambiguous and absent roots fail initialization clearly instead of silently
+# selecting a project or exiting before the client receives a response.
+server, response = initialize_server(
+    {
+        "workspaceFolders": [
+            {"uri": root.as_uri(), "name": "basic"},
+            {"uri": diagnostic_root.as_uri(), "name": "diagnostics"},
+        ]
+    },
+    cwd="/tmp",
+)
+assert response["error"]["code"] == -32602
+assert "multiple Godot project roots" in response["error"]["message"]
+server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+server.stdin.flush()
+assert server.wait(timeout=5) == 1
+
+with tempfile.TemporaryDirectory() as empty_root:
+    server, response = initialize_server({"rootUri": pathlib.Path(empty_root).as_uri()}, cwd=empty_root)
+    assert response["error"]["code"] == -32602
+    assert "no Godot project found" in response["error"]["message"]
+    server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+    server.stdin.flush()
+    assert server.wait(timeout=5) == 1
+
 print("lsp smoke test passed")

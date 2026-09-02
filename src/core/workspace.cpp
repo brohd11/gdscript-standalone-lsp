@@ -1,10 +1,10 @@
 #include "core/workspace.hpp"
 #include "core/semantic_analyzer.hpp"
 #include "core/text.hpp"
+#include "core/uri.hpp"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <set>
@@ -18,38 +18,6 @@ std::string read_file(const std::filesystem::path &path) {
 	std::ifstream stream(path, std::ios::binary);
 	if (!stream) return {};
 	return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
-}
-
-std::string percent_decode(std::string_view input) {
-	std::string result;
-	for (size_t i = 0; i < input.size(); ++i) {
-		if (input[i] == '%' && i + 2 < input.size()) {
-			char *end = nullptr;
-			auto value = std::strtol(std::string(input.substr(i + 1, 2)).c_str(), &end, 16);
-			if (end && *end == '\0') {
-				result.push_back(static_cast<char>(value));
-				i += 2;
-				continue;
-			}
-		}
-		result.push_back(input[i]);
-	}
-	return result;
-}
-
-std::string percent_encode(std::string_view input) {
-	constexpr char hex[] = "0123456789ABCDEF";
-	std::string result;
-	for (unsigned char c : input) {
-		if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || c == ':') {
-			result.push_back(static_cast<char>(c));
-		} else {
-			result += '%';
-			result += hex[c >> 4U];
-			result += hex[c & 15U];
-		}
-	}
-	return result;
 }
 
 bool is_identifier(std::string_view value) {
@@ -112,7 +80,37 @@ std::optional<std::string> completion_receiver(std::string_view prefix) {
 std::string normalize_api_type(std::string value) {
 	if (value.starts_with("typedarray::")) return "Array[" + value.substr(12) + "]";
 	if (value.starts_with("enum::")) return value.substr(6);
+	if (value.starts_with("bitfield::")) return value.substr(10);
 	return value;
+}
+
+// Mirrors the useful type-level portion of Godot's Variant::can_convert_strict.
+// These are the implicit conversions accepted by the GDScript analyzer, not the
+// broader set of runtime Variant conversions.
+bool can_convert_strict(std::string_view source, std::string_view target) {
+	if (source == target) return true;
+	if ((target == "bool" || target == "int" || target == "float") &&
+			(source == "bool" || source == "int" || source == "float")) return true;
+	if (target == "String" && (source == "StringName" || source == "NodePath")) return true;
+	if (target == "StringName" && source == "String") return true;
+	if (target == "NodePath" && source == "String") return true;
+	if ((target == "Vector2" && source == "Vector2i") || (target == "Vector2i" && source == "Vector2") ||
+			(target == "Rect2" && source == "Rect2i") || (target == "Rect2i" && source == "Rect2") ||
+			(target == "Vector3" && source == "Vector3i") || (target == "Vector3i" && source == "Vector3") ||
+			(target == "Vector4" && source == "Vector4i") || (target == "Vector4i" && source == "Vector4")) return true;
+	if ((target == "Quaternion" && source == "Basis") || (target == "Basis" && source == "Quaternion") ||
+			(target == "Transform2D" && source == "Transform3D") ||
+			(target == "Transform3D" && (source == "Transform2D" || source == "Quaternion" || source == "Basis" || source == "Projection")) ||
+			(target == "Projection" && source == "Transform3D")) return true;
+	if (target == "Color" && (source == "String" || source == "int")) return true;
+	static const std::unordered_set<std::string_view> packed_arrays = {
+		"PackedByteArray", "PackedInt32Array", "PackedInt64Array", "PackedFloat32Array",
+		"PackedFloat64Array", "PackedStringArray", "PackedVector2Array", "PackedVector3Array",
+		"PackedColorArray", "PackedVector4Array"
+	};
+	if (target == "Array" && packed_arrays.contains(source)) return true;
+	if (source == "Array" && packed_arrays.contains(target)) return true;
+	return false;
 }
 
 } // namespace
@@ -346,11 +344,11 @@ std::string Workspace::resource_path(const std::filesystem::path &path) const {
 }
 
 std::string Workspace::uri_for_path(const std::filesystem::path &path) const {
-	return "file://" + percent_encode(std::filesystem::absolute(path).lexically_normal().generic_string());
+	return file_uri_for_path(path);
 }
 
 std::filesystem::path Workspace::path_for_uri(const std::string &uri) const {
-	if (uri.starts_with("file://")) return std::filesystem::path(percent_decode(uri.substr(7))).lexically_normal();
+	if (auto path = path_for_file_uri(uri)) return *path;
 	if (uri.starts_with("res://")) return (root_ / uri.substr(6)).lexically_normal();
 	return {};
 }
@@ -428,9 +426,16 @@ ResolvedType Workspace::type_from_name(std::string name, const ClassRecord *cont
 	if (context && classes_.contains(context->symbol.id + "." + name)) {
 		return {TypeKind::ScriptClass, name, context->symbol.id + "." + name, true};
 	}
+	if (name == "Callable") return {TypeKind::Callable, name};
+	if (name == "Signal") return {TypeKind::Signal, name};
+	if (native_api_.is_global_enum(name)) return {TypeKind::Enum, name, "global:" + name, false};
+	if (auto dot = name.rfind('.'); dot != std::string::npos &&
+			native_api_.has_enum(name.substr(0, dot), name.substr(dot + 1))) {
+		return {TypeKind::Enum, name.substr(dot + 1), "nativeenum:" + name, false};
+	}
 	static const std::unordered_set<std::string> builtins = {
 		"bool", "int", "float", "String", "StringName", "NodePath", "Array", "Dictionary",
-		"Callable", "Signal", "Vector2", "Vector2i", "Vector3", "Vector3i", "Color"
+		"Vector2", "Vector2i", "Vector3", "Vector3i", "Color"
 	};
 	if (builtins.contains(name)) return {TypeKind::Builtin, name};
 	if (native_api_.is_builtin_class(name)) return {TypeKind::Builtin, name};
@@ -547,8 +552,11 @@ bool Workspace::is_assignable(const ResolvedType &expected, const ResolvedType &
 	if (expected.kind == TypeKind::Variant || actual.kind == TypeKind::Variant || !expected.known() || !actual.known()) return true;
 	if (expected.kind == actual.kind && (expected.name == actual.name ||
 			(!expected.symbol_id.empty() && expected.symbol_id == actual.symbol_id))) return true;
-	if (expected.kind == TypeKind::Builtin && expected.name == "float" &&
-			actual.kind == TypeKind::Builtin && actual.name == "int") return true;
+	if (expected.kind == TypeKind::Builtin && actual.kind == TypeKind::Builtin &&
+			can_convert_strict(actual.name, expected.name)) return true;
+	if (expected.kind == TypeKind::Builtin && expected.name == "RID" && actual.kind == TypeKind::NativeClass) return true;
+	if (expected.kind == TypeKind::Enum && actual.kind == TypeKind::Builtin && actual.name == "int") return true;
+	if (expected.kind == TypeKind::Builtin && expected.name == "int" && actual.kind == TypeKind::Enum) return true;
 	if (actual.kind == TypeKind::ScriptClass) {
 		auto *current = find_class(actual.symbol_id);
 		std::unordered_set<std::string> seen;
@@ -744,13 +752,6 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 						symbol.selection_range);
 					return;
 				}
-				if (symbol.declared_type.empty() || symbol.initializer.empty()) return;
-				auto expected = type_from_name(symbol.declared_type, &record);
-				std::vector<std::string> stack;
-				auto actual = infer_expression(symbol.initializer, *document, &record, symbol.range.start, stack);
-				if (!expected.known() || !actual.known() || expected.kind == TypeKind::Variant || actual.kind == TypeKind::Variant) return;
-				if (!is_assignable(expected, actual)) add("type-mismatch", "Cannot assign a value of type \"" + actual.display() +
-					"\" to \"" + symbol.declared_type + "\".", symbol.range);
 			};
 			inspect_symbol(member);
 			for (const auto &local : member.children) inspect_symbol(local);

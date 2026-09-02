@@ -1,4 +1,5 @@
 #include "core/text.hpp"
+#include "core/uri.hpp"
 #include "core/workspace.hpp"
 
 #include <algorithm>
@@ -66,6 +67,15 @@ int main() {
 	auto byte = position_to_byte(unicode, {0, 3});
 	expect(byte == 5, "UTF-16 position converts surrogate pair");
 	expect(byte_to_position(unicode, byte) == Position{0, 3}, "byte converts back to UTF-16 position");
+	auto encoded_path = std::filesystem::path("/tmp/gdscript lsp/project.godot");
+	auto encoded_uri = file_uri_for_path(encoded_path);
+	expect(encoded_uri.find("gdscript%20lsp") != std::string::npos, "file URI percent-encodes spaces");
+	expect(path_for_file_uri(encoded_uri) == std::filesystem::absolute(encoded_path).lexically_normal(),
+		"file URI round trips to a path");
+	expect(path_for_file_uri("file://localhost/tmp/project.godot") == std::filesystem::path("/tmp/project.godot"),
+		"localhost file URI is accepted");
+	expect(!path_for_file_uri("file://remote-host/tmp/project.godot"), "remote file URI authority is rejected");
+	expect(!path_for_file_uri("file:///tmp/bad%2"), "malformed percent escape is rejected");
 
 	auto changed = std::string(
 		"class_name ChildThing extends BaseThing\n\n"
@@ -161,6 +171,16 @@ int main() {
 	auto legacy_call_uri = legacy_api_workspace.uri_for_path(diagnostic_fixture / "legacy_api_call.gd");
 	expect(legacy_api_workspace.diagnostics(legacy_call_uri).empty(),
 		"missing legacy default/vararg metadata does not create native arity errors");
+
+	Workspace repository_workspace;
+	auto repository_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");
+	expect(repository_workspace.open(".", repository_api, &error), "repository workspace opens: " + error);
+	auto u_file_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_file.gd"));
+	auto u_file_diagnostics = repository_workspace.diagnostics(u_file_uri);
+	expect(u_file_diagnostics.size() == 1 && u_file_diagnostics.front().code == "return-type-mismatch" &&
+		u_file_diagnostics.front().range.start.line == 428,
+		"u_file.gd retains only its genuine line 429 return mismatch");
 
 	if (failures == 0) std::cout << "core tests passed\n";
 	return failures == 0 ? 0 : 1;

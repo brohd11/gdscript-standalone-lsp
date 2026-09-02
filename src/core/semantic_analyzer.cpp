@@ -128,6 +128,14 @@ private:
 			auto *base = workspace.find_class(current_class->base_class_id);
 			if (base) return {{TypeKind::ScriptClass, base->symbol.name, base->symbol.id, true}, {}, true, false};
 		}
+		if (name == "new" && current_class) {
+			Value result{{TypeKind::Callable, "Callable"}, {}, true, true};
+			auto *constructor = workspace.find_member(*current_class, "_init");
+			if (constructor) result.signatures.push_back(script_signature(*constructor));
+			else result.signatures.push_back({});
+			for (auto &signature : result.signatures) signature.return_type = current_class->symbol.id;
+			return result;
+		}
 		if (current_class) {
 			if (auto *member = workspace.find_member(*current_class, name)) return symbol_value(*member, position);
 			auto native = workspace.native_base(*current_class);
@@ -161,6 +169,9 @@ private:
 		}
 		if (workspace.native_api_.is_global_enum(name)) {
 			return {{TypeKind::Enum, std::string(name), "global:" + std::string(name), false}, {}, true, false};
+		}
+		if (auto enumeration = workspace.native_api_.global_enum_for_value(name)) {
+			return {{TypeKind::Enum, *enumeration, "global:" + *enumeration, false}, {}, true, false};
 		}
 		if (workspace.native_api_.has_global_symbol(name) || name == "PI" || name == "TAU" || name == "INF" || name == "NAN") {
 			return {{TypeKind::Builtin, "float"}, {}, true, false};
@@ -514,6 +525,19 @@ private:
 		scopes.back()[text(document, *name_node)] = {type, {}, true, false};
 	}
 
+	void check_declared_assignment(const SyntaxNode &node, const Value &initializer) {
+		auto *type_node = field(node, "type");
+		if (!type_node) return;
+		auto declared = text(document, *type_node);
+		if (declared.empty() || declared == ":=") return;
+		auto expected = workspace.type_from_name(declared, current_class);
+		if (!expected.known() || !initializer.type.known() || initializer.type.kind == TypeKind::Variant) return;
+		if (!workspace.is_assignable(expected, initializer.type)) {
+			add("type-mismatch", "Cannot assign a value of type \"" + initializer.type.display() +
+				"\" to \"" + declared + "\".", node.range);
+		}
+	}
+
 	void analyze_block(const SyntaxNode &block, const ResolvedType &expected_return) {
 		for (const auto &statement : block.children) analyze_statement(statement, expected_return);
 	}
@@ -532,6 +556,7 @@ private:
 			node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
 			Value initializer;
 			if (auto *value = field(node, "value")) initializer = evaluate(*value);
+			check_declared_assignment(node, initializer);
 			bind_local(node, initializer);
 			return;
 		}
@@ -646,9 +671,13 @@ private:
 				node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
 				auto *saved = current_class;
 				current_class = document.class_at(node.range.start);
-				if (auto *value = field(node, "value")) evaluate(*value);
+				Value initializer;
+				if (auto *value = field(node, "value")) initializer = evaluate(*value);
+				check_declared_assignment(node, initializer);
 				ResolvedType property_type;
-				if (auto *type_node = field(node, "type")) property_type = workspace.type_from_name(text(document, *type_node), current_class);
+				if (auto *type_node = field(node, "type"); type_node && text(document, *type_node) != ":=") {
+					property_type = workspace.type_from_name(text(document, *type_node), current_class);
+				}
 				std::function<void(const SyntaxNode &)> accessors = [&](const SyntaxNode &candidate) {
 					if (candidate.kind == "set_body") analyze_accessor(candidate, {TypeKind::Void, "void"});
 					else if (candidate.kind == "get_body") analyze_accessor(candidate, property_type);

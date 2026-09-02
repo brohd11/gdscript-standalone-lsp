@@ -5,10 +5,12 @@ This repository contains an experimental Godot 4.6 GDScript semantic core and LS
 ```sh
 make deps
 make
-build/gdscript-lsp --project /path/to/project
+build/gdscript-lsp
 ```
 
-The server communicates over standard input/output using LSP 3.17. It implements incremental document synchronization, completion, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType` request.
+The server communicates over standard input/output using LSP 3.17. An editor should launch it without project arguments; the server selects and indexes the Godot project from `workspaceFolders` or `rootUri` during the standard `initialize` request. `--project /path/to/project` remains available for fixed-root integrations. One server process serves one Godot project.
+
+It implements incremental document synchronization, completion, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType` request.
 
 Native Godot APIs are read from, in priority order:
 
