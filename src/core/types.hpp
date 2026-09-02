@@ -103,6 +103,7 @@ struct CompletionItem {
 	std::string documentation;
 	SymbolKind kind = SymbolKind::Variable;
 	std::string insert_text;
+	std::string filter_text;
 };
 
 struct Location {

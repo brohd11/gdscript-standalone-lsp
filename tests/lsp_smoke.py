@@ -73,8 +73,11 @@ completion = read_packet(process.stdout)
 resolved = read_packet(process.stdout)
 shutdown = read_packet(process.stdout)
 assert initialize["result"]["capabilities"]["positionEncoding"] == "utf-16"
-labels = {item["label"] for item in completion["result"]["items"]}
-assert {"own", "count", "label", "reference_method"} <= labels
+completion_items = {item["filterText"]: item for item in completion["result"]["items"]}
+assert {"own", "count", "label", "reference_method"} <= completion_items.keys()
+assert completion_items["label"]["label"] == "label()"
+assert completion_items["label"]["insertText"] == "label()"
+assert completion_items["label"]["detail"] == ""
 assert resolved["result"]["kind"] == "script_class"
 assert resolved["result"]["name"] == "ChildThing"
 assert shutdown["result"] is None
@@ -107,8 +110,8 @@ process.stdin.flush()
 read_packet(process.stdout)
 native_completion = read_packet(process.stdout)
 read_packet(process.stdout)
-native_labels = {item["label"] for item in native_completion["result"]["items"]}
-assert {"queue_free", "print_tree"} <= native_labels
+native_items = {item["filterText"]: item for item in native_completion["result"]["items"]}
+assert {"queue_free", "print_tree"} <= native_items.keys()
 assert process.wait(timeout=5) == 0
 
 # Diagnostics are available through the LSP 3.17 pull request and are also
@@ -195,17 +198,65 @@ process.stdin.write(
 )
 process.stdin.flush()
 clearing_push = None
-while True:
+fixed_pull = None
+while clearing_push is None or fixed_pull is None:
     message = read_packet(process.stdout)
     if message.get("method") == "textDocument/publishDiagnostics" and message["params"]["uri"] == diagnostic_uri:
         clearing_push = message
     if message.get("id") == 4:
         fixed_pull = message
-        break
 assert clearing_push is not None
 assert clearing_push["params"]["version"] == 4
 assert clearing_push["params"]["diagnostics"] == []
 assert fixed_pull["result"]["items"] == []
+
+# A buffer flush immediately followed by completion must not sit behind the
+# project-wide diagnostic pass. The edited document may publish first, but
+# other documents are deliberately deferred until the idle background scan.
+process.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": diagnostic_uri, "version": 5},
+                "contentChanges": [{"text": fixed_source}],
+            },
+        }
+    )
+)
+process.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": diagnostic_uri}, "position": {"line": 2, "character": 3}},
+        }
+    )
+)
+process.stdin.flush()
+foreign_diagnostic_before_completion = False
+while True:
+    message = read_packet(process.stdout)
+    if message.get("method") == "textDocument/publishDiagnostics":
+        foreign_diagnostic_before_completion |= message["params"]["uri"] != diagnostic_uri
+    if message.get("id") == 40:
+        assert message["result"]["items"]
+        builtin = {item["filterText"]: item for item in message["result"]["items"]}["is_instance_of"]
+        assert builtin["label"] == "is_instance_of(\u2026)"
+        assert builtin["insertText"] == "is_instance_of("
+        break
+assert not foreign_diagnostic_before_completion
+
+background_cross_file_diagnostic = None
+while background_cross_file_diagnostic is None:
+    message = read_packet(process.stdout)
+    if (
+        message.get("method") == "textDocument/publishDiagnostics"
+        and message["params"]["uri"] != diagnostic_uri
+    ):
+        background_cross_file_diagnostic = message
 
 for request in [
     {"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": {}},
@@ -213,7 +264,10 @@ for request in [
 ]:
     process.stdin.write(packet(request))
 process.stdin.flush()
-shutdown = read_packet(process.stdout)
+while True:
+    shutdown = read_packet(process.stdout)
+    if shutdown.get("id") == 5:
+        break
 assert shutdown["id"] == 5 and shutdown["result"] is None
 assert process.wait(timeout=5) == 0
 

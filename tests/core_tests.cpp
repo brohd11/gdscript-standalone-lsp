@@ -24,7 +24,16 @@ void expect(bool condition, const std::string &message) {
 }
 
 bool has_item(const std::vector<CompletionItem> &items, const std::string &name) {
-	return std::any_of(items.begin(), items.end(), [&](const auto &item) { return item.label == name; });
+	return std::any_of(items.begin(), items.end(), [&](const auto &item) {
+		return (item.filter_text.empty() ? item.label : item.filter_text) == name;
+	});
+}
+
+const CompletionItem *find_item(const std::vector<CompletionItem> &items, const std::string &name) {
+	auto found = std::find_if(items.begin(), items.end(), [&](const auto &item) {
+		return (item.filter_text.empty() ? item.label : item.filter_text) == name;
+	});
+	return found == items.end() ? nullptr : &*found;
 }
 
 bool has_diagnostic(const std::vector<Diagnostic> &items, const std::string &code) {
@@ -189,6 +198,33 @@ int main() {
 	expect(semantic_valid_diagnostics.empty(),
 		"dynamic receivers, utilities, singletons, derived arguments, and complete returns are valid");
 
+	auto script_completion = diagnostic_workspace.completion(semantic_valid_uri, {28, 1});
+	auto *zero_argument_script = find_item(script_completion, "nullable_return");
+	expect(zero_argument_script && zero_argument_script->label == "nullable_return()" &&
+		zero_argument_script->insert_text == "nullable_return()" && zero_argument_script->detail.empty(),
+		"zero-argument script completion uses Godot's compact display and complete call insertion");
+	auto *argument_script = find_item(script_completion, "accepts_base");
+	expect(argument_script && argument_script->label == "accepts_base(\xe2\x80\xa6)" &&
+		argument_script->insert_text == "accepts_base(" && argument_script->filter_text == "accepts_base" &&
+		argument_script->detail.empty(),
+		"parameterized script completion displays an ellipsis and inserts a trailing opener");
+	auto *variadic_script = find_item(script_completion, "variadic");
+	expect(variadic_script && variadic_script->label == "variadic(\xe2\x80\xa6)" &&
+		variadic_script->insert_text == "variadic(", "variadic script completion is parameterized");
+
+	auto callable_completion = diagnostic_workspace.completion(semantic_valid_uri, {46, 20});
+	auto *variadic_native = find_item(callable_completion, "call");
+	expect(variadic_native && variadic_native->label == "call(\xe2\x80\xa6)" &&
+		variadic_native->insert_text == "call(", "variadic native completion is parameterized");
+	auto dictionary_completion = diagnostic_workspace.completion(semantic_valid_uri, {30, 6});
+	auto *zero_argument_native = find_item(dictionary_completion, "keys");
+	expect(zero_argument_native && zero_argument_native->label == "keys()" &&
+		zero_argument_native->insert_text == "keys()", "zero-argument native completion inserts a complete call");
+	auto array_completion = diagnostic_workspace.completion(semantic_valid_uri, {51, 16});
+	auto *argument_native = find_item(array_completion, "append_array");
+	expect(argument_native && argument_native->label == "append_array(\xe2\x80\xa6)" &&
+		argument_native->insert_text == "append_array(", "parameterized native completion inserts a trailing opener");
+
 	auto warning_fixture = std::filesystem::temp_directory_path() /
 		("gdscript-lsp-warning-fixture-" + std::to_string(
 			std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -334,6 +370,10 @@ int main() {
 	auto global_completion = repository_workspace.completion(u_node_uri, {28, 2});
 	expect(has_item(global_completion, "len") && has_item(global_completion, "char"),
 		"all modeled GDScript builtins are offered in completion");
+	auto *builtin_completion = find_item(global_completion, "is_instance_of");
+	expect(builtin_completion && builtin_completion->label == "is_instance_of(\xe2\x80\xa6)" &&
+		builtin_completion->filter_text == "is_instance_of" && builtin_completion->insert_text == "is_instance_of(",
+		"GDScript builtin completion uses compact display, bare filtering, and trailing-opener insertion");
 	auto dock_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/addon_lib/brohd/dock_manager/dock_manager.gd"));
 	auto dock_symbols = repository_workspace.document_symbols(dock_uri);

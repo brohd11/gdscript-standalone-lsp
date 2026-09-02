@@ -190,6 +190,7 @@ Dictionary GDScriptLanguageService::completion(const String &uri, int line, int 
 			value["documentation"] = to_godot(item.documentation);
 			value["kind"] = static_cast<int64_t>(item.kind);
 			value["insertText"] = to_godot(item.insert_text);
+			value["filterText"] = to_godot(item.filter_text);
 			items.push_back(value);
 		}
 	}

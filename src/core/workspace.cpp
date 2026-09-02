@@ -86,6 +86,39 @@ std::optional<std::string> completion_receiver(std::string_view prefix) {
 	return std::string(receiver);
 }
 
+bool callable_kind(SymbolKind kind) {
+	return kind == SymbolKind::Method || kind == SymbolKind::Function || kind == SymbolKind::Constructor;
+}
+
+CompletionItem completion_item(std::string name, std::string detail, std::string documentation,
+		SymbolKind kind, bool has_arguments = false) {
+	CompletionItem result;
+	result.filter_text = name;
+	result.documentation = std::move(documentation);
+	result.kind = kind;
+	if (callable_kind(kind)) {
+		result.label = name + (has_arguments ? "(\xe2\x80\xa6)" : "()");
+		result.insert_text = name + (has_arguments ? "(" : "()");
+	} else {
+		result.label = name;
+		result.detail = std::move(detail);
+		result.insert_text = std::move(name);
+	}
+	return result;
+}
+
+CompletionItem completion_item(const Symbol &symbol) {
+	auto has_arguments = std::any_of(symbol.children.begin(), symbol.children.end(),
+		[](const Symbol &child) { return child.is_parameter; });
+	return completion_item(symbol.name, symbol.detail, symbol.documentation, symbol.kind, has_arguments);
+}
+
+CompletionItem completion_item(const NativeMember &member) {
+	auto has_arguments = member.signature &&
+		(!member.signature->arguments.empty() || member.signature->is_vararg);
+	return completion_item(member.name, member.detail, member.documentation, member.kind, has_arguments);
+}
+
 std::string normalize_api_type(std::string value) {
 	if (value.starts_with("typedarray::")) return "Array[" + value.substr(12) + "]";
 	if (value.starts_with("enum::")) return value.substr(6);
@@ -862,7 +895,7 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 	std::set<std::string> names;
 	auto add_symbol = [&](const Symbol &symbol) {
 		if (!names.insert(symbol.name).second) return;
-		result.push_back({symbol.name, symbol.detail, symbol.documentation, symbol.kind, symbol.name});
+		result.push_back(completion_item(symbol));
 	};
 	if (auto receiver_text = completion_receiver(prefix)) {
 		std::vector<std::string> stack;
@@ -884,15 +917,18 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 				if (!base.empty()) {
 					for (auto *member : native_api_.members(base)) {
 						if (names.insert(member->name).second) {
-							result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
+							result.push_back(completion_item(*member));
 						}
 					}
 				}
 			}
-		} else if (receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin) {
-			for (auto *member : native_api_.members(receiver.name)) {
+		} else if (receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin ||
+				receiver.kind == TypeKind::Callable || receiver.kind == TypeKind::Signal) {
+			auto native_name = receiver.kind == TypeKind::Callable ? std::string("Callable") :
+				(receiver.kind == TypeKind::Signal ? std::string("Signal") : receiver.name);
+			for (auto *member : native_api_.members(native_name)) {
 				if (names.insert(member->name).second) {
-					result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
+					result.push_back(completion_item(*member));
 				}
 			}
 		} else if (receiver.kind == TypeKind::Enum) {
@@ -904,7 +940,7 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 			}
 			for (auto *member : native_api_.members("Dictionary")) {
 				if (names.insert(member->name).second) {
-					result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
+					result.push_back(completion_item(*member));
 				}
 			}
 		}
@@ -922,21 +958,21 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 			if (!base.empty()) {
 				for (auto *member : native_api_.members(base)) {
 					if (names.insert(member->name).second) {
-						result.push_back({member->name, member->detail, member->documentation, member->kind, member->name});
+						result.push_back(completion_item(*member));
 					}
 				}
 			}
 		}
 		for (const auto &[name, id] : global_classes_) {
 			(void)id;
-			if (names.insert(name).second) result.push_back({name, "class " + name, {}, SymbolKind::Class, name});
+			if (names.insert(name).second) result.push_back(completion_item(name, "class " + name, {}, SymbolKind::Class));
 		}
 		for (const auto &[name, path] : autoloads_) {
-			if (names.insert(name).second) result.push_back({name, "autoload " + path, {}, SymbolKind::Variable, name});
+			if (names.insert(name).second) result.push_back(completion_item(name, "autoload " + path, {}, SymbolKind::Variable));
 		}
 		for (const auto &function : gdscript_builtin_functions()) if (names.insert(std::string(function.name)).second) {
-			result.push_back({std::string(function.name), std::string(function.detail), {}, SymbolKind::Method,
-				std::string(function.name)});
+			result.push_back(completion_item(std::string(function.name), std::string(function.detail), {}, SymbolKind::Method,
+				!function.signature.arguments.empty() || function.signature.is_vararg));
 		}
 	}
 	std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) { return a.label < b.label; });

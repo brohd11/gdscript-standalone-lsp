@@ -5,11 +5,15 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -54,7 +58,8 @@ json completion_json(const CompletionItem &item) {
 		{"label", item.label},
 		{"kind", static_cast<int>(item.kind)},
 		{"detail", item.detail},
-		{"insertText", item.insert_text.empty() ? item.label : item.insert_text}
+		{"insertText", item.insert_text.empty() ? item.label : item.insert_text},
+		{"filterText", item.filter_text.empty() ? item.label : item.filter_text}
 	};
 	if (!item.documentation.empty()) result["documentation"] = {{"kind", "markdown"}, {"value", item.documentation}};
 	return result;
@@ -111,9 +116,122 @@ std::optional<json> read_message() {
 }
 
 void send(const json &message) {
+	static std::mutex output_mutex;
+	std::lock_guard lock(output_mutex);
 	auto body = message.dump();
 	std::cout << "Content-Length: " << body.size() << "\r\n\r\n" << body << std::flush;
 }
+
+class DiagnosticPublisher {
+public:
+	explicit DiagnosticPublisher(Workspace &workspace) : workspace_(workspace), worker_([this](std::stop_token stop) {
+		run(stop);
+	}) {}
+
+	~DiagnosticPublisher() { stop(); }
+
+	uint64_t begin_update() {
+		std::lock_guard lock(mutex_);
+		++generation_;
+		dirty_.clear();
+		full_pending_ = false;
+		condition_.notify_all();
+		return generation_;
+	}
+
+	void finish_update(uint64_t generation, const std::string &uri) {
+		std::lock_guard lock(mutex_);
+		if (generation != generation_) return;
+		dirty_.insert(uri);
+		full_pending_ = true;
+		last_change_ = std::chrono::steady_clock::now();
+		condition_.notify_all();
+	}
+
+	void schedule_full() {
+		std::lock_guard lock(mutex_);
+		++generation_;
+		dirty_.clear();
+		full_pending_ = true;
+		last_change_ = std::chrono::steady_clock::now();
+		condition_.notify_all();
+	}
+
+	void stop() {
+		if (!worker_.joinable()) return;
+		worker_.request_stop();
+		condition_.notify_all();
+		worker_.join();
+	}
+
+private:
+	static constexpr auto full_scan_delay_ = std::chrono::milliseconds(200);
+
+	bool publish(const std::string &uri, uint64_t generation, bool force, std::stop_token stop) {
+		json items = json::array();
+		for (const auto &diagnostic : workspace_.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
+		auto version = workspace_.document_version(uri);
+		auto cache_key = items.dump();
+
+		std::lock_guard lock(mutex_);
+		if (stop.stop_requested() || generation != generation_) return false;
+		auto previous = published_.find(uri);
+		if (!force && previous != published_.end() && previous->second == cache_key) return true;
+		published_[uri] = std::move(cache_key);
+		json params = {{"uri", uri}, {"diagnostics", std::move(items)}};
+		if (version >= 0) params["version"] = version;
+		send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", std::move(params)}});
+		return true;
+	}
+
+	void run(std::stop_token stop) {
+		while (!stop.stop_requested()) {
+			std::vector<std::string> dirty;
+			uint64_t generation = 0;
+			bool full_scan = false;
+			{
+				std::unique_lock lock(mutex_);
+				condition_.wait(lock, [&] {
+					return stop.stop_requested() || !dirty_.empty() || full_pending_;
+				});
+				if (stop.stop_requested()) return;
+				generation = generation_;
+				if (!dirty_.empty()) {
+					dirty.assign(dirty_.begin(), dirty_.end());
+					dirty_.clear();
+				} else {
+					auto deadline = last_change_ + full_scan_delay_;
+					if (condition_.wait_until(lock, deadline, [&] {
+						return stop.stop_requested() || generation_ != generation || !dirty_.empty();
+					})) continue;
+					full_pending_ = false;
+					full_scan = true;
+				}
+			}
+			if (!dirty.empty()) {
+				for (const auto &uri : dirty) {
+					if (!publish(uri, generation, true, stop)) break;
+				}
+				continue;
+			}
+			if (full_scan) {
+				for (const auto &uri : workspace_.document_uris()) {
+					if (!publish(uri, generation, false, stop)) break;
+				}
+			}
+		}
+	}
+
+	Workspace &workspace_;
+	std::mutex mutex_;
+	std::condition_variable condition_;
+	std::unordered_set<std::string> dirty_;
+	std::unordered_map<std::string, std::string> published_;
+	uint64_t generation_ = 0;
+	bool full_pending_ = false;
+	std::chrono::steady_clock::time_point last_change_ = std::chrono::steady_clock::now();
+	std::jthread worker_;
+};
 
 void respond(const json &id, json result) {
 	send({{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}});
@@ -274,22 +392,12 @@ int main(int argc, char **argv) {
 		}
 	}
 	Workspace workspace;
+	DiagnosticPublisher diagnostics(workspace);
 	std::string error;
 	std::unordered_map<std::string, std::string> buffers;
 	std::unordered_set<std::string> cancelled;
 	bool initialized = false;
 	bool shutdown = false;
-	auto publish_diagnostics = [&](const std::string &uri) {
-		json items = json::array();
-		for (const auto &diagnostic : workspace.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
-		json params = {{"uri", uri}, {"diagnostics", std::move(items)}};
-		auto version = workspace.document_version(uri);
-		if (version >= 0) params["version"] = version;
-		send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", std::move(params)}});
-	};
-	auto publish_all_diagnostics = [&] {
-		for (const auto &uri : workspace.document_uris()) publish_diagnostics(uri);
-	};
 	while (auto message = read_message()) {
 		if (!message->is_object() || !message->contains("method")) continue;
 		auto method = message->value("method", "");
@@ -332,35 +440,41 @@ int main(int argc, char **argv) {
 		} else if (!initialized) {
 			if (request) respond_error(id, -32002, "Server not initialized");
 		} else if (method == "initialized") {
-			publish_all_diagnostics();
+			diagnostics.schedule_full();
 		} else if (method == "shutdown") {
 			shutdown = true;
+			diagnostics.stop();
 			respond(id, nullptr);
 		} else if (method == "textDocument/didOpen") {
 			auto document = params["textDocument"];
 			auto uri = document.value("uri", "");
 			auto text = document.value("text", "");
 			buffers[uri] = text;
-			workspace.update_document(uri, std::move(text), document.value("version", -1), &error);
-			publish_all_diagnostics();
+			auto generation = diagnostics.begin_update();
+			if (workspace.update_document(uri, std::move(text), document.value("version", -1), &error)) {
+				diagnostics.finish_update(generation, uri);
+			}
 		} else if (method == "textDocument/didChange") {
 			auto document = params["textDocument"];
 			auto uri = document.value("uri", "");
 			if (!buffers.contains(uri)) buffers[uri] = "";
 			apply_content_changes(buffers[uri], params.value("contentChanges", json::array()));
-			workspace.update_document(uri, buffers[uri], document.value("version", -1), &error);
-			publish_all_diagnostics();
+			auto generation = diagnostics.begin_update();
+			if (workspace.update_document(uri, buffers[uri], document.value("version", -1), &error)) {
+				diagnostics.finish_update(generation, uri);
+			}
 		} else if (method == "textDocument/didClose") {
 			auto uri = params["textDocument"].value("uri", "");
 			buffers.erase(uri);
-			workspace.close_document(uri, &error);
-			publish_all_diagnostics();
+			auto generation = diagnostics.begin_update();
+			if (workspace.close_document(uri, &error)) diagnostics.finish_update(generation, uri);
 		} else if (method == "workspace/didChangeWatchedFiles") {
+			diagnostics.begin_update();
 			for (const auto &change : params.value("changes", json::array())) {
 				auto uri = change.value("uri", "");
 				if (!buffers.contains(uri)) workspace.refresh_file(uri, &error);
 			}
-			publish_all_diagnostics();
+			diagnostics.schedule_full();
 		} else if (method == "textDocument/completion") {
 			auto uri = params["textDocument"].value("uri", "");
 			auto items = workspace.completion(uri, parse_position(params["position"]));

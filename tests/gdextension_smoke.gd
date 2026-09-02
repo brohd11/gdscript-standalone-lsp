@@ -28,13 +28,19 @@ func _on_ready() -> void:
 	var uri := "file://" + ProjectSettings.globalize_path("res://tests/fixtures/basic/consumer.gd")
 	var completion: Dictionary = service.completion(uri, 6, 7)
 	var labels: Array[String] = []
+	var completion_by_name: Dictionary = {}
 	for item: Dictionary in completion.items:
-		labels.append(item.label)
+		labels.append(item.filterText)
+		completion_by_name[item.filterText] = item
 	for expected in ["own", "count", "label", "reference_method"]:
 		if expected not in labels:
 			push_error("missing completion: %s" % expected)
 			quit(1)
 			return
+	if completion_by_name.label.label != "label()" or completion_by_name.label.insertText != "label()":
+		push_error("unexpected callable completion: %s" % [completion_by_name.label])
+		quit(1)
+		return
 	var resolved: Dictionary = service.resolve_type(uri, 6, 4, "local")
 	if resolved.kind != "script_class" or resolved.name != "ChildThing":
 		push_error("unexpected resolved type: %s" % resolved)
