@@ -187,14 +187,14 @@ Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view so
 Symbol function_symbol(TSNode node, const std::string &uri, const std::string &owner_id, std::string_view source) {
 	Symbol symbol;
 	auto name_node = field(node, "name");
-	symbol.name = trim(node_text(name_node, source));
+	symbol.name = node_type(node) == "constructor_definition" ? "_init" : trim(node_text(name_node, source));
 	if (symbol.name.empty()) symbol.name = "<lambda>";
 	symbol.id = owner_id + "::" + symbol.name;
 	symbol.qualified_name = symbol.id;
 	symbol.uri = uri;
 	symbol.kind = symbol.name == "_init" ? SymbolKind::Constructor : SymbolKind::Method;
 	symbol.range = node_range(node, source);
-	symbol.selection_range = node_range(name_node, source);
+	symbol.selection_range = ts_node_is_null(name_node) ? symbol.range : node_range(name_node, source);
 	symbol.declared_type = trim(node_text(field(node, "return_type"), source));
 	symbol.is_static = has_named_child(node, "static_keyword");
 	symbol.detail = (symbol.is_static ? "static func " : "func ") + symbol.name + "(";

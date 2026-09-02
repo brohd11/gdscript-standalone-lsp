@@ -21,9 +21,9 @@ Native Godot APIs are read from, in priority order:
 
 A project-specific snapshot can include APIs contributed by its GDExtensions, so it takes precedence over the baseline. `make install DESTDIR=... PREFIX=...` installs both the executable and its bundled API.
 
-Run `make test` for core and JSON-RPC integration tests. The implementation recognizes `class_name`, path- and UID-based `extends`, inner classes, autoloads, typed and inferred locals, inherited script/native members, and unsaved overlays. Unsupported or ambiguous expressions degrade to `Variant`/unknown instead of consulting a running editor.
+Run `make test` for core and JSON-RPC integration tests. The implementation recognizes `class_name`, path- and UID-based `extends`, qualified script aliases, script resources versus their instances, inner classes, autoloads, typed containers and inferred locals, inherited script/native members, and unsaved overlays. Unsupported or ambiguous expressions degrade to `Variant`/unknown instead of consulting a running editor.
 
-Diagnostics cover tree-sitter syntax failures, duplicate members and global classes, unresolved or cyclic inheritance, unknown explicit types, incompatible typed initializers, source-ordered name resolution, statically known members and calls, argument arity/types, and typed return paths. Diagnostics are recalculated across the settled project graph after overlays or watched files change. Dynamic `Variant`, `Dictionary`, node-path, and otherwise unresolved expressions deliberately remain unchecked to avoid speculative errors.
+Diagnostics cover tree-sitter syntax failures, duplicate members and global classes, unresolved or cyclic inheritance, unknown explicit types, incompatible typed initializers, source-ordered name resolution, statically known members and calls, argument arity/types, and typed return paths. Unsafe property and method access follows `debug/gdscript/warnings/unsafe_property_access` and `unsafe_method_access` from `project.godot`, including Godot's disabled defaults and warn/error levels. Diagnostics are recalculated across the settled project graph after overlays or watched files change. Dynamic `Variant`, `Dictionary`, node-path, and otherwise unresolved expressions deliberately remain unchecked to avoid speculative errors.
 
 To compare stable rule categories with the real Godot 4.6 parser, run:
 
@@ -53,4 +53,4 @@ The adapter emits `workspace_ready`, `workspace_error`, `index_updated`, and `di
 - `src/gdextension`: thin godot-cpp wrapper over the same `Workspace` API.
 - `addons/gdscript_lsp/data`: reduced Godot 4.6 native class baseline.
 
-The index is deliberately multi-pass: all scripts are parsed first, global/path/UID class identities are registered next, then base edges are resolved and cycle-checked. Queries walk that settled graph, which removes the old parser's dependency on editor-created `GDScript` resources.
+The index is deliberately multi-pass: all scripts are parsed first, global/path/UID class identities are registered next, statically resolvable script constants and qualified aliases are linked, then base edges are settled and cycle-checked. Queries walk that completed graph, which removes the old parser's dependency on editor-created `GDScript` resources and file load order.

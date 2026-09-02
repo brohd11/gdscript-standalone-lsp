@@ -1,0 +1,2 @@
+- some issues with const inheritance - dock_manager.gd, UFile in the inner class
+- u_node.gd, has issues with global scope and object methods

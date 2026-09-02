@@ -23,6 +23,7 @@ func inspect(base: DiagnosticBase, dynamic: Variant, data: Dictionary) -> int:
 	missing_identifier
 	missing_function()
 	base.missing_member
+	"text".missing_member
 	base.base_value()
 	accepts()
 	accepts("wrong")

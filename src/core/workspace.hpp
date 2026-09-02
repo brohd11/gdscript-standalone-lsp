@@ -9,12 +9,19 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gdscript_lsp {
 
 class SemanticAnalyzer;
 class SemanticAnalyzerImpl;
+
+enum class WarningLevel : uint8_t {
+	Ignore = 0,
+	Warning = 1,
+	Error = 2,
+};
 
 struct HoverResult {
 	std::string markdown;
@@ -64,6 +71,10 @@ private:
 	std::unordered_map<std::string, std::string> autoloads_;
 	std::unordered_map<std::string, std::string> uid_paths_;
 	std::unordered_map<std::string, size_t> global_name_counts_;
+	std::unordered_map<std::string, std::string> symbol_owners_;
+	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
+	WarningLevel unsafe_property_access_ = WarningLevel::Ignore;
+	WarningLevel unsafe_method_access_ = WarningLevel::Ignore;
 
 	void rebuild_registry();
 	void read_project_settings();
@@ -74,6 +85,9 @@ private:
 	const ClassRecord *find_class(std::string_view id) const;
 	const Symbol *find_member(const ClassRecord &record, std::string_view name) const;
 	std::vector<const Symbol *> all_members(const ClassRecord &record) const;
+	ResolvedType resolve_static_reference(std::string expression, const ClassRecord *context,
+		std::unordered_set<std::string> &stack) const;
+	ResolvedType resolve_static_symbol(const Symbol &symbol, std::unordered_set<std::string> &stack) const;
 	std::string native_base(const ClassRecord &record) const;
 	ResolvedType type_from_name(std::string name, const ClassRecord *context) const;
 	ResolvedType type_of_symbol(const Symbol &symbol, const Document &document, Position position,

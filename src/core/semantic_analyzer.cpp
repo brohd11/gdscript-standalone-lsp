@@ -45,6 +45,28 @@ struct Value {
 
 using Scope = std::unordered_map<std::string, Value>;
 
+enum class MemberAccessKind {
+	Property,
+	Method,
+};
+
+const CallableSignature *gdscript_builtin_function(std::string_view name) {
+	static const std::unordered_map<std::string, CallableSignature> functions = {
+		{"is_instance_of", {"bool", {{"value", "Variant", false}, {"type", "Variant", false}}, false}},
+	};
+	auto found = functions.find(std::string(name));
+	return found == functions.end() ? nullptr : &found->second;
+}
+
+std::optional<std::string> string_literal_value(std::string value) {
+	value = trim(value);
+	if (value.starts_with('&')) value.erase(value.begin());
+	if (value.size() < 2 || (value.front() != '"' && value.front() != '\'') || value.back() != value.front()) {
+		return std::nullopt;
+	}
+	return value.substr(1, value.size() - 2);
+}
+
 } // namespace
 
 class SemanticAnalyzerImpl {
@@ -63,8 +85,9 @@ private:
 	std::vector<Scope> scopes;
 	std::vector<Diagnostic> diagnostics;
 
-	void add(std::string code, std::string message, Range range) {
-		diagnostics.emplace_back(std::move(code), std::move(message), range);
+	void add(std::string code, std::string message, Range range,
+			DiagnosticSeverity severity = DiagnosticSeverity::Error) {
+		diagnostics.emplace_back(std::move(code), std::move(message), range, severity);
 	}
 
 	CallableSignature script_signature(const Symbol &function) const {
@@ -154,6 +177,9 @@ private:
 		if (auto *utility = workspace.native_api_.find_utility_function(name)) {
 			return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
 		}
+		if (auto *builtin = gdscript_builtin_function(name)) {
+			return {{TypeKind::Callable, "Callable"}, {*builtin}, true, true};
+		}
 		if (name == "range") {
 			return {{TypeKind::Callable, "Callable"}, {
 				{"Array", {{"end", "int", false}}, false},
@@ -214,7 +240,8 @@ private:
 		return result;
 	}
 
-	Value member_value(const Value &receiver, std::string_view name, Range range) {
+	Value member_value(const Value &receiver, std::string_view name, Range range,
+			MemberAccessKind access = MemberAccessKind::Property) {
 		if (!receiver.resolved || !receiver.type.known() || receiver.type.kind == TypeKind::Variant ||
 			(receiver.type.kind == TypeKind::Builtin && receiver.type.name == "Dictionary")) return {};
 		if (name == "new" && !receiver.type.instance &&
@@ -237,7 +264,8 @@ private:
 		if (receiver.type.kind == TypeKind::ScriptClass) {
 			if (auto *record = workspace.find_class(receiver.type.symbol_id)) {
 				if (auto *member = workspace.find_member(*record, name)) return symbol_value(*member, range.start);
-				auto native = workspace.native_base(*record);
+				auto native = receiver.type.instance ? workspace.native_base(*record) :
+					(workspace.native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
 				if (!native.empty()) if (auto *member = workspace.native_api_.find_member(native, name)) return native_member_value(*member);
 			}
 		} else if (receiver.type.kind == TypeKind::NativeClass || receiver.type.kind == TypeKind::Builtin ||
@@ -262,6 +290,20 @@ private:
 					for (const auto &value : member.children) if (value.name == name) return symbol_value(value, range.start);
 				}
 			}
+		}
+		if (receiver.type.instance && (receiver.type.kind == TypeKind::ScriptClass ||
+				receiver.type.kind == TypeKind::NativeClass)) {
+			auto level = access == MemberAccessKind::Method ?
+				workspace.unsafe_method_access_ : workspace.unsafe_property_access_;
+			if (level != WarningLevel::Ignore) {
+				auto method = access == MemberAccessKind::Method;
+				add(method ? "unsafe-method-access" : "unsafe-property-access",
+					(method ? "Method \"" : "Property \"") + std::string(name) +
+					"\" is not present on the inferred type \"" + receiver.type.display() +
+					"\" (but may be present on a subtype).", range,
+					level == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
+			}
+			return {};
 		}
 		add("unknown-member", "Member \"" + std::string(name) + "\" does not exist on type \"" +
 			receiver.type.display() + "\".", range);
@@ -327,6 +369,55 @@ private:
 		return {result_type, {}, true, false};
 	}
 
+	Value binary_result(const SyntaxNode &node, Value left_value, Value right_value) const {
+		auto *left = field(node, "left");
+		auto *right = field(node, "right");
+		auto operation = left && right && right->start_byte >= left->end_byte ?
+			trim(std::string_view(document.source()).substr(left->end_byte, right->start_byte - left->end_byte)) : std::string{};
+		if (operation == "==" || operation == "!=" || operation == "<" || operation == "<=" ||
+				operation == ">" || operation == ">=" || operation == "is" || operation == "is not" ||
+				operation == "in" || operation == "not in") {
+			return {{TypeKind::Builtin, "bool"}, {}, true, false};
+		}
+		if (left_value.type.known() && right_value.type.known() && left_value.type.name == right_value.type.name) {
+			return left_value;
+		}
+		return {{TypeKind::Variant, "Variant"}, {}, true, false};
+	}
+
+	Value apply_attribute_parts(Value current, const SyntaxNode &node, size_t start) {
+		for (size_t index = start; index < node.children.size(); ++index) {
+			const auto &part = node.children[index];
+			if (part.kind == "identifier") {
+				current = member_value(current, text(document, part), part.range);
+			} else if (part.kind == "attribute_call") {
+				auto *identifier = first_identifier(part);
+				if (!identifier) return {};
+				auto receiver = current;
+				auto arguments = field(part, "arguments");
+				current = call_value(member_value(receiver, text(document, *identifier), identifier->range,
+					MemberAccessKind::Method), arguments, part.range);
+				if (receiver.type.kind == TypeKind::NativeClass && receiver.type.name == "Engine" &&
+						text(document, *identifier) == "get_singleton" && arguments &&
+						arguments->children.size() == 1) {
+					if (auto singleton_name = string_literal_value(text(document, arguments->children.front()))) {
+						if (auto singleton_type = workspace.native_api_.singleton_type(*singleton_name)) {
+							current = {{TypeKind::NativeClass, *singleton_type, "native:" + *singleton_type, true}, {}, true, false};
+						}
+					}
+				}
+			} else if (part.kind == "attribute_subscript") {
+				auto *identifier = first_identifier(part);
+				current = identifier ? member_value(current, text(document, *identifier), identifier->range) : Value{};
+				if (auto *arguments = field(part, "arguments")) {
+					for (const auto &child : arguments->children) evaluate(child);
+				}
+				current = {{TypeKind::Variant, "Variant"}, {}, true, false};
+			}
+		}
+		return current;
+	}
+
 	Value evaluate(const SyntaxNode &node, bool call_target = false) {
 		if (node.kind == "identifier" || node.kind == "name") return resolve_name(text(document, node), node.range.start, call_target, node.range);
 		if (node.kind == "integer") return {{TypeKind::Builtin, "int"}, {}, true, false};
@@ -357,14 +448,7 @@ private:
 			auto *right = field(node, "right");
 			auto left_value = left ? evaluate(*left) : Value{};
 			auto right_value = right ? evaluate(*right) : Value{};
-			auto source = text(document, node);
-			if (source.find(" == ") != std::string::npos || source.find(" != ") != std::string::npos ||
-				source.find(" < ") != std::string::npos || source.find(" > ") != std::string::npos ||
-				source.find(" is ") != std::string::npos || source.find(" in ") != std::string::npos) {
-				return {{TypeKind::Builtin, "bool"}, {}, true, false};
-			}
-			if (left_value.type.known() && right_value.type.known() && left_value.type.name == right_value.type.name) return left_value;
-			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+			return binary_result(node, std::move(left_value), std::move(right_value));
 		}
 		if (node.kind == "conditional_expression") {
 			if (auto *condition = field(node, "condition")) evaluate(*condition);
@@ -401,28 +485,22 @@ private:
 					current_class->base_class_id.substr(7), current_class->base_class_id, true}, {}, true, false};
 				else if (auto *record = workspace.find_class(current_class->base_class_id)) base = {{TypeKind::ScriptClass,
 					record->symbol.name, record->symbol.id, true}, {}, true, false};
-				callee = member_value(base, text(document, *identifier), identifier->range);
+				callee = member_value(base, text(document, *identifier), identifier->range, MemberAccessKind::Method);
 			}
 			return call_value(std::move(callee), field(node, "arguments"), node.range);
 		}
 		if (node.kind == "attribute") {
 			if (node.children.empty()) return {};
-			Value current = evaluate(node.children.front());
-			for (size_t index = 1; index < node.children.size(); ++index) {
-				const auto &part = node.children[index];
-				if (part.kind == "identifier") current = member_value(current, text(document, part), part.range);
-				else if (part.kind == "attribute_call") {
-					auto *identifier = first_identifier(part);
-					current = identifier ? call_value(member_value(current, text(document, *identifier), identifier->range),
-						field(part, "arguments"), part.range) : Value{};
-				} else if (part.kind == "attribute_subscript") {
-					auto *identifier = first_identifier(part);
-					current = identifier ? member_value(current, text(document, *identifier), identifier->range) : Value{};
-					if (auto *arguments = field(part, "arguments")) for (const auto &child : arguments->children) evaluate(child);
-					current = {{TypeKind::Variant, "Variant"}, {}, true, false};
-				}
+			if (node.children.front().kind == "binary_operator" && node.children.size() > 1) {
+				auto &binary = node.children.front();
+				auto *left = field(binary, "left");
+				auto *right = field(binary, "right");
+				auto left_value = left ? evaluate(*left) : Value{};
+				auto right_value = right ? evaluate(*right) : Value{};
+				right_value = apply_attribute_parts(std::move(right_value), node, 1);
+				return binary_result(binary, std::move(left_value), std::move(right_value));
 			}
-			return current;
+			return apply_attribute_parts(evaluate(node.children.front()), node, 1);
 		}
 		if (node.kind == "lambda") {
 			analyze_lambda(node);
@@ -456,7 +534,7 @@ private:
 					if (!type.known()) type = {TypeKind::Variant, "Variant"};
 					break;
 				}
-			} else if (auto *type_node = field(parameter, "type")) {
+			} else if (auto *type_node = field(parameter, "type"); type_node && text(document, *type_node) != ":=") {
 				type = workspace.type_from_name(text(document, *type_node), current_class);
 				if (!type.known()) {
 					add("unknown-type", "Could not find type \"" + text(document, *type_node) + "\" in the current scope.",

@@ -3,7 +3,9 @@
 #include "core/workspace.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -41,7 +43,7 @@ int main() {
 	Workspace workspace;
 	std::string error;
 	expect(workspace.open(fixture, fixture / "extension_api.json", &error), "workspace opens: " + error);
-	expect(workspace.stats().document_count == 6, "all fixture scripts indexed");
+	expect(workspace.stats().document_count == 10, "all fixture scripts indexed");
 	expect(workspace.native_api().version() == "4.6.3", "native API version loaded");
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
@@ -62,6 +64,23 @@ int main() {
 	expect(definitions.size() == 1 && definitions.front().uri.ends_with("/child.gd"), "global class definition resolves");
 	auto symbols = workspace.document_symbols(consumer_uri);
 	expect(!symbols.empty() && symbols.front().children.size() == 2, "document symbols include members");
+
+	auto alias_uri = workspace.uri_for_path(fixture / "alias_derived.gd");
+	expect(workspace.diagnostics(alias_uri).empty(),
+		"qualified script aliases provide inherited members, aliases, and enums");
+	auto alias_completion = workspace.completion(alias_uri, {5, 1});
+	expect(has_item(alias_completion, "inherited_alias_member") && has_item(alias_completion, "Imported") &&
+		has_item(alias_completion, "ExitCode"), "completion includes members inherited through a qualified alias");
+	auto namespace_uri = workspace.uri_for_path(fixture / "alias_namespace.gd");
+	expect(workspace.diagnostics(namespace_uri).empty(),
+		"physical inner classes and inner classes extending an outer alias resolve");
+	auto bridge_uri = workspace.uri_for_path(fixture / "alias_bridge.gd");
+	expect(workspace.update_document(bridge_uri, "const BaseAlias = preload(\"res://base.gd\")\n", 3, &error),
+		"script alias overlay accepted");
+	alias_completion = workspace.completion(alias_uri, {5, 1});
+	expect(has_item(alias_completion, "label") && !has_item(alias_completion, "inherited_alias_member"),
+		"changing an alias overlay rebuilds dependent inheritance");
+	expect(workspace.close_document(bridge_uri, &error), "script alias overlay closes");
 
 	auto unicode = std::string("a😀b\nvalue");
 	auto byte = position_to_byte(unicode, {0, 3});
@@ -115,8 +134,13 @@ int main() {
 		"duplicate diagnostic points to the first declaration");
 
 	auto unresolved_uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / "unresolved.gd");
-	expect(has_diagnostic(diagnostic_workspace.diagnostics(unresolved_uri), "unresolved-base"),
+	auto unresolved_diagnostics = diagnostic_workspace.diagnostics(unresolved_uri);
+	expect(has_diagnostic(unresolved_diagnostics, "unresolved-base"),
 		"unresolved base class is diagnosed");
+	expect(has_diagnostic(unresolved_diagnostics, "unknown-type") &&
+		has_diagnostic(unresolved_diagnostics, "undefined-function") &&
+		has_diagnostic(unresolved_diagnostics, "undefined-identifier"),
+		"an unresolved base does not suppress downstream semantic diagnostics");
 	for (const auto &name : {"cycle_a.gd", "cycle_b.gd"}) {
 		auto uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / name);
 		expect(has_diagnostic(diagnostic_workspace.diagnostics(uri), "inheritance-cycle"),
@@ -165,6 +189,92 @@ int main() {
 	expect(semantic_valid_diagnostics.empty(),
 		"dynamic receivers, utilities, singletons, derived arguments, and complete returns are valid");
 
+	auto warning_fixture = std::filesystem::temp_directory_path() /
+		("gdscript-lsp-warning-fixture-" + std::to_string(
+			std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::filesystem::create_directories(warning_fixture);
+	auto write_warning_settings = [&](const std::string &settings) {
+		std::ofstream stream(warning_fixture / "project.godot");
+		stream << settings;
+	};
+	write_warning_settings(
+		"[application]\nconfig/name=\"Warning fixture\"\n\n"
+		"[debug]\n"
+		"gdscript/warnings/unsafe_property_access=1\n"
+		"gdscript/warnings/unsafe_method_access=1\n");
+	{
+		std::ofstream stream(warning_fixture / "warnings.gd");
+		stream <<
+			"extends RefCounted\n\n"
+			"const SELF_SCRIPT = preload(\"res://warnings.gd\")\n"
+			"var typed_dictionary: Dictionary[String, Dictionary] = {}\n"
+			"var typed_array: Array[String] = []\n\n"
+			"func accepts_script(value: Script) -> void:\n\tprint(value)\n"
+			"func accepts_dictionary(value: Dictionary) -> void:\n\tprint(value)\n"
+			"func accepts_array(value: Array) -> void:\n\tprint(value)\n\n"
+			"func inspect(node: Node, singleton_name: String) -> void:\n"
+			"\taccepts_script(SELF_SCRIPT)\n"
+			"\ttyped_dictionary.clear()\n"
+			"\tvar dictionary_keys := typed_dictionary.keys()\n"
+			"\taccepts_dictionary(typed_dictionary)\n"
+			"\ttyped_array.append(\"value\")\n"
+			"\taccepts_array(typed_array)\n"
+			"\tnode.custom_property\n"
+			"\tnode.custom_method()\n"
+			"\t\"text\".custom_property\n"
+			"\tis_instance_of(node, Node)\n"
+			"\tis_instance_of(node)\n"
+			"\tEngine.get_singleton(\"EditorInterface\").get_edited_scene_root()\n"
+			"\tEngine.get_singleton(singleton_name).custom_method()\n";
+	}
+	Workspace warning_workspace;
+	expect(warning_workspace.open(warning_fixture,
+		std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json"), &error),
+		"warning fixture opens: " + error);
+	auto warning_uri = warning_workspace.uri_for_path(warning_fixture / "warnings.gd");
+	auto warning_diagnostics = warning_workspace.diagnostics(warning_uri);
+	if (diagnostic_count(warning_diagnostics, "unsafe-property-access") != 1 ||
+			diagnostic_count(warning_diagnostics, "unsafe-method-access") != 2) {
+		for (const auto &item : warning_diagnostics) {
+			std::cerr << "warning fixture: " << item.code << ": " << item.message << '\n';
+		}
+	}
+	expect(diagnostic_count(warning_diagnostics, "unsafe-property-access") == 1 &&
+		diagnostic_count(warning_diagnostics, "unsafe-method-access") == 2,
+		"unsafe instance members use distinct property and method diagnostics");
+	expect(std::all_of(warning_diagnostics.begin(), warning_diagnostics.end(), [](const Diagnostic &diagnostic) {
+		return !diagnostic.code.starts_with("unsafe-") || diagnostic.severity == DiagnosticSeverity::Warning;
+	}), "project warning level 1 maps to LSP warning severity");
+	expect(diagnostic_count(warning_diagnostics, "unknown-member") == 1,
+		"missing builtin members remain hard errors");
+	expect(diagnostic_count(warning_diagnostics, "argument-count") == 1,
+		"GDScript-specific is_instance_of signature validates arity");
+	expect(diagnostic_count(warning_diagnostics, "argument-type") == 0,
+		"script resources and typed containers are accepted by their native base types");
+	expect(warning_diagnostics.size() == 5, "typed containers and script resources add no unexpected diagnostics");
+	auto typed_array_type = warning_workspace.resolve_type(warning_uri, {15, 1}, "typed_array");
+	expect(typed_array_type.kind == TypeKind::Builtin && typed_array_type.name == "Array" &&
+		typed_array_type.arguments.size() == 1 && typed_array_type.display() == "Array[String]",
+		"typed arrays retain arguments while using the Array base type");
+
+	write_warning_settings(
+		"[debug]\n"
+		"gdscript/warnings/unsafe_property_access=2\n"
+		"gdscript/warnings/unsafe_method_access=2\n");
+	auto project_uri = warning_workspace.uri_for_path(warning_fixture / "project.godot");
+	expect(warning_workspace.refresh_file(project_uri, &error), "project warning settings refresh");
+	warning_diagnostics = warning_workspace.diagnostics(warning_uri);
+	expect(std::all_of(warning_diagnostics.begin(), warning_diagnostics.end(), [](const Diagnostic &diagnostic) {
+		return !diagnostic.code.starts_with("unsafe-") || diagnostic.severity == DiagnosticSeverity::Error;
+	}), "project warning level 2 maps to LSP error severity");
+	write_warning_settings("[application]\nconfig/name=\"Warning fixture\"\n");
+	expect(warning_workspace.refresh_file(project_uri, &error), "removed warning settings refresh");
+	warning_diagnostics = warning_workspace.diagnostics(warning_uri);
+	expect(diagnostic_count(warning_diagnostics, "unsafe-property-access") == 0 &&
+		diagnostic_count(warning_diagnostics, "unsafe-method-access") == 0,
+		"missing unsafe settings restore Godot's disabled defaults");
+	std::filesystem::remove_all(warning_fixture);
+
 	Workspace legacy_api_workspace;
 	auto legacy_api = std::filesystem::weakly_canonical("tests/fixtures/legacy_extension_api.json");
 	expect(legacy_api_workspace.open(diagnostic_fixture, legacy_api, &error), "legacy reduced API workspace opens: " + error);
@@ -181,6 +291,61 @@ int main() {
 	expect(u_file_diagnostics.size() == 1 && u_file_diagnostics.front().code == "return-type-mismatch" &&
 		u_file_diagnostics.front().range.start.line == 428,
 		"u_file.gd retains only its genuine line 429 return mismatch");
+	auto command_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/editor_console/src/default_commands/script/script.gd"));
+	expect(repository_workspace.diagnostics(command_uri).empty(),
+		"qualified EditorConsoleSingleton base resolves with all inherited command members");
+	for (const auto &path : {
+			"addons/addon_lib/brohd/popup_wrapper/popup_wrapper.gd",
+			"addons/addon_lib/brohd/alib_runtime/utils/u_node.gd",
+			"addons/addon_lib/brohd/dock_manager/dock_manager.gd",
+			"addons/code_completions/src/class/editor_code_completion_singleton.gd",
+			"addons/addon_lib/brohd/alib_runtime/utils/gdscript/parser/utils/code_edit_parser.gd",
+			"addons/syntax_plus/src/highlighter/highlighter_logic.gd"}) {
+		auto uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(path));
+		auto reported = repository_workspace.diagnostics(uri);
+		if (!reported.empty()) {
+			for (const auto &item : reported) {
+				std::cerr << path << ": " << item.code << ": " << item.message << '\n';
+			}
+		}
+		expect(reported.empty(), std::string(path) + " has no false diagnostics");
+	}
+	auto popup_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/addon_lib/brohd/popup_wrapper/popup_wrapper.gd"));
+	auto position_type = repository_workspace.resolve_type(popup_uri, {413, 30}, "ItemParams.Position.TOP");
+	expect(position_type.kind == TypeKind::Builtin && position_type.name == "int",
+		"qualified nested enum values resolve as integers");
+	auto u_node_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_node.gd"));
+	expect(has_item(repository_workspace.completion(u_node_uri, {28, 2}), "is_instance_of"),
+		"GDScript-specific builtins are offered in completion");
+	auto dock_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/addon_lib/brohd/dock_manager/dock_manager.gd"));
+	auto dock_symbols = repository_workspace.document_symbols(dock_uri);
+	bool found_dock_constructor = false;
+	for (const auto &record : dock_symbols) for (const auto &member : record.children) {
+		if (member.kind == SymbolKind::Constructor && member.name == "_init" && member.children.size() == 5) {
+			found_dock_constructor = true;
+		}
+	}
+	expect(found_dock_constructor, "multiline _init is indexed with its complete constructor signature");
+	auto code_completion_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/code_completions/src/class/editor_code_completion_singleton.gd"));
+	auto script_resource_type = repository_workspace.resolve_type(code_completion_uri, {53, 30}, "PE_STRIP_CAST_SCRIPT");
+	expect(script_resource_type.kind == TypeKind::ScriptClass && !script_resource_type.instance,
+		"preloaded scripts remain class objects when used as values");
+	auto code_edit_uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(
+		"addons/addon_lib/brohd/alib_runtime/utils/gdscript/parser/utils/code_edit_parser.gd"));
+	auto path_constant_type = repository_workspace.resolve_type(code_edit_uri, {407, 42}, "TREE_SITTER_MANAGER_PATH");
+	expect(path_constant_type.kind == TypeKind::Builtin && path_constant_type.name == "String",
+		"quoted resource-path constants remain strings");
+	auto highlighter_uri = repository_workspace.uri_for_path(
+		std::filesystem::weakly_canonical("addons/syntax_plus/src/highlighter/highlighter_logic.gd"));
+	auto typed_dictionary_type = repository_workspace.resolve_type(highlighter_uri, {134, 20}, "func_arg_highlighters");
+	expect(typed_dictionary_type.kind == TypeKind::Builtin && typed_dictionary_type.name == "Dictionary" &&
+		typed_dictionary_type.arguments.size() == 2 && typed_dictionary_type.display() == "Dictionary[String, Dictionary]",
+		"typed dictionaries retain arguments while using the Dictionary base type");
 
 	if (failures == 0) std::cout << "core tests passed\n";
 	return failures == 0 ? 0 : 1;
