@@ -1,3 +1,4 @@
+#include "core/gdscript_api.hpp"
 #include "core/text.hpp"
 #include "core/uri.hpp"
 #include "core/workspace.hpp"
@@ -59,6 +60,12 @@ size_t diagnostic_count(const std::vector<Diagnostic> &items, const std::string 
 		[&](const auto &item) { return item.code == code; }));
 }
 
+const Diagnostic *find_diagnostic(const std::vector<Diagnostic> &items, const std::string &code) {
+	auto found = std::find_if(items.begin(), items.end(),
+		[&](const auto &item) { return item.code == code; });
+	return found == items.end() ? nullptr : &*found;
+}
+
 } // namespace
 
 int main() {
@@ -66,7 +73,7 @@ int main() {
 	Workspace workspace;
 	std::string error;
 	expect(workspace.open(fixture, fixture / "extension_api.json", &error), "workspace opens: " + error);
-	expect(workspace.stats().document_count == 10, "all fixture scripts indexed");
+	expect(workspace.stats().document_count == 12, "all fixture scripts indexed");
 	expect(workspace.native_api().version() == "4.6.3", "native API version loaded");
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
@@ -127,6 +134,63 @@ int main() {
 	expect(child_type.kind == TypeKind::ScriptClass && child_type.name == "ChildThing", "constructor inference resolves script instance");
 	auto autoload_type = workspace.resolve_type(consumer_uri, {6, 4}, "FixtureGlobal");
 	expect(autoload_type.kind == TypeKind::ScriptClass && autoload_type.instance, "autoload resolves as script instance");
+	auto inferred_uri = workspace.uri_for_path(fixture / "return_inference.gd");
+	auto inferred_type = workspace.resolve_type(inferred_uri, {8, 2}, "item");
+	expect(inferred_type.kind == TypeKind::ScriptClass && inferred_type.name == "Product" && inferred_type.instance,
+		"ordinary variable receives a non-binding hint from a qualified script call return type");
+	auto inferred_completion = workspace.completion(inferred_uri, {7, 6});
+	expect(has_item(inferred_completion, "product_member"),
+		"qualified script call return hint drives member completion");
+	auto alias_completion_hint = workspace.completion(inferred_uri, {10, 12});
+	expect(has_item(alias_completion_hint, "product_member"),
+		"static class alias call return hint drives member completion");
+	auto direct_call_completion = workspace.completion(inferred_uri, {11, 26});
+	expect(has_item(direct_call_completion, "product_member") && !has_item(direct_call_completion, "inspect"),
+		"completion recursively resolves a qualified call result without leaking current-script members");
+	auto nested_property_completion = workspace.completion(inferred_uri, {12, 36});
+	expect(has_item(nested_property_completion, "keys") && has_item(nested_property_completion, "size") &&
+		!has_item(nested_property_completion, "inspect"),
+		"completion recursively resolves a property on a qualified call result");
+	auto self_completion = workspace.completion(inferred_uri, {13, 6});
+	expect(has_item(self_completion, "inspect"), "resolved self member access retains current-script completion");
+	auto subscript_completion = workspace.completion(inferred_uri, {15, 13});
+	expect(has_item(subscript_completion, "product_member"),
+		"typed array subscript carries its element type into member completion");
+	auto parenthesized_completion = workspace.completion(inferred_uri, {16, 28});
+	expect(has_item(parenthesized_completion, "product_member"),
+		"parenthesized call chain carries its result into member completion");
+	auto multiline_completion = workspace.completion(inferred_uri, {18, 3});
+	expect(has_item(multiline_completion, "product_member"),
+		"multiline call chain carries its result into member completion");
+	auto inferred_hover = workspace.hover(inferred_uri, {8, 2});
+	expect(inferred_hover && inferred_hover->markdown.find("Inferred value type: `Product`") != std::string::npos,
+		"hover distinguishes an initializer type hint from a declared type");
+	expect(workspace.diagnostics(inferred_uri).empty(),
+		"an ordinary variable remains dynamically assignable after receiving an initializer hint");
+	std::ifstream chain_stream(fixture / "return_inference.gd");
+	std::string chain_source{std::istreambuf_iterator<char>(chain_stream), std::istreambuf_iterator<char>()};
+	auto chain_expression = std::string("Namespace.Factory.make().functions.keys()");
+	auto chain_offset = chain_source.find(chain_expression);
+	expect(chain_offset != std::string::npos, "recursive postfix completion fixture expression exists");
+	if (chain_offset != std::string::npos) chain_source.insert(chain_offset + chain_expression.size(), ".");
+	expect(workspace.update_document(inferred_uri, chain_source, 8, &error),
+		"recursive postfix completion overlay accepted");
+	auto repeated_call_completion = workspace.completion(inferred_uri, {12, 43});
+	expect(has_item(repeated_call_completion, "append_array") && !has_item(repeated_call_completion, "keys") &&
+		!has_item(repeated_call_completion, "inspect"),
+		"completion resolves calls and members repeatedly through the final Array value");
+	expect(workspace.close_document(inferred_uri, &error), "recursive postfix completion overlay closes");
+	const std::string unresolved_member_source =
+		"extends RefCounted\n\nfunc inspect() -> void:\n"
+		"\tins.missing\n\tins().missing\n\tins(.missing\n";
+	expect(workspace.update_document(inferred_uri, unresolved_member_source, 9, &error),
+		"unresolved member completion overlay accepted");
+	for (auto position : {Position{3, 5}, Position{4, 7}, Position{5, 6}}) {
+		auto unresolved_completion = workspace.completion(inferred_uri, position);
+		expect(unresolved_completion.empty(),
+			"unresolved or malformed member access does not fall back to unqualified completion");
+	}
+	expect(workspace.close_document(inferred_uri, &error), "unresolved member completion overlay closes");
 
 	auto definitions = workspace.definition(consumer_uri, {2, 15});
 	expect(definitions.size() == 1 && definitions.front().uri.ends_with("/child.gd"), "global class definition resolves");
@@ -220,6 +284,19 @@ int main() {
 	}
 	auto syntax_uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / "syntax_error.gd");
 	expect(has_diagnostic(diagnostic_workspace.diagnostics(syntax_uri), "syntax-error"), "syntax error is diagnosed");
+	auto reserved_uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / "reserved_identifier.gd");
+	auto reserved_diagnostics = diagnostic_workspace.diagnostics(reserved_uri);
+	auto *reserved = find_diagnostic(reserved_diagnostics, "syntax-error");
+	expect(reserved && reserved->message == R"(Expected variable name after "var".)" &&
+		reserved->range.start == Position{3, 5} && reserved->range.end == Position{3, 10},
+		"reserved variable name receives Godot's parser message on the identifier range");
+	expect(gdscript_reserved_words().size() == 44 && is_gdscript_reserved_identifier("class") &&
+		is_gdscript_reserved_identifier("while") && is_gdscript_reserved_identifier("true") &&
+		is_gdscript_reserved_identifier("PI") && is_gdscript_reserved_identifier("_") &&
+		!is_gdscript_reserved_identifier("String") && !is_gdscript_reserved_identifier("Node") &&
+		!is_gdscript_reserved_identifier("print") && !is_gdscript_reserved_identifier("get") &&
+		!is_gdscript_reserved_identifier("set"),
+		"reserved identifiers match Godot 4.6 without banning shadowable API names");
 	auto valid_uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / "valid_child.gd");
 	expect(diagnostic_workspace.diagnostics(valid_uri).empty(),
 		"assigning a derived script instance to its base type is valid");
@@ -382,6 +459,57 @@ int main() {
 	auto legacy_call_uri = legacy_api_workspace.uri_for_path(diagnostic_fixture / "legacy_api_call.gd");
 	expect(legacy_api_workspace.diagnostics(legacy_call_uri).empty(),
 		"missing legacy default/vararg metadata does not create native arity errors");
+
+	// This table mirrors tests_plugin/brohd/gdscript_parser/inference_test.gd.
+	// It intentionally lives in an isolated native fixture so the copied plugin
+	// tests can keep their original res:// layout and UIDs untouched.
+	Workspace inference_workspace;
+	auto inference_fixture = std::filesystem::weakly_canonical("tests/fixtures/inference");
+	auto inference_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");
+	expect(inference_workspace.open(inference_fixture, inference_api, &error),
+		"inference corpus workspace opens: " + error);
+	auto inference_uri = inference_workspace.uri_for_path(inference_fixture / "scenario.gd");
+	struct InferenceCase { const char *name; uint32_t line; const char *expected; };
+	const std::vector<InferenceCase> inference_cases = {
+		{"explicit_int", 6, "int"}, {"dict_key", 7, "String"}, {"dict_value", 9, "int"},
+		{"color_val", 11, "Color"}, {"chan_by_str", 12, "float"}, {"chan_by_idx", 13, "float"},
+		{"html_str", 14, "String"}, {"first_char", 15, "String"}, {"lambda_ref", 16, "Callable"},
+		{"awaited_signal_arg", 17, "int"}, {"signal_ref", 18, "Signal"}, {"awaited_ref", 19, "int"},
+		{"builtin_callable", 20, "Callable"}, {"builtin_ret", 21, "String"},
+		{"callable_chain_bool", 22, "bool"}, {"returned_callable", 23, "Callable"},
+		{"called_signal", 24, "Signal"}, {"awaited_return", 25, "String"},
+		{"returned_callable2", 26, "Callable"}, {"called_signal2", 27, "Signal"},
+		{"awaited_bool", 28, "bool"}, {"sig_connections", 29, "Array"},
+		{"typed_conns", 30, "Array[String]"}, {"made_obj", 31, "InferenceSupport"},
+		{"obj_string", 32, "String"}, {"static_string", 33, "String"},
+		{"subscript_new", 34, "InferenceSupport"}, {"subscript_string", 35, "String"},
+		{"made_signal", 36, "Signal"}, {"awaited_made", 37, "bool"},
+		{"got_variant", 39, "String"}, {"menu_callable", 40, "Callable"},
+		{"menu", 41, "PopupMenu"}, {"awaited_text", 42, "String"},
+		{"typed_map", 43, "Dictionary[InferenceEnum, Nested]"},
+		{"map_key", 44, "InferenceEnum"}, {"map_val", 45, "Nested"},
+		{"packed", 47, "PackedByteArray"}, {"byte", 48, "int"},
+		{"preload_const", 50, "Color"}, {"cast_obj", 51, "InferenceEnum"},
+		{"nested_callable", 52, "Callable"}, {"nested_call_ret", 53, "ProcessMode"},
+		{"nested_direct", 54, "ProcessMode"}, {"node_ins", 55, "Node"}, {"node_static", 56, "Node"},
+		{"pre_shadow_callable", 57, "Callable"}, {"shadowed_func", 58, "String"},
+		{"post_shadow", 59, "String"}, {"direct_terminal", 80, "Color"},
+	};
+	for (const auto &test : inference_cases) {
+		auto type = inference_workspace.resolve_type(inference_uri, {test.line, 2}, test.name);
+		expect(type.display() == test.expected,
+			std::string("inference corpus ") + test.name + " expected " + test.expected + " got " + type.display());
+	}
+	auto node_instance = inference_workspace.resolve_type(inference_uri, {55, 2}, "node_ins");
+	auto node_type_value = inference_workspace.resolve_type(inference_uri, {56, 2}, "node_static");
+	expect(node_instance.instance && !node_type_value.instance,
+		"inference corpus distinguishes constructed native instances from bare type values");
+	auto inference_diagnostics = inference_workspace.diagnostics(inference_uri);
+	if (!inference_diagnostics.empty()) for (const auto &item : inference_diagnostics) {
+		std::cerr << "inference scenario:" << item.range.start.line + 1 << ':' << item.range.start.character + 1 << ": "
+			<< item.code << ": " << item.message << '\n';
+	}
+	expect(inference_diagnostics.empty(), "inference corpus introduces no semantic false positives");
 
 	Workspace repository_workspace;
 	auto repository_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");

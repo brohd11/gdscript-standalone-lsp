@@ -95,6 +95,12 @@ private:
 	ResolvedType type_for_resource_path(std::string resource_path, const ClassRecord *context) const;
 	ResolvedType type_of_symbol(const Symbol &symbol, const Document &document, Position position,
 		std::vector<std::string> &stack) const;
+	ResolvedType hinted_type_of_symbol(const Symbol &symbol, const Document &document, Position position,
+		std::vector<std::string> &stack) const;
+	ResolvedType callable_return_type(const Symbol &symbol, const Document &document,
+		std::vector<std::string> &stack) const;
+	ResolvedType member_value_type(const ResolvedType &receiver, std::string_view member_name,
+		const Document &document, Position position, std::vector<std::string> &stack) const;
 	ResolvedType infer_expression(std::string expression, const Document &document, const ClassRecord *context,
 		Position position, std::vector<std::string> &stack) const;
 	bool is_assignable(const ResolvedType &expected, const ResolvedType &actual) const;

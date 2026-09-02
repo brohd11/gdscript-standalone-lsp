@@ -21,4 +21,24 @@ const GDScriptBuiltinFunction *find_gdscript_builtin_function(std::string_view n
 	return found == functions.end() ? nullptr : &*found;
 }
 
+const std::vector<std::string_view> &gdscript_reserved_words() {
+	// Godot 4.6: GDScriptLanguage::get_reserved_words(). The standalone "_"
+	// token is also rejected wherever the parser requires an IDENTIFIER.
+	static const std::vector<std::string_view> words = {
+		"break", "continue", "elif", "else", "for", "if", "match", "pass", "return", "when", "while",
+		"class", "class_name", "const", "enum", "extends", "func", "namespace", "signal", "static", "trait", "var",
+		"await", "breakpoint", "self", "super", "yield",
+		"and", "as", "in", "is", "not", "or",
+		"false", "null", "true",
+		"INF", "NAN", "PI", "TAU",
+		"assert", "preload", "void", "_",
+	};
+	return words;
+}
+
+bool is_gdscript_reserved_identifier(std::string_view name) {
+	const auto &words = gdscript_reserved_words();
+	return std::find(words.begin(), words.end(), name) != words.end();
+}
+
 } // namespace gdscript_lsp

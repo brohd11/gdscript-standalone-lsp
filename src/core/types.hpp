@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -56,6 +57,12 @@ struct ResolvedType {
 	std::string symbol_id;
 	bool instance = true;
 	std::vector<ResolvedType> arguments;
+	// Semantic metadata used while evaluating expressions. It is deliberately
+	// omitted from the LSP/GDExtension wire representation: callers still see a
+	// plain Callable or Signal, while the resolver can continue through call()
+	// and await expressions without losing the value's provenance.
+	std::shared_ptr<ResolvedType> callable_return;
+	std::vector<ResolvedType> signal_arguments;
 	ResolvedType() = default;
 	ResolvedType(TypeKind p_kind, std::string p_name, std::string p_symbol_id = {},
 		bool p_instance = true, std::vector<ResolvedType> p_arguments = {});
@@ -82,6 +89,7 @@ struct Symbol {
 	bool is_parameter = false;
 	bool is_variadic = false;
 	bool is_inferred = false;
+	bool is_iteration_variable = false;
 	std::vector<Symbol> children;
 };
 
@@ -134,6 +142,11 @@ struct Diagnostic {
 	Diagnostic() = default;
 	Diagnostic(std::string p_code, std::string p_message, Range p_range,
 		DiagnosticSeverity p_severity = DiagnosticSeverity::Error);
+};
+
+struct ParseIssue {
+	Range range;
+	std::string message = "Syntax error.";
 };
 
 std::string_view type_kind_name(TypeKind kind);

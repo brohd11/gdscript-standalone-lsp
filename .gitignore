@@ -15,3 +15,5 @@ __pycache__/
 /addons/editor_console/
 /addons/syntax_plus/
 /addons/zyx_popup_wrapper/
+
+/tests_plugin/

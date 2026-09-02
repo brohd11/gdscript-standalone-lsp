@@ -7,6 +7,8 @@ from Godot Engine 4.6 metadata. Diagnostic messages and rule behavior are tested
 for compatibility with Godot's GDScript analyzer. The strict built-in conversion
 table is a clean C++ adaptation of `Variant::can_convert_strict` from
 `core/variant/variant.cpp`, as used by `modules/gdscript/gdscript_analyzer.cpp`.
+The reserved identifier table and context-specific declaration errors follow
+Godot 4.6's `GDScriptLanguage::get_reserved_words()` and GDScript parser.
 No Godot parser or analyzer source file is compiled into this project.
 
 Godot Engine is available under the MIT license:

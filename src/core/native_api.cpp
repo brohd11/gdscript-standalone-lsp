@@ -64,6 +64,12 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 			member.detail = method_detail(target.name, entry);
 			member.signature = callable_signature(entry, arity_known);
 		}
+		else if (kind == SymbolKind::Event) {
+			// Signals are not callable, but their argument list is the payload
+			// yielded by await. Reuse the signature storage for that metadata.
+			member.signature = callable_signature(entry, arity_known);
+			member.detail = member.name + ": Signal";
+		}
 		else member.detail = member.name + ": " + member.type;
 		auto member_name = member.name;
 		if (!target.members.contains(member_name)) target.member_order.push_back(member_name);

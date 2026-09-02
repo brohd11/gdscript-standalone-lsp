@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -41,49 +42,233 @@ bool is_float_literal(std::string_view value) {
 	return digits(value.substr(0, dot)) && digits(value.substr(dot + 1));
 }
 
-std::optional<std::pair<std::string, std::string>> member_call(std::string_view value) {
-	auto dot = value.find('.');
-	if (dot == std::string_view::npos) return std::nullopt;
-	auto receiver = value.substr(0, dot);
-	if (!is_identifier(receiver)) return std::nullopt;
-	size_t end = dot + 1;
-	while (end < value.size() && (std::isalnum(static_cast<unsigned char>(value[end])) || value[end] == '_')) ++end;
-	auto member = value.substr(dot + 1, end - dot - 1);
-	if (!is_identifier(member)) return std::nullopt;
-	while (end < value.size() && std::isspace(static_cast<unsigned char>(value[end]))) ++end;
-	if (end >= value.size() || value[end] != '(') return std::nullopt;
-	return std::pair{std::string(receiver), std::string(member)};
-}
+struct TerminalCall {
+	std::string callee;
+	std::string arguments;
+};
 
-std::optional<std::string> function_call(std::string_view value) {
-	size_t end = 0;
-	while (end < value.size() && (std::isalnum(static_cast<unsigned char>(value[end])) || value[end] == '_')) ++end;
-	auto function = value.substr(0, end);
-	if (!is_identifier(function)) return std::nullopt;
-	while (end < value.size() && std::isspace(static_cast<unsigned char>(value[end]))) ++end;
-	if (end >= value.size() || value[end] != '(') return std::nullopt;
-	return std::string(function);
-}
-
-std::optional<std::string> completion_receiver(std::string_view prefix) {
-	auto dot = prefix.rfind('.');
-	if (dot == std::string_view::npos) return std::nullopt;
-	for (size_t i = dot + 1; i < prefix.size(); ++i) {
-		if (!std::isalnum(static_cast<unsigned char>(prefix[i])) && prefix[i] != '_') return std::nullopt;
+std::optional<TerminalCall> terminal_call(std::string value) {
+	value = trim(value);
+	if (value.empty() || value.back() != ')') return std::nullopt;
+	size_t call_open = std::string::npos;
+	int depth = 0;
+	char quote = 0;
+	bool escaped = false;
+	for (size_t index = value.size(); index-- > 0;) {
+		auto character = value[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') {
+			quote = character;
+			continue;
+		}
+		if (character == ')') {
+			++depth;
+		} else if (character == '(') {
+			if (depth == 0) return std::nullopt;
+			if (--depth == 0) {
+				call_open = index;
+				break;
+			}
+		}
 	}
+	if (quote || depth != 0 || call_open == std::string::npos) return std::nullopt;
+	auto callee = trim(std::string_view(value).substr(0, call_open));
+	if (callee.empty()) return std::nullopt;
+	return TerminalCall{std::move(callee),
+		trim(std::string_view(value).substr(call_open + 1, value.size() - call_open - 2))};
+}
+
+std::optional<std::pair<std::string, std::string>> trailing_member(std::string_view expression) {
+	int parentheses = 0;
+	int brackets = 0;
+	int braces = 0;
+	char quote = 0;
+	bool escaped = false;
+	size_t separator = std::string_view::npos;
+	for (size_t index = 0; index < expression.size(); ++index) {
+		auto character = expression[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') {
+			quote = character;
+			continue;
+		}
+		if (character == '(') ++parentheses;
+		else if (character == ')') --parentheses;
+		else if (character == '[') ++brackets;
+		else if (character == ']') --brackets;
+		else if (character == '{') ++braces;
+		else if (character == '}') --braces;
+		else if (character == '.' && parentheses == 0 && brackets == 0 && braces == 0) separator = index;
+		if (parentheses < 0 || brackets < 0 || braces < 0) return std::nullopt;
+	}
+	if (quote || parentheses || brackets || braces || separator == std::string_view::npos) return std::nullopt;
+	auto receiver = trim(expression.substr(0, separator));
+	auto member = trim(expression.substr(separator + 1));
+	if (receiver.empty() || !is_identifier(member)) return std::nullopt;
+	return std::pair{std::move(receiver), std::move(member)};
+}
+
+std::optional<std::pair<std::string, std::string>> terminal_subscript(std::string_view expression) {
+	if (expression.empty() || expression.back() != ']') return std::nullopt;
+	int depth = 0;
+	char quote = 0;
+	bool escaped = false;
+	size_t open = std::string_view::npos;
+	for (size_t index = 0; index < expression.size(); ++index) {
+		auto character = expression[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') {
+			quote = character;
+			continue;
+		}
+		if (character == '[') {
+			if (depth++ == 0) open = index;
+		} else if (character == ']') {
+			if (depth == 0 || --depth < 0) return std::nullopt;
+			if (depth == 0 && index + 1 != expression.size()) return std::nullopt;
+		}
+	}
+	if (quote || depth || open == std::string_view::npos) return std::nullopt;
+	auto receiver = trim(expression.substr(0, open));
+	auto key = trim(expression.substr(open + 1, expression.size() - open - 2));
+	return receiver.empty() ? std::nullopt :
+		std::optional<std::pair<std::string, std::string>>(std::pair{std::move(receiver), std::move(key)});
+}
+
+std::optional<std::string> quoted_value(std::string value) {
+	value = trim(value);
+	if (value.starts_with('&')) value.erase(value.begin());
+	if (value.size() < 2 || (value.front() != '\'' && value.front() != '"') || value.back() != value.front()) {
+		return std::nullopt;
+	}
+	return value.substr(1, value.size() - 2);
+}
+
+ResolvedType iterable_value_type(const ResolvedType &type) {
+	if (type.kind != TypeKind::Builtin) return {TypeKind::Variant, "Variant"};
+	if (type.name == "Dictionary" && !type.arguments.empty()) return type.arguments.front();
+	if (type.name == "Array" && !type.arguments.empty()) return type.arguments.front();
+	if (type.name == "String") return {TypeKind::Builtin, "String"};
+	static const std::unordered_map<std::string, std::string> packed_elements = {
+		{"PackedByteArray", "int"}, {"PackedInt32Array", "int"}, {"PackedInt64Array", "int"},
+		{"PackedFloat32Array", "float"}, {"PackedFloat64Array", "float"},
+		{"PackedStringArray", "String"}, {"PackedVector2Array", "Vector2"},
+		{"PackedVector3Array", "Vector3"}, {"PackedVector4Array", "Vector4"},
+		{"PackedColorArray", "Color"},
+	};
+	if (auto found = packed_elements.find(type.name); found != packed_elements.end()) {
+		return {TypeKind::Builtin, found->second};
+	}
+	return {TypeKind::Variant, "Variant"};
+}
+
+struct CompletionContext {
+	bool member_access = false;
+	std::optional<std::string> receiver;
+};
+
+CompletionContext completion_context(std::string_view source, size_t offset) {
+	offset = std::min(offset, source.size());
+	auto before_cursor = source.substr(0, offset);
+	auto dot = before_cursor.rfind('.');
+	if (dot == std::string_view::npos) return {};
+	for (size_t index = dot + 1; index < before_cursor.size(); ++index) {
+		if (!std::isalnum(static_cast<unsigned char>(before_cursor[index])) && before_cursor[index] != '_') return {};
+	}
+
+	std::vector<bool> string_character(dot + 1, false);
+	char quote = 0;
+	bool triple_quote = false;
+	bool escaped = false;
+	bool comment = false;
+	for (size_t index = 0; index <= dot; ++index) {
+		auto character = before_cursor[index];
+		if (comment) {
+			if (character == '\n') comment = false;
+			continue;
+		}
+		if (quote) {
+			string_character[index] = true;
+			if (triple_quote) {
+				if (character == quote && index + 2 <= dot && before_cursor[index + 1] == quote &&
+						before_cursor[index + 2] == quote) {
+					string_character[index + 1] = true;
+					string_character[index + 2] = true;
+					index += 2;
+					quote = 0;
+					triple_quote = false;
+				}
+			} else if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+		} else if (character == '#') {
+			comment = true;
+		} else if (character == '\'' || character == '"') {
+			quote = character;
+			string_character[index] = true;
+			if (index + 2 <= dot && before_cursor[index + 1] == quote && before_cursor[index + 2] == quote) {
+				triple_quote = true;
+				string_character[index + 1] = true;
+				string_character[index + 2] = true;
+				index += 2;
+			}
+		}
+	}
+	if (quote || string_character[dot]) return {};
+
+	CompletionContext result;
+	result.member_access = true;
+	int parentheses = 0;
+	int brackets = 0;
+	int braces = 0;
 	size_t start = dot;
-	while (start > 0 && (std::isalnum(static_cast<unsigned char>(prefix[start - 1])) ||
-			prefix[start - 1] == '_' || prefix[start - 1] == '.')) --start;
-	auto receiver = prefix.substr(start, dot - start);
-	if (receiver.empty()) return std::nullopt;
-	for (size_t part_start = 0; part_start < receiver.size();) {
-		auto separator = receiver.find('.', part_start);
-		auto part = receiver.substr(part_start, separator == std::string_view::npos ? receiver.size() - part_start : separator - part_start);
-		if (!is_identifier(part)) return std::nullopt;
-		if (separator == std::string_view::npos) break;
-		part_start = separator + 1;
+	while (start > 0) {
+		auto index = start - 1;
+		auto character = before_cursor[index];
+		if (index < string_character.size() && string_character[index]) {
+			start = index;
+			continue;
+		}
+		if (character == ')') ++parentheses;
+		else if (character == ']') ++brackets;
+		else if (character == '}') ++braces;
+		else if (character == '(') {
+			if (parentheses == 0) break;
+			--parentheses;
+		} else if (character == '[') {
+			if (brackets == 0) break;
+			--brackets;
+		} else if (character == '{') {
+			if (braces == 0) break;
+			--braces;
+		} else if (parentheses == 0 && brackets == 0 && braces == 0 &&
+				(std::isspace(static_cast<unsigned char>(character)) || character == '=' || character == ',' ||
+				 character == ':' || character == ';' || character == '+' || character == '-' || character == '*' ||
+				 character == '/' || character == '%' || character == '!' || character == '<' || character == '>' ||
+				 character == '&' || character == '|' || character == '^')) {
+			break;
+		}
+		start = index;
 	}
-	return std::string(receiver);
+	if (parentheses || brackets || braces) return result;
+	auto receiver = trim(before_cursor.substr(start, dot - start));
+	if (!receiver.empty()) result.receiver = std::move(receiver);
+	return result;
 }
 
 bool callable_kind(SymbolKind kind) {
@@ -750,15 +935,197 @@ ResolvedType Workspace::type_of_symbol(const Symbol &symbol, const Document &doc
 	if (!declaration_document) declaration_document = &document;
 	auto *context = declaration_document->class_at(symbol.range.start);
 	ResolvedType result;
-	if (!symbol.declared_type.empty()) result = type_from_name(symbol.declared_type, context);
-	else if (symbol.kind == SymbolKind::Event) result = {TypeKind::Signal, "Signal"};
+	if (symbol.kind == SymbolKind::Event) {
+		result = {TypeKind::Signal, "Signal", symbol.id};
+		for (const auto &parameter : symbol.children) if (parameter.is_parameter) {
+			auto argument = type_from_name(parameter.declared_type, context);
+			result.signal_arguments.push_back(argument.known() ? argument : ResolvedType{TypeKind::Variant, "Variant"});
+		}
+	}
+	else if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Function ||
+			symbol.kind == SymbolKind::Constructor) {
+		result = {TypeKind::Callable, "Callable", symbol.id};
+		result.callable_return = std::make_shared<ResolvedType>(callable_return_type(symbol, *declaration_document, stack));
+	}
+	else if (!symbol.declared_type.empty()) result = type_from_name(symbol.declared_type, context);
 	else if (symbol.kind == SymbolKind::Enum) result = {TypeKind::Enum, symbol.name, symbol.id};
 	else if (!symbol.initializer.empty() && (symbol.kind == SymbolKind::Constant || symbol.is_inferred)) result = infer_expression(symbol.initializer, *declaration_document, context,
 		declaration_document == &document ? position : symbol.range.start, stack);
-	else if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Constructor) result = {TypeKind::Variant, "Variant"};
+	else if (symbol.is_iteration_variable && !symbol.initializer.empty()) {
+		result = iterable_value_type(infer_expression(symbol.initializer, *declaration_document, context,
+			symbol.range.start, stack));
+	}
 	else result = {TypeKind::Variant, "Variant"};
 	stack.pop_back();
 	return result;
+}
+
+ResolvedType Workspace::hinted_type_of_symbol(const Symbol &symbol, const Document &document, Position position,
+		std::vector<std::string> &stack) const {
+	auto result = type_of_symbol(symbol, document, position, stack);
+	if (result.kind != TypeKind::Variant || !symbol.declared_type.empty() || symbol.initializer.empty() ||
+			symbol.is_parameter || (symbol.kind != SymbolKind::Variable && symbol.kind != SymbolKind::Constant)) {
+		return result;
+	}
+	if (std::find(stack.begin(), stack.end(), symbol.id) != stack.end()) return result;
+	stack.push_back(symbol.id);
+	auto *declaration_document = find_document(symbol.uri);
+	if (!declaration_document) declaration_document = &document;
+	auto hint = infer_expression(symbol.initializer, *declaration_document,
+		declaration_document->class_at(symbol.range.start), symbol.range.start, stack);
+	stack.pop_back();
+	return hint.known() && hint.kind != TypeKind::Void ? hint : result;
+}
+
+ResolvedType Workspace::callable_return_type(const Symbol &symbol, const Document &document,
+		std::vector<std::string> &stack) const {
+	if (symbol.kind == SymbolKind::Constructor) {
+		auto owner = symbol_owners_.find(symbol.id);
+		if (owner != symbol_owners_.end()) {
+			if (auto *record = find_class(owner->second)) {
+				return {TypeKind::ScriptClass, record->symbol.name, record->symbol.id, true};
+			}
+		}
+	}
+	if (symbol.kind != SymbolKind::Method && symbol.kind != SymbolKind::Function) {
+		return {TypeKind::Variant, "Variant"};
+	}
+	auto *declaration_document = find_document(symbol.uri);
+	if (!declaration_document) declaration_document = &document;
+	auto *declaration_context = declaration_document->class_at(symbol.range.start);
+	if (!symbol.declared_type.empty()) {
+		auto result = type_from_name(symbol.declared_type, declaration_context);
+		return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+	}
+
+	auto marker = "return:" + symbol.id;
+	if (std::find(stack.begin(), stack.end(), marker) != stack.end()) return {TypeKind::Variant, "Variant"};
+	stack.push_back(marker);
+	const SyntaxNode *function = nullptr;
+	std::function<void(const SyntaxNode &)> find_function = [&](const SyntaxNode &node) {
+		if (function) return;
+		if ((node.kind == "function_definition" || node.kind == "constructor_definition") &&
+				node.range.start == symbol.range.start) {
+			function = &node;
+			return;
+		}
+		for (const auto &child : node.children) find_function(child);
+	};
+	find_function(declaration_document->syntax_root());
+	std::vector<ResolvedType> returns;
+	if (function) {
+		std::function<void(const SyntaxNode &, bool)> collect_returns = [&](const SyntaxNode &node, bool root) {
+			if (!root && (node.kind == "function_definition" || node.kind == "constructor_definition" ||
+					node.kind == "lambda" || node.kind == "class_definition")) return;
+			if (node.kind == "return_statement") {
+				if (!node.children.empty()) {
+					auto expression = std::string(declaration_document->text(node.children.front()));
+					returns.push_back(infer_expression(std::move(expression), *declaration_document,
+						declaration_context, node.children.front().range.start, stack));
+				}
+				return;
+			}
+			for (const auto &child : node.children) collect_returns(child, false);
+		};
+		collect_returns(*function, true);
+	}
+	stack.pop_back();
+	if (returns.empty()) return {TypeKind::Variant, "Variant"};
+	auto result = returns.front();
+	for (size_t index = 1; index < returns.size(); ++index) {
+		const auto &other = returns[index];
+		if (result.kind != other.kind || result.name != other.name || result.symbol_id != other.symbol_id ||
+				result.instance != other.instance || result.arguments.size() != other.arguments.size()) {
+			return {TypeKind::Variant, "Variant"};
+		}
+	}
+	return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+}
+
+ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::string_view member_name,
+		const Document &document, Position position, std::vector<std::string> &stack) const {
+	if (!receiver.instance && member_name == "new" && (receiver.kind == TypeKind::ScriptClass ||
+			receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin)) {
+		auto result = ResolvedType{TypeKind::Callable, "Callable", receiver.symbol_id + "::new"};
+		auto instance = receiver;
+		instance.instance = true;
+		result.callable_return = std::make_shared<ResolvedType>(std::move(instance));
+		return result;
+	}
+	if (receiver.kind == TypeKind::ScriptClass) {
+		if (auto *record = find_class(receiver.symbol_id)) {
+			if (auto *member = find_member(*record, member_name)) {
+				if (!receiver.instance) {
+					auto type_level = member->is_static || member->kind == SymbolKind::Constant ||
+						member->kind == SymbolKind::Enum || member->kind == SymbolKind::Class;
+					if (!type_level) return ResolvedType::unknown(std::string(member_name));
+					if (member->kind == SymbolKind::Constant || member->kind == SymbolKind::Enum ||
+							member->kind == SymbolKind::Class) {
+						std::unordered_set<std::string> static_stack;
+						auto resolved = resolve_static_symbol(*member, static_stack);
+						if (resolved.known()) return resolved;
+					}
+				}
+				if (member->kind == SymbolKind::Method || member->kind == SymbolKind::Function ||
+						member->kind == SymbolKind::Constructor) {
+					auto result = ResolvedType{TypeKind::Callable, "Callable", member->id};
+					result.callable_return = std::make_shared<ResolvedType>(callable_return_type(*member, document, stack));
+					return result;
+				}
+				return hinted_type_of_symbol(*member, document, position, stack);
+			}
+			auto native = receiver.instance ? native_base(*record) :
+				(native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
+			if (!native.empty()) {
+				if (auto *member = native_api_.find_member(native, member_name)) {
+					if (member->kind == SymbolKind::Event) {
+						ResolvedType result{TypeKind::Signal, "Signal", "native:" + member->owner + "::" + member->name};
+						if (member->signature) for (const auto &argument : member->signature->arguments) {
+							auto type = type_from_name(argument.type, record);
+							result.signal_arguments.push_back(type.known() ? type : ResolvedType{TypeKind::Variant, "Variant"});
+						}
+						return result;
+					}
+					if (member->signature) {
+						ResolvedType result{TypeKind::Callable, "Callable", "native:" + member->owner + "::" + member->name};
+						auto returned = type_from_name(member->signature->return_type, record);
+						result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
+						return result;
+					}
+					auto result = type_from_name(member->type, record);
+					return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+				}
+			}
+		}
+	} else if (receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin ||
+			receiver.kind == TypeKind::Callable || receiver.kind == TypeKind::Signal) {
+		if (receiver.kind == TypeKind::Callable && (member_name == "bind" || member_name == "bindv" ||
+				member_name == "unbind")) return receiver;
+		if (auto *member = native_api_.find_member(receiver.name, member_name)) {
+			if (member->kind == SymbolKind::Enum) {
+				return {TypeKind::Enum, member->name, "nativeenum:" + member->owner + "." + member->name, false};
+			}
+			if (member->kind == SymbolKind::Event) {
+				ResolvedType result{TypeKind::Signal, "Signal", "native:" + member->owner + "::" + member->name};
+				if (member->signature) for (const auto &argument : member->signature->arguments) {
+					auto type = type_from_name(argument.type, nullptr);
+					result.signal_arguments.push_back(type.known() ? type : ResolvedType{TypeKind::Variant, "Variant"});
+				}
+				return result;
+			}
+			if (member->signature) {
+				ResolvedType result{TypeKind::Callable, "Callable", "native:" + member->owner + "::" + member->name};
+				auto returned = type_from_name(member->signature->return_type, nullptr);
+				result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
+				return result;
+			}
+			auto result = type_from_name(member->type, nullptr);
+			return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+		}
+	} else if (receiver.kind == TypeKind::Enum) {
+		return {TypeKind::Builtin, "int"};
+	}
+	return ResolvedType::unknown(std::string(member_name));
 }
 
 ResolvedType Workspace::infer_expression(std::string expression, const Document &document, const ClassRecord *context,
@@ -768,6 +1135,19 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 		expression = trim(expression.substr(1, expression.size() - 2));
 	}
 	if (expression.empty()) return ResolvedType::unknown();
+	if (expression.starts_with("await ")) {
+		auto awaited = infer_expression(expression.substr(6), document, context, position, stack);
+		if (awaited.kind != TypeKind::Signal || awaited.signal_arguments.empty()) {
+			return {TypeKind::Variant, "Variant"};
+		}
+		if (awaited.signal_arguments.size() == 1) return awaited.signal_arguments.front();
+		ResolvedType result{TypeKind::Builtin, "Array"};
+		result.arguments.push_back({TypeKind::Variant, "Variant"});
+		return result;
+	}
+	if (expression.starts_with("func") && expression.find('(') != std::string::npos) {
+		return {TypeKind::Callable, "Callable", "lambda"};
+	}
 	if (expression == "true" || expression == "false") return {TypeKind::Builtin, "bool"};
 	if (expression == "null") return {TypeKind::Variant, "Variant"};
 	if (expression.front() == '"' || expression.front() == '\'' || expression.starts_with("&\"") || expression.starts_with("&'")) {
@@ -777,6 +1157,15 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 	if (expression.front() == '{') return {TypeKind::Builtin, "Dictionary"};
 	if (is_integer_literal(expression)) return {TypeKind::Builtin, "int"};
 	if (is_float_literal(expression)) return {TypeKind::Builtin, "float"};
+	if (expression == "self" && context) return {TypeKind::ScriptClass, context->symbol.name, context->symbol.id, true};
+	if (expression == "super" && context && !context->base_class_id.empty()) {
+		if (context->base_class_id.starts_with("native:")) {
+			return {TypeKind::NativeClass, context->base_class_id.substr(7), context->base_class_id, true};
+		}
+		if (auto *base = find_class(context->base_class_id)) {
+			return {TypeKind::ScriptClass, base->symbol.name, base->symbol.id, true};
+		}
+	}
 	for (auto loader : {std::string_view("preload"), std::string_view("load")}) {
 		if (!expression.starts_with(loader)) continue;
 		auto call = trim(std::string_view(expression).substr(loader.size()));
@@ -786,35 +1175,95 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 		auto id = resolve_path_reference(argument, document.resource_path());
 		return type_for_resource_path(id, context);
 	}
-	if (auto call = member_call(expression); call && call->second == "new") {
-		auto result = type_from_name(call->first, context);
-		if (!result.known()) {
-			if (auto *symbol = resolve_identifier(document, context, call->first, position)) {
-				result = type_of_symbol(*symbol, document, position, stack);
+	if (auto callee = terminal_call(expression)) {
+		if (auto member = trailing_member(callee->callee)) {
+			auto &receiver_text = member->first;
+			auto &member_name = member->second;
+			auto receiver = infer_expression(receiver_text, document, context, position, stack);
+			if (!receiver.known()) {
+				std::unordered_set<std::string> static_stack;
+				receiver = resolve_static_reference(receiver_text, context, static_stack);
 			}
-		}
-		result.instance = true;
-		return result;
-	}
-	if (auto call = member_call(expression)) {
-		ResolvedType receiver;
-		if (auto *symbol = resolve_identifier(document, context, call->first, position)) {
-			receiver = type_of_symbol(*symbol, document, position, stack);
+			if (receiver.kind == TypeKind::Builtin && receiver.name == "Dictionary") {
+				if (member_name == "keys") {
+					ResolvedType result{TypeKind::Builtin, "Array"};
+					if (!receiver.arguments.empty()) result.arguments.push_back(receiver.arguments.front());
+					return result;
+				}
+				if (member_name == "values") {
+					ResolvedType result{TypeKind::Builtin, "Array"};
+					if (receiver.arguments.size() > 1) result.arguments.push_back(receiver.arguments[1]);
+					return result;
+				}
+				if (member_name == "get" && receiver.arguments.size() > 1) return receiver.arguments[1];
+			}
+			if (receiver.kind == TypeKind::Callable && (member_name == "call" || member_name == "callv")) {
+				return receiver.callable_return ? *receiver.callable_return : ResolvedType{TypeKind::Variant, "Variant"};
+			}
+			if (receiver.kind == TypeKind::Callable && (member_name == "bind" || member_name == "bindv" ||
+					member_name == "unbind")) return receiver;
+			if ((receiver.kind == TypeKind::ScriptClass || receiver.kind == TypeKind::NativeClass) &&
+					member_name == "get") {
+				if (auto property_name = quoted_value(callee->arguments)) {
+					auto property = member_value_type(receiver, *property_name, document, position, stack);
+					if (property.known()) return property;
+				}
+			}
+			auto callable = member_value_type(receiver, member_name, document, position, stack);
+			if (callable.kind == TypeKind::Callable && callable.callable_return) return *callable.callable_return;
+			return callable.kind == TypeKind::Callable ? ResolvedType{TypeKind::Variant, "Variant"} :
+				ResolvedType::unknown(member_name);
 		} else {
-			receiver = type_from_name(call->first, context);
-		}
-		if (receiver.kind == TypeKind::ScriptClass) {
-			if (auto *record = find_class(receiver.symbol_id)) {
-				if (auto *member = find_member(*record, call->second)) return type_of_symbol(*member, document, position, stack);
+			if (callee->callee == "new" && context) {
+				return {TypeKind::ScriptClass, context->symbol.name, context->symbol.id, true};
 			}
-		} else if (receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin) {
-			if (auto *member = native_api_.find_member(receiver.name, call->second)) return type_from_name(member->type, context);
+			if (auto *signature = native_api_.find_utility_function(callee->callee)) {
+				auto result = type_from_name(signature->return_type, context);
+				return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+			}
+			if (auto *function = find_gdscript_builtin_function(callee->callee)) {
+				auto result = type_from_name(function->signature.return_type, context);
+				return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
+			}
+			auto callable = infer_expression(callee->callee, document, context, position, stack);
+			if (callable.kind == TypeKind::Callable) {
+				return callable.callable_return ? *callable.callable_return : ResolvedType{TypeKind::Variant, "Variant"};
+			}
+			auto constructed = type_from_name(callee->callee, context);
+			if (constructed.kind == TypeKind::Builtin || constructed.kind == TypeKind::NativeClass ||
+					constructed.kind == TypeKind::ScriptClass) {
+				constructed.instance = true;
+				return constructed;
+			}
 		}
 	}
-	if (auto call = function_call(expression)) {
-		if (auto *symbol = resolve_identifier(document, context, *call, position)) {
-			return type_of_symbol(*symbol, document, position, stack);
+	if (auto member = trailing_member(expression)) {
+		auto receiver = infer_expression(member->first, document, context, position, stack);
+		if (!receiver.known()) {
+			std::unordered_set<std::string> static_stack;
+			receiver = resolve_static_reference(member->first, context, static_stack);
 		}
+		return member_value_type(receiver, member->second, document, position, stack);
+	}
+	if (auto subscript = terminal_subscript(expression)) {
+		auto receiver = infer_expression(subscript->first, document, context, position, stack);
+		if (auto name = quoted_value(subscript->second);
+				name && (receiver.kind == TypeKind::ScriptClass || receiver.kind == TypeKind::NativeClass ||
+					receiver.kind == TypeKind::Builtin)) {
+			auto member = member_value_type(receiver, *name, document, position, stack);
+			if (member.known()) return member;
+		}
+		if (receiver.kind == TypeKind::Builtin && receiver.name == "Array" && !receiver.arguments.empty()) {
+			return receiver.arguments.front();
+		}
+		if (receiver.kind == TypeKind::Builtin && receiver.name == "Dictionary" && receiver.arguments.size() > 1) {
+			return receiver.arguments[1];
+		}
+		if (receiver.kind == TypeKind::Builtin && receiver.name == "String") return receiver;
+		if (receiver.kind == TypeKind::Builtin && receiver.name == "Color") return {TypeKind::Builtin, "float"};
+		auto element = iterable_value_type(receiver);
+		if (element.kind != TypeKind::Variant) return element;
+		return {TypeKind::Variant, "Variant"};
 	}
 	if (is_identifier(expression)) {
 		if (auto found = autoloads_.find(expression); found != autoloads_.end()) {
@@ -822,10 +1271,30 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 			result.instance = true;
 			return result;
 		}
-		if (auto *symbol = resolve_identifier(document, context, expression, position)) {
-			return type_of_symbol(*symbol, document, position, stack);
+		if (auto singleton = native_api_.singleton_type(expression)) {
+			auto result = type_from_name(*singleton, context);
+			result.instance = true;
+			return result;
 		}
-		return type_from_name(expression, context);
+		if (auto *symbol = resolve_identifier(document, context, expression, position)) {
+			return hinted_type_of_symbol(*symbol, document, position, stack);
+		}
+		if (auto *signature = native_api_.find_utility_function(expression)) {
+			ResolvedType result{TypeKind::Callable, "Callable", "utility:" + expression};
+			auto returned = type_from_name(signature->return_type, context);
+			result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
+			return result;
+		}
+		if (auto *function = find_gdscript_builtin_function(expression)) {
+			ResolvedType result{TypeKind::Callable, "Callable", "builtin:" + expression};
+			auto returned = type_from_name(function->signature.return_type, context);
+			result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
+			return result;
+		}
+		auto result = type_from_name(expression, context);
+		if (result.kind == TypeKind::ScriptClass || result.kind == TypeKind::NativeClass ||
+				result.kind == TypeKind::Builtin) result.instance = false;
+		return result;
 	}
 	{
 		std::unordered_set<std::string> static_stack;
@@ -899,20 +1368,20 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 	auto *document = find_document(uri);
 	if (!document) return result;
 	auto offset = position_to_byte(document->source(), position);
-	auto line_start = document->source().rfind('\n', offset == 0 ? 0 : offset - 1);
-	line_start = line_start == std::string::npos ? 0 : line_start + 1;
-	auto prefix = document->source().substr(line_start, offset - line_start);
+	auto completion_site = completion_context(document->source(), offset);
 	std::set<std::string> names;
 	auto add_symbol = [&](const Symbol &symbol) {
 		if (!names.insert(symbol.name).second) return;
 		result.push_back(completion_item(symbol));
 	};
-	if (auto receiver_text = completion_receiver(prefix)) {
+	if (completion_site.member_access) {
+		if (!completion_site.receiver) return result;
+		auto &receiver_text = *completion_site.receiver;
 		std::vector<std::string> stack;
 		auto *context = document->class_at(position);
-		auto receiver = infer_expression(*receiver_text, *document, context, position, stack);
-		auto root_end = receiver_text->find('.');
-		auto receiver_root = receiver_text->substr(0, root_end);
+		auto receiver = infer_expression(receiver_text, *document, context, position, stack);
+		auto root_end = receiver_text.find('.');
+		auto receiver_root = receiver_text.substr(0, root_end);
 		auto *receiver_symbol = resolve_identifier(*document, context, receiver_root, position);
 		auto singleton_type = root_end == std::string::npos ? native_api_.singleton_type(receiver_root) : std::nullopt;
 		auto value_receiver = receiver_symbol || autoloads_.contains(receiver_root) || singleton_type.has_value();
@@ -922,16 +1391,8 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 		}
 		if (!value_receiver) {
 			std::unordered_set<std::string> static_stack;
-			auto static_receiver = resolve_static_reference(*receiver_text, context, static_stack);
+			auto static_receiver = resolve_static_reference(receiver_text, context, static_stack);
 			if (static_receiver.known()) receiver = std::move(static_receiver);
-		}
-		if (receiver.kind == TypeKind::Variant) {
-			if (auto *symbol = resolve_identifier(*document, context, *receiver_text, position);
-					symbol && symbol->declared_type.empty() && !symbol->initializer.empty()) {
-				stack.push_back(symbol->id);
-				receiver = infer_expression(symbol->initializer, *document, context, symbol->range.start, stack);
-				stack.pop_back();
-			}
 		}
 		if (receiver_symbol && !receiver_symbol->declared_type.empty() && receiver.kind != TypeKind::Enum) {
 			receiver.instance = true;
@@ -1037,9 +1498,11 @@ std::optional<HoverResult> Workspace::hover(const std::string &uri, Position pos
 	auto *context = document->class_at(position);
 	if (auto *symbol = resolve_identifier(*document, context, name, position)) {
 		std::vector<std::string> stack;
-		auto type = type_of_symbol(*symbol, *document, position, stack);
+		auto type = hinted_type_of_symbol(*symbol, *document, position, stack);
 		auto declaration = symbol->detail.empty() ? symbol->name + ": " + type.display() : symbol->detail;
-		return HoverResult{"**" + declaration + "**\n\nDeclared in " + symbol->id, symbol->selection_range};
+		auto inferred = symbol->declared_type.empty() && !symbol->initializer.empty() &&
+			type.kind != TypeKind::Variant && type.known() ? "\n\nInferred value type: `" + type.display() + "`" : "";
+		return HoverResult{"**" + declaration + "**" + inferred + "\n\nDeclared in " + symbol->id, symbol->selection_range};
 	}
 	if (global_classes_.contains(name)) {
 		auto *record = find_class(global_classes_.at(name));
@@ -1112,7 +1575,7 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 			DiagnosticSeverity severity = DiagnosticSeverity::Error) {
 		result.push_back({std::move(code), std::move(message), range, severity});
 	};
-	for (auto range : document->syntax_errors()) add("syntax-error", "Syntax error.", range);
+	for (const auto &issue : document->syntax_errors()) add("syntax-error", issue.message, issue.range);
 	for (const auto &record : document->classes()) {
 		if (!record.global_name.empty() && global_name_counts_.contains(record.global_name) &&
 				global_name_counts_.at(record.global_name) > 1) {

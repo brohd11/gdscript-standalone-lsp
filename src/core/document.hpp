@@ -33,7 +33,7 @@ public:
 	int64_t version() const { return version_; }
 	const std::vector<ClassRecord> &classes() const { return classes_; }
 	std::vector<ClassRecord> &classes() { return classes_; }
-	const std::vector<Range> &syntax_errors() const { return syntax_errors_; }
+	const std::vector<ParseIssue> &syntax_errors() const { return syntax_errors_; }
 	const SyntaxNode &syntax_root() const { return syntax_root_; }
 	std::string_view text(const SyntaxNode &node) const;
 
@@ -50,7 +50,7 @@ private:
 	std::string source_;
 	int64_t version_ = -1;
 	std::vector<ClassRecord> classes_;
-	std::vector<Range> syntax_errors_;
+	std::vector<ParseIssue> syntax_errors_;
 	SyntaxNode syntax_root_;
 
 	void parse();

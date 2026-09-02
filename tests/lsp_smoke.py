@@ -295,8 +295,76 @@ def stop_server(server):
     server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
     server.stdin.flush()
     response = read_packet(server.stdout)
+    while response.get("id") != 101:
+        response = read_packet(server.stdout)
     assert response["id"] == 101 and response["result"] is None
     assert server.wait(timeout=5) == 0
+
+
+# Recursive member chains return the final receiver's members. Once member
+# access has been recognized, an unresolved receiver must serialize as an
+# explicit empty CompletionList rather than falling back to visible scope.
+server, response = initialize_server(
+    {"rootUri": root.as_uri()}, args=("--api", root / "extension_api.json")
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+chain_uri = (root / "return_inference.gd").as_uri()
+chain_source = (
+    (root / "return_inference.gd").read_text()
+    + "\n\tNamespace.Factory.make().functions.keys().\n\tins().missing\n"
+)
+repeated_call_line = len(chain_source.splitlines()) - 2
+unresolved_line = len(chain_source.splitlines()) - 1
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": chain_uri,
+                    "languageId": "gdscript",
+                    "version": 8,
+                    "text": chain_source,
+                }
+            },
+        }
+    )
+)
+for request_id, position in (
+    (110, (12, 36)),
+    (111, (unresolved_line, 7)),
+    (112, (repeated_call_line, 43)),
+):
+    server.stdin.write(
+        packet(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": {"uri": chain_uri},
+                    "position": {"line": position[0], "character": position[1]},
+                },
+            }
+        )
+    )
+server.stdin.flush()
+member_completion = None
+unresolved_completion = None
+repeated_call_completion = None
+while member_completion is None or unresolved_completion is None or repeated_call_completion is None:
+    message = read_packet(server.stdout)
+    if message.get("id") == 110:
+        member_completion = message["result"]
+    elif message.get("id") == 111:
+        unresolved_completion = message["result"]
+    elif message.get("id") == 112:
+        repeated_call_completion = message["result"]
+assert {item["filterText"] for item in member_completion["items"]} >= {"keys", "size"}
+assert unresolved_completion == {"isIncomplete": False, "items": []}
+assert {item["filterText"] for item in repeated_call_completion["items"]} == {"append_array"}
+stop_server(server)
 
 
 # Older clients may only send rootPath, and clients with no root metadata may

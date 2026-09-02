@@ -22,6 +22,11 @@
       "lsp_code": "syntax-error"
     },
     {
+      "script": "oracle/reserved_identifier.gd",
+      "godot_pattern": "Expected variable name after .*var",
+      "lsp_code": "syntax-error"
+    },
+    {
       "script": "oracle/undefined_identifier.gd",
       "godot_pattern": "Identifier .* not declared in the current scope",
       "lsp_code": "undefined-identifier"
@@ -78,6 +83,11 @@
     },
     {
       "script": "oracle/valid_strict_conversions.gd",
+      "godot_pattern": null,
+      "lsp_code": null
+    },
+    {
+      "script": "oracle/valid_shadows.gd",
       "godot_pattern": null,
       "lsp_code": null
     }

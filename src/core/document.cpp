@@ -1,4 +1,5 @@
 #include "core/document.hpp"
+#include "core/gdscript_api.hpp"
 #include "core/text.hpp"
 
 #include <tree_sitter/api.h>
@@ -159,9 +160,10 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 			local.declared_type = trim(node_text(field(child, "type"), source));
 			local.is_inferred = is_inferred_type(local.declared_type);
 			if (local.is_inferred) local.declared_type.clear();
-			// The iterable is not an initializer for the loop variable. Its element
-			// type is inferred by the semantic analyzer instead.
-			local.initializer.clear();
+			// Preserve the iterable for the standalone resolver. The flag keeps it
+			// distinct from an ordinary assignment initializer.
+			local.initializer = trim(node_text(field(child, "right"), source));
+			local.is_iteration_variable = true;
 			local.is_local = true;
 			function.children.push_back(std::move(local));
 		}
@@ -222,8 +224,66 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 	return symbol;
 }
 
-void collect_errors(TSNode node, std::string_view source, std::vector<Range> &errors) {
-	if (ts_node_is_error(node) || ts_node_is_missing(node)) errors.push_back(node_range(node, source));
+void add_parse_issue(std::vector<ParseIssue> &errors, Range range, std::string message) {
+	for (auto &error : errors) {
+		if (error.range.start == range.start && error.range.end == range.end) {
+			if (error.message == "Syntax error.") error.message = std::move(message);
+			return;
+		}
+	}
+	errors.push_back({range, std::move(message)});
+}
+
+void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue> &errors) {
+	if (ts_node_is_error(node) || ts_node_is_missing(node)) {
+		add_parse_issue(errors, node_range(node, source), "Syntax error.");
+	}
+
+	auto type = node_type(node);
+	TSNode name{};
+	std::string message;
+	if (type == "variable_statement" || type == "export_variable_statement" || type == "onready_variable_statement") {
+		name = field(node, "name");
+		message = R"(Expected variable name after "var".)";
+	} else if (type == "const_statement") {
+		name = field(node, "name");
+		message = R"(Expected constant name after "const".)";
+	} else if (type == "function_definition") {
+		name = field(node, "name");
+		message = R"(Expected function name after "func".)";
+	} else if (type == "signal_statement") {
+		name = field(node, "name");
+		message = R"(Expected signal name after "signal".)";
+	} else if (type == "class_definition") {
+		name = field(node, "name");
+		message = R"(Expected identifier for the class name after "class".)";
+	} else if (type == "class_name_statement") {
+		name = field(node, "name");
+		message = R"(Expected identifier for the global class name after "class_name".)";
+	} else if (type == "enum_definition") {
+		name = field(node, "name");
+		message = R"(Expected identifier for the enum name after "enum".)";
+	} else if (type == "for_statement") {
+		name = field(node, "left");
+		message = R"(Expected loop variable name after "for".)";
+	} else if (type == "pattern_binding") {
+		name = first_descendant(node, "identifier");
+		if (ts_node_is_null(name)) name = first_descendant(node, "name");
+		message = R"(Expected bind name after "var".)";
+	} else if (type == "typed_parameter" || type == "default_parameter" ||
+			type == "typed_default_parameter" || type == "variadic_parameter" || type == "parameter") {
+		name = ts_node_named_child_count(node) ? ts_node_named_child(node, 0) : TSNode{};
+		message = "Expected parameter name.";
+	} else if (type == "enumerator") {
+		name = field(node, "left");
+		message = "Expected identifier for enum key.";
+	}
+	if (!ts_node_is_null(name)) {
+		auto identifier = trim(node_text(name, source));
+		if (is_gdscript_reserved_identifier(identifier)) {
+			add_parse_issue(errors, node_range(name, source), std::move(message));
+		}
+	}
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		collect_errors(ts_node_named_child(node, i), source, errors);
 	}
@@ -300,6 +360,16 @@ void Document::parse() {
 				symbol.selection_range = node_range(name_node, source_);
 				symbol.declared_type = type == "signal_statement" ? "Signal" : symbol.name;
 				symbol.detail = trim(node_text(child, source_));
+				if (type == "signal_statement") {
+					auto parameters = field(child, "parameters");
+					if (!ts_node_is_null(parameters)) {
+						for (uint32_t parameter_index = 0;
+								parameter_index < ts_node_named_child_count(parameters); ++parameter_index) {
+							auto parameter = parameter_symbol(ts_node_named_child(parameters, parameter_index), symbol, source_);
+							if (!parameter.name.empty()) symbol.children.push_back(std::move(parameter));
+						}
+					}
+				}
 				if (type == "enum_definition") {
 					auto body = field(child, "body");
 					for (uint32_t value_index = 0; value_index < ts_node_named_child_count(body); ++value_index) {
