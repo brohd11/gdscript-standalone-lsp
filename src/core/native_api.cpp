@@ -53,10 +53,11 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 		member.kind = kind;
 		member.is_static = entry.value("is_static", false);
 		member.documentation = entry.value("description", "");
+		std::vector<std::string> enum_value_order;
 		if (kind == SymbolKind::Enum) {
 			for (const auto &value : entry.value("values", json::array())) {
 				auto name = value.value("name", "");
-				if (!name.empty()) member.enum_values.insert(name);
+				if (!name.empty() && member.enum_values.insert(name).second) enum_value_order.push_back(std::move(name));
 			}
 		}
 		if (kind == SymbolKind::Method) {
@@ -65,10 +66,10 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 		}
 		else member.detail = member.name + ": " + member.type;
 		auto member_name = member.name;
+		if (!target.members.contains(member_name)) target.member_order.push_back(member_name);
 		target.members[member_name] = std::move(member);
 		if (kind == SymbolKind::Enum) {
-			const auto &enumeration = target.members.at(member_name);
-			for (const auto &value_name : enumeration.enum_values) {
+			for (const auto &value_name : enum_value_order) {
 				NativeMember value;
 				value.owner = target.name;
 				value.name = value_name;
@@ -76,7 +77,9 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 				value.kind = SymbolKind::Constant;
 				value.is_static = true;
 				value.detail = value_name + ": " + value.type;
-				target.members.try_emplace(value_name, std::move(value));
+				if (target.members.try_emplace(value_name, std::move(value)).second) {
+					target.member_order.push_back(value_name);
+				}
 			}
 		}
 	}
@@ -122,11 +125,11 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 				value.constructors.push_back(callable_signature(constructor, arity_known));
 			}
 			add_members(value, entry, "methods", SymbolKind::Method, arity_known);
-			add_members(value, entry, "members", SymbolKind::Property, arity_known);
-			add_members(value, entry, "properties", SymbolKind::Property, arity_known);
-			add_members(value, entry, "signals", SymbolKind::Event, arity_known);
 			add_members(value, entry, "constants", SymbolKind::Constant, arity_known);
 			add_members(value, entry, "enums", SymbolKind::Enum, arity_known);
+			add_members(value, entry, "members", SymbolKind::Property, arity_known);
+			add_members(value, entry, "signals", SymbolKind::Event, arity_known);
+			add_members(value, entry, "properties", SymbolKind::Property, arity_known);
 			classes_[value.name] = std::move(value);
 		}
 	};
@@ -192,7 +195,7 @@ const NativeMember *NativeApi::find_member(std::string_view class_name, std::str
 	return nullptr;
 }
 
-std::vector<const NativeMember *> NativeApi::members(std::string_view class_name) const {
+std::vector<const NativeMember *> NativeApi::members(std::string_view class_name, MemberAccess access) const {
 	std::vector<const NativeMember *> result;
 	std::unordered_set<std::string> member_names;
 	std::unordered_set<std::string> visited;
@@ -200,8 +203,21 @@ std::vector<const NativeMember *> NativeApi::members(std::string_view class_name
 	while (!current.empty() && visited.insert(current).second) {
 		auto *record = find_class(current);
 		if (!record) break;
-		for (const auto &[name, member] : record->members) {
-			if (member_names.insert(name).second) result.push_back(&member);
+		auto append = [&](bool type_level) {
+			for (const auto &name : record->member_order) {
+				auto found = record->members.find(name);
+				if (found == record->members.end()) continue;
+				const auto &member = found->second;
+				auto is_type_level = member.is_static || member.kind == SymbolKind::Constant ||
+					member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class;
+				if (is_type_level == type_level && member_names.insert(name).second) result.push_back(&member);
+			}
+		};
+		if (access == MemberAccess::Instance) {
+			append(false);
+			append(true);
+		} else {
+			append(true);
 		}
 		current = record->parent;
 	}

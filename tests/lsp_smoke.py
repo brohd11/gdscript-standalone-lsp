@@ -74,10 +74,15 @@ resolved = read_packet(process.stdout)
 shutdown = read_packet(process.stdout)
 assert initialize["result"]["capabilities"]["positionEncoding"] == "utf-16"
 completion_items = {item["filterText"]: item for item in completion["result"]["items"]}
+completion_order = [item["filterText"] for item in completion["result"]["items"]]
 assert {"own", "count", "label", "reference_method"} <= completion_items.keys()
 assert completion_items["label"]["label"] == "label()"
 assert completion_items["label"]["insertText"] == "label()"
 assert completion_items["label"]["detail"] == ""
+assert completion_order.index("own") < completion_order.index("CHILD_CONSTANT") < completion_order.index("count")
+assert completion_order.index("count") < completion_order.index("BASE_CONSTANT") < completion_order.index("reference_method")
+sort_ranks = [item["sortText"] for item in completion["result"]["items"]]
+assert sort_ranks == sorted(sort_ranks) and len(sort_ranks) == len(set(sort_ranks))
 assert resolved["result"]["kind"] == "script_class"
 assert resolved["result"]["name"] == "ChildThing"
 assert shutdown["result"] is None

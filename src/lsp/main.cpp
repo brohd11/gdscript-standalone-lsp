@@ -59,7 +59,8 @@ json completion_json(const CompletionItem &item) {
 		{"kind", static_cast<int>(item.kind)},
 		{"detail", item.detail},
 		{"insertText", item.insert_text.empty() ? item.label : item.insert_text},
-		{"filterText", item.filter_text.empty() ? item.label : item.filter_text}
+		{"filterText", item.filter_text.empty() ? item.label : item.filter_text},
+		{"sortText", item.sort_text}
 	};
 	if (!item.documentation.empty()) result["documentation"] = {{"kind", "markdown"}, {"value", item.documentation}};
 	return result;

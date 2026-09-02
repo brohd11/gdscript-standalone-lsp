@@ -46,7 +46,10 @@
     {
       "name": "Object",
       "inherits": "",
-      "methods": [{"name": "get_class", "return_value": {"type": "String"}}]
+      "methods": [
+        {"name": "get_class", "return_value": {"type": "String"}},
+        {"name": "object_static", "is_static": true}
+      ]
     },
     {
       "name": "RefCounted",
@@ -59,7 +62,8 @@
             {"name": "value", "type": "int"},
             {"name": "label", "type": "String", "default_value": "\"ok\""}
           ]
-        }
+        },
+        {"name": "ref_static", "is_static": true}
       ]
     },
     {

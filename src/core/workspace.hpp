@@ -85,7 +85,8 @@ private:
 	const Document *find_document(const std::string &uri) const;
 	const ClassRecord *find_class(std::string_view id) const;
 	const Symbol *find_member(const ClassRecord &record, std::string_view name) const;
-	std::vector<const Symbol *> all_members(const ClassRecord &record) const;
+	std::vector<const Symbol *> all_members(const ClassRecord &record,
+		MemberAccess access = MemberAccess::Instance) const;
 	ResolvedType resolve_static_reference(std::string expression, const ClassRecord *context,
 		std::unordered_set<std::string> &stack) const;
 	ResolvedType resolve_static_symbol(const Symbol &symbol, std::unordered_set<std::string> &stack) const;

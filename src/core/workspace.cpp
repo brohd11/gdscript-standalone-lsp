@@ -595,14 +595,24 @@ ResolvedType Workspace::resolve_static_reference(std::string expression, const C
 	return current;
 }
 
-std::vector<const Symbol *> Workspace::all_members(const ClassRecord &record) const {
+std::vector<const Symbol *> Workspace::all_members(const ClassRecord &record, MemberAccess access) const {
 	std::vector<const Symbol *> result;
 	std::unordered_set<std::string> names;
 	std::unordered_set<std::string> classes_seen;
 	auto *current = &record;
 	while (current && classes_seen.insert(current->symbol.id).second) {
-		for (const auto &member : current->members) {
-			if (names.insert(member.name).second) result.push_back(&member);
+		auto append = [&](bool type_level) {
+			for (const auto &member : current->members) {
+				auto is_type_level = member.is_static || member.kind == SymbolKind::Constant ||
+					member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class;
+				if (is_type_level == type_level && names.insert(member.name).second) result.push_back(&member);
+			}
+		};
+		if (access == MemberAccess::Instance) {
+			append(false);
+			append(true);
+		} else {
+			append(true);
 		}
 		if (current->base_class_id.starts_with("native:")) break;
 		current = find_class(current->base_class_id);
@@ -901,6 +911,20 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 		std::vector<std::string> stack;
 		auto *context = document->class_at(position);
 		auto receiver = infer_expression(*receiver_text, *document, context, position, stack);
+		auto root_end = receiver_text->find('.');
+		auto receiver_root = receiver_text->substr(0, root_end);
+		auto *receiver_symbol = resolve_identifier(*document, context, receiver_root, position);
+		auto singleton_type = root_end == std::string::npos ? native_api_.singleton_type(receiver_root) : std::nullopt;
+		auto value_receiver = receiver_symbol || autoloads_.contains(receiver_root) || singleton_type.has_value();
+		if (singleton_type) {
+			receiver = type_from_name(*singleton_type, context);
+			receiver.instance = true;
+		}
+		if (!value_receiver) {
+			std::unordered_set<std::string> static_stack;
+			auto static_receiver = resolve_static_reference(*receiver_text, context, static_stack);
+			if (static_receiver.known()) receiver = std::move(static_receiver);
+		}
 		if (receiver.kind == TypeKind::Variant) {
 			if (auto *symbol = resolve_identifier(*document, context, *receiver_text, position);
 					symbol && symbol->declared_type.empty() && !symbol->initializer.empty()) {
@@ -909,13 +933,17 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 				stack.pop_back();
 			}
 		}
+		if (receiver_symbol && !receiver_symbol->declared_type.empty() && receiver.kind != TypeKind::Enum) {
+			receiver.instance = true;
+		}
 		if (receiver.kind == TypeKind::ScriptClass) {
 			if (auto *record = find_class(receiver.symbol_id)) {
-				for (auto *member : all_members(*record)) add_symbol(*member);
+				for (auto *member : all_members(*record,
+						receiver.instance ? MemberAccess::Instance : MemberAccess::Type)) add_symbol(*member);
 				auto base = receiver.instance ? native_base(*record) :
 					(native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
 				if (!base.empty()) {
-					for (auto *member : native_api_.members(base)) {
+					for (auto *member : native_api_.members(base, MemberAccess::Instance)) {
 						if (names.insert(member->name).second) {
 							result.push_back(completion_item(*member));
 						}
@@ -926,7 +954,8 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 				receiver.kind == TypeKind::Callable || receiver.kind == TypeKind::Signal) {
 			auto native_name = receiver.kind == TypeKind::Callable ? std::string("Callable") :
 				(receiver.kind == TypeKind::Signal ? std::string("Signal") : receiver.name);
-			for (auto *member : native_api_.members(native_name)) {
+			for (auto *member : native_api_.members(native_name,
+					receiver.instance ? MemberAccess::Instance : MemberAccess::Type)) {
 				if (names.insert(member->name).second) {
 					result.push_back(completion_item(*member));
 				}
@@ -947,27 +976,44 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 	} else {
 		for (auto *local : document->locals_at(position)) add_symbol(*local);
 		if (auto *record = document->class_at(position)) {
-			for (auto *member : all_members(*record)) add_symbol(*member);
+			bool static_context = false;
+			for (const auto &member : record->members) {
+				if ((member.kind == SymbolKind::Method || member.kind == SymbolKind::Constructor) &&
+						member.range.contains(position)) {
+					static_context = member.is_static;
+					break;
+				}
+			}
+			auto access = static_context ? MemberAccess::Type : MemberAccess::Instance;
+			for (auto *member : all_members(*record, access)) add_symbol(*member);
+			auto base = native_base(*record);
+			if (!base.empty()) {
+				for (auto *member : native_api_.members(base, access)) {
+					if (names.insert(member->name).second) {
+						result.push_back(completion_item(*member));
+					}
+				}
+			}
 			for (auto *scope = enclosing_class(*record); scope; scope = enclosing_class(*scope)) {
 				for (const auto &member : scope->members) {
 					if (member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum ||
 							member.kind == SymbolKind::Class || member.is_static) add_symbol(member);
 				}
 			}
-			auto base = native_base(*record);
-			if (!base.empty()) {
-				for (auto *member : native_api_.members(base)) {
-					if (names.insert(member->name).second) {
-						result.push_back(completion_item(*member));
-					}
-				}
-			}
 		}
+		std::vector<std::string> global_names;
+		global_names.reserve(global_classes_.size());
 		for (const auto &[name, id] : global_classes_) {
 			(void)id;
+			global_names.push_back(name);
+		}
+		std::sort(global_names.begin(), global_names.end());
+		for (const auto &name : global_names) {
 			if (names.insert(name).second) result.push_back(completion_item(name, "class " + name, {}, SymbolKind::Class));
 		}
-		for (const auto &[name, path] : autoloads_) {
+		std::vector<std::pair<std::string, std::string>> autoload_names(autoloads_.begin(), autoloads_.end());
+		std::sort(autoload_names.begin(), autoload_names.end());
+		for (const auto &[name, path] : autoload_names) {
 			if (names.insert(name).second) result.push_back(completion_item(name, "autoload " + path, {}, SymbolKind::Variable));
 		}
 		for (const auto &function : gdscript_builtin_functions()) if (names.insert(std::string(function.name)).second) {
@@ -975,7 +1021,10 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 				!function.signature.arguments.empty() || function.signature.is_vararg));
 		}
 	}
-	std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) { return a.label < b.label; });
+	for (size_t index = 0; index < result.size(); ++index) {
+		auto rank = std::to_string(index);
+		result[index].sort_text = std::string(10 - std::min<size_t>(rank.size(), 10), '0') + rank;
+	}
 	return result;
 }
 

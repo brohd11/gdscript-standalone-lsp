@@ -104,6 +104,7 @@ struct CompletionItem {
 	SymbolKind kind = SymbolKind::Variable;
 	std::string insert_text;
 	std::string filter_text;
+	std::string sort_text;
 };
 
 struct Location {

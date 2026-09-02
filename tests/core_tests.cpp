@@ -36,6 +36,20 @@ const CompletionItem *find_item(const std::vector<CompletionItem> &items, const 
 	return found == items.end() ? nullptr : &*found;
 }
 
+size_t item_index(const std::vector<CompletionItem> &items, const std::string &name) {
+	for (size_t index = 0; index < items.size(); ++index) {
+		if ((items[index].filter_text.empty() ? items[index].label : items[index].filter_text) == name) return index;
+	}
+	return items.size();
+}
+
+bool completion_ranks_increase(const std::vector<CompletionItem> &items) {
+	for (size_t index = 1; index < items.size(); ++index) {
+		if (items[index - 1].sort_text >= items[index].sort_text) return false;
+	}
+	return !items.empty() && !items.front().sort_text.empty();
+}
+
 bool has_diagnostic(const std::vector<Diagnostic> &items, const std::string &code) {
 	return std::any_of(items.begin(), items.end(), [&](const auto &item) { return item.code == code; });
 }
@@ -61,6 +75,51 @@ int main() {
 	expect(has_item(completion, "count"), "completion includes inherited script member");
 	expect(has_item(completion, "label"), "completion includes inherited method");
 	expect(has_item(completion, "reference_method"), "completion includes transitive native member");
+	expect(item_index(completion, "own") < item_index(completion, "CHILD_CONSTANT") &&
+		item_index(completion, "CHILD_CONSTANT") < item_index(completion, "count") &&
+		item_index(completion, "count") < item_index(completion, "BASE_CONSTANT") &&
+		item_index(completion, "BASE_CONSTANT") < item_index(completion, "reference_method") &&
+		item_index(completion, "native_takes") < item_index(completion, "ref_static") &&
+		item_index(completion, "ref_static") < item_index(completion, "get_class") &&
+		item_index(completion, "get_class") < item_index(completion, "object_static"),
+		"instance completion walks derived-to-base and moves type-level members behind each level");
+	auto unqualified_completion = workspace.completion(consumer_uri, {6, 6});
+	expect(item_index(unqualified_completion, "local") < item_index(unqualified_completion, "child"),
+		"visible locals rank ahead of current-class members");
+	expect(static_cast<size_t>(std::count_if(completion.begin(), completion.end(), [](const CompletionItem &item) {
+		return item.filter_text == "shared_name";
+	})) == 1, "derived completion member suppresses the inherited member with the same name");
+	expect(completion_ranks_increase(completion), "completion sort ranks preserve server relevance order");
+
+	auto class_completion = workspace.completion(consumer_uri, {9, 14});
+	expect(has_item(class_completion, "CHILD_CONSTANT") && has_item(class_completion, "child_static") &&
+		has_item(class_completion, "BASE_CONSTANT") && has_item(class_completion, "base_static") &&
+		!has_item(class_completion, "own") && !has_item(class_completion, "make_base") &&
+		!has_item(class_completion, "count") && !has_item(class_completion, "label"),
+		"script class receiver offers inherited type-level members and omits instance members");
+	expect(item_index(class_completion, "CHILD_CONSTANT") < item_index(class_completion, "child_static") &&
+		item_index(class_completion, "child_static") < item_index(class_completion, "BASE_CONSTANT") &&
+		item_index(class_completion, "BASE_CONSTANT") < item_index(class_completion, "base_static"),
+		"class receiver preserves source order within each nearest-first inheritance level");
+
+	auto child_uri = workspace.uri_for_path(fixture / "child.gd");
+	auto static_context_completion = workspace.completion(child_uri, {6, 2});
+	expect(has_item(static_context_completion, "CHILD_CONSTANT") && has_item(static_context_completion, "base_static") &&
+		has_item(static_context_completion, "ref_static") && !has_item(static_context_completion, "own") &&
+		!has_item(static_context_completion, "label") && !has_item(static_context_completion, "reference_method"),
+		"unqualified completion in a static function omits script and native instance members");
+
+	auto native_instance_members = workspace.native_api().members("RefCounted");
+	std::vector<std::string> native_instance_names;
+	for (auto *member : native_instance_members) native_instance_names.push_back(member->name);
+	expect(native_instance_names == std::vector<std::string>({
+		"reference_method", "native_takes", "ref_static", "get_class", "object_static"}),
+		"native members preserve API order, static tails, and nearest-first inheritance");
+	auto native_type_members = workspace.native_api().members("RefCounted", MemberAccess::Type);
+	std::vector<std::string> native_type_names;
+	for (auto *member : native_type_members) native_type_names.push_back(member->name);
+	expect(native_type_names == std::vector<std::string>({"ref_static", "object_static"}),
+		"native class access contains only type-level members");
 
 	auto local_type = workspace.resolve_type(consumer_uri, {6, 4}, "local");
 	expect(local_type.kind == TypeKind::ScriptClass && local_type.name == "ChildThing", "typed local resolves to script class");
@@ -72,7 +131,7 @@ int main() {
 	auto definitions = workspace.definition(consumer_uri, {2, 15});
 	expect(definitions.size() == 1 && definitions.front().uri.ends_with("/child.gd"), "global class definition resolves");
 	auto symbols = workspace.document_symbols(consumer_uri);
-	expect(!symbols.empty() && symbols.front().children.size() == 2, "document symbols include members");
+	expect(!symbols.empty() && symbols.front().children.size() == 3, "document symbols include members");
 
 	auto alias_uri = workspace.uri_for_path(fixture / "alias_derived.gd");
 	expect(workspace.diagnostics(alias_uri).empty(),
@@ -110,7 +169,6 @@ int main() {
 		"var own := \"child\"\n"
 		"var added: int = 2\n\n"
 		"func make_base() -> BaseThing:\n\treturn self\n");
-	auto child_uri = workspace.uri_for_path(fixture / "child.gd");
 	expect(workspace.update_document(child_uri, changed, 2, &error), "unsaved document update accepted");
 	completion = workspace.completion(consumer_uri, {6, 7});
 	expect(has_item(completion, "added"), "dependent completion reflects unsaved base update");
@@ -224,6 +282,13 @@ int main() {
 	auto *argument_native = find_item(array_completion, "append_array");
 	expect(argument_native && argument_native->label == "append_array(\xe2\x80\xa6)" &&
 		argument_native->insert_text == "append_array(", "parameterized native completion inserts a trailing opener");
+	auto singleton_completion = diagnostic_workspace.completion(semantic_valid_uri, {32, 8});
+	expect(has_item(singleton_completion, "get_version_info"),
+		"native singleton completion retains instance members despite its class-like identifier");
+	auto native_class_completion = diagnostic_workspace.completion(semantic_valid_uri, {52, 22});
+	expect(has_item(native_class_completion, "ModeFlags") && has_item(native_class_completion, "READ") &&
+		!has_item(native_class_completion, "reference_method"),
+		"native class receiver exposes type-level members and omits inherited instance methods");
 
 	auto warning_fixture = std::filesystem::temp_directory_path() /
 		("gdscript-lsp-warning-fixture-" + std::to_string(

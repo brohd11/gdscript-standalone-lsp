@@ -11,6 +11,11 @@
 
 namespace gdscript_lsp {
 
+enum class MemberAccess : uint8_t {
+	Instance,
+	Type,
+};
+
 struct NativeArgument {
 	std::string name;
 	std::string type = "Variant";
@@ -41,6 +46,7 @@ struct NativeClass {
 	std::string parent;
 	bool builtin = false;
 	std::unordered_map<std::string, NativeMember> members;
+	std::vector<std::string> member_order;
 	std::vector<CallableSignature> constructors;
 };
 
@@ -51,7 +57,8 @@ public:
 	bool is_builtin_class(std::string_view name) const;
 	const NativeClass *find_class(std::string_view name) const;
 	const NativeMember *find_member(std::string_view class_name, std::string_view member) const;
-	std::vector<const NativeMember *> members(std::string_view class_name) const;
+	std::vector<const NativeMember *> members(std::string_view class_name,
+		MemberAccess access = MemberAccess::Instance) const;
 	const CallableSignature *find_utility_function(std::string_view name) const;
 	const std::vector<CallableSignature> *constructors(std::string_view class_name) const;
 	std::optional<std::string> singleton_type(std::string_view name) const;

@@ -12,7 +12,7 @@ The server communicates over standard input/output using LSP 3.17. An editor sho
 
 It implements incremental document synchronization, completion, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType` request.
 
-Callable completions follow Godot's compact presentation: `name()` for zero arguments and `name(…)` otherwise. Parameterized calls insert a trailing `(` so clients with bracket pairing place the caret inside the call.
+Callable completions follow Godot's compact presentation: `name()` for zero arguments and `name(…)` otherwise. Parameterized calls insert a trailing `(` so clients with bracket pairing place the caret inside the call. Completion results are ranked by lexical scope and nearest-first inheritance, with type-level members behind instance members at each level; class receivers omit instance-only members. The array order and LSP `sortText` carry the same ranking.
 
 Native Godot APIs are read from, in priority order:
 

@@ -29,9 +29,15 @@ func _on_ready() -> void:
 	var completion: Dictionary = service.completion(uri, 6, 7)
 	var labels: Array[String] = []
 	var completion_by_name: Dictionary = {}
+	var previous_sort_text := ""
 	for item: Dictionary in completion.items:
 		labels.append(item.filterText)
 		completion_by_name[item.filterText] = item
+		if previous_sort_text != "" and item.sortText <= previous_sort_text:
+			push_error("completion sortText is not increasing: %s then %s" % [previous_sort_text, item.sortText])
+			quit(1)
+			return
+		previous_sort_text = item.sortText
 	for expected in ["own", "count", "label", "reference_method"]:
 		if expected not in labels:
 			push_error("missing completion: %s" % expected)
@@ -39,6 +45,10 @@ func _on_ready() -> void:
 			return
 	if completion_by_name.label.label != "label()" or completion_by_name.label.insertText != "label()":
 		push_error("unexpected callable completion: %s" % [completion_by_name.label])
+		quit(1)
+		return
+	if labels.find("own") >= labels.find("CHILD_CONSTANT") or labels.find("CHILD_CONSTANT") >= labels.find("count"):
+		push_error("unexpected completion relevance order: %s" % [labels])
 		quit(1)
 		return
 	var resolved: Dictionary = service.resolve_type(uri, 6, 4, "local")
