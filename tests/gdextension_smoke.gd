@@ -51,6 +51,31 @@ func _on_ready() -> void:
 		push_error("unexpected completion relevance order: %s" % [labels])
 		quit(1)
 		return
+	var helper_fallback: Dictionary = service.completion_ex(uri, 6, 7, {"profile": "helpers"})
+	if helper_fallback.disposition != "not_handled" or not helper_fallback.items.is_empty():
+		push_error("ordinary helper completion should fall through: %s" % [helper_fallback])
+		quit(1)
+		return
+	var resource_completion: Dictionary = service.completion("res://consumer.gd", 6, 7)
+	if resource_completion.items.is_empty():
+		push_error("res:// URI did not resolve against the opened workspace")
+		quit(1)
+		return
+	var helper_source := "class_name HelperConsumer extends RefCounted\n\nfunc inspect() -> void:\n\tvar child: ChildThing = ChildThing.new()\n"
+	service.update_document(uri, helper_source, 6)
+	var constructor: Dictionary = service.completion_ex(uri, 3, 25, {"profile": "helpers"})
+	if constructor.disposition != "augment" or constructor.provider != "constructors":
+		push_error("constructor helper did not augment: %s" % [constructor])
+		quit(1)
+		return
+	service.set_configuration({"completion": {"constructors": false}})
+	constructor = service.completion_ex(uri, 3, 25, {"profile": "helpers"})
+	if constructor.disposition != "not_handled":
+		push_error("disabled constructor helper still handled: %s" % [constructor])
+		quit(1)
+		return
+	service.set_configuration({"completion": {"constructors": true}})
+	service.close_document(uri)
 	var resolved: Dictionary = service.resolve_type(uri, 6, 4, "local")
 	if resolved.kind != "script_class" or resolved.name != "ChildThing":
 		push_error("unexpected resolved type: %s" % resolved)

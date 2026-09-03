@@ -68,6 +68,8 @@ public:
 	bool global_enum_has_value(std::string_view enum_name, std::string_view value) const;
 	bool has_enum(std::string_view class_name, std::string_view enum_name) const;
 	bool enum_has_value(std::string_view class_name, std::string_view enum_name, std::string_view value) const;
+	std::vector<std::string> enum_values(std::string_view class_name, std::string_view enum_name) const;
+	std::vector<std::string> global_enum_values(std::string_view enum_name) const;
 	const std::unordered_map<std::string, NativeClass> &classes() const { return classes_; }
 	std::string version() const { return version_; }
 

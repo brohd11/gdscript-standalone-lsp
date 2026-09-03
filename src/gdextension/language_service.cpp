@@ -1,7 +1,10 @@
 #include "gdextension/language_service.hpp"
+#include "core/uri.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/core/class_db.hpp>
+
+#include <algorithm>
 
 using namespace godot;
 
@@ -11,6 +14,13 @@ namespace {
 std::string to_std(const String &value) {
 	CharString utf8 = value.utf8();
 	return std::string(utf8.get_data(), static_cast<size_t>(utf8.length()));
+}
+
+std::string service_uri(const Workspace &workspace, const String &value) {
+	if (value.begins_with("res://")) {
+		return workspace.uri_for_path(workspace.root() / to_std(value.substr(6)));
+	}
+	return to_std(value);
 }
 
 String to_godot(std::string_view value) {
@@ -82,6 +92,48 @@ PackedStringArray all_document_paths(const Workspace &workspace) {
 	return paths;
 }
 
+PackedStringArray packed_paths(const std::vector<std::string> &values) {
+	PackedStringArray paths;
+	for (const auto &value : values) paths.push_back(to_godot(value));
+	return paths;
+}
+
+std::vector<std::string> merge_paths(std::vector<std::string> first, const std::vector<std::string> &second) {
+	first.insert(first.end(), second.begin(), second.end());
+	std::sort(first.begin(), first.end());
+	first.erase(std::unique(first.begin(), first.end()), first.end());
+	return first;
+}
+
+String disposition_name(CompletionDisposition disposition) {
+	switch (disposition) {
+		case CompletionDisposition::Augment: return "augment";
+		case CompletionDisposition::Replace: return "replace";
+		default: return "not_handled";
+	}
+}
+
+Dictionary completion_dict(const CompletionResult &completion) {
+	Dictionary result;
+	Array items;
+	for (const auto &item : completion.items) {
+		Dictionary value;
+		value["label"] = to_godot(item.label);
+		value["detail"] = to_godot(item.detail);
+		value["documentation"] = to_godot(item.documentation);
+		value["kind"] = static_cast<int64_t>(item.kind);
+		value["insertText"] = to_godot(item.insert_text);
+		value["filterText"] = to_godot(item.filter_text);
+		value["sortText"] = to_godot(item.sort_text);
+		items.push_back(value);
+	}
+	result["isIncomplete"] = completion.is_incomplete;
+	result["disposition"] = disposition_name(completion.disposition);
+	result["provider"] = to_godot(completion.provider);
+	result["items"] = items;
+	return result;
+}
+
 } // namespace
 
 GDScriptLanguageService::GDScriptLanguageService() : workspace_(std::make_unique<Workspace>()) {}
@@ -103,6 +155,10 @@ void GDScriptLanguageService::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh_files", "paths"), &GDScriptLanguageService::refresh_files);
 	ClassDB::bind_method(D_METHOD("completion", "uri", "line", "utf16_column"),
 		&GDScriptLanguageService::completion);
+	ClassDB::bind_method(D_METHOD("completion_ex", "uri", "line", "utf16_column", "options"),
+		&GDScriptLanguageService::completion_ex, DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("set_configuration", "configuration"),
+		&GDScriptLanguageService::set_configuration);
 	ClassDB::bind_method(D_METHOD("hover", "uri", "line", "utf16_column"),
 		&GDScriptLanguageService::hover);
 	ClassDB::bind_method(D_METHOD("definition", "uri", "line", "utf16_column"),
@@ -124,6 +180,9 @@ Error GDScriptLanguageService::open_workspace(const String &project_root, const 
 		index_thread_.join();
 	}
 	ready_.store(false);
+	if (options.has("configuration") && Variant(options["configuration"]).get_type() == Variant::DICTIONARY) {
+		set_configuration(options["configuration"]);
+	}
 	String root = project_root;
 	if (root.begins_with("res://")) root = ProjectSettings::get_singleton()->globalize_path(root);
 	String api;
@@ -153,57 +212,93 @@ void GDScriptLanguageService::_finish_open(const String &error) {
 
 void GDScriptLanguageService::update_document(const String &uri, const String &text, int64_t version) {
 	if (!ready_) return;
+	auto target = service_uri(*workspace_, uri);
+	auto affected = workspace_->affected_documents({target});
 	std::string error;
-	workspace_->update_document(to_std(uri), to_std(text), version, &error);
+	workspace_->update_document(target, to_std(text), version, &error);
+	affected = merge_paths(std::move(affected), workspace_->affected_documents({target}));
 	PackedStringArray changed_paths;
 	changed_paths.push_back(uri);
 	emit_signal("index_updated", changed_paths);
-	emit_signal("diagnostics_updated", all_document_paths(*workspace_));
+	emit_signal("diagnostics_updated", packed_paths(affected));
 }
 
 void GDScriptLanguageService::close_document(const String &uri) {
 	if (!ready_) return;
+	auto target = service_uri(*workspace_, uri);
+	auto affected = workspace_->affected_documents({target});
 	std::string error;
-	workspace_->close_document(to_std(uri), &error);
-	emit_signal("diagnostics_updated", all_document_paths(*workspace_));
+	workspace_->close_document(target, &error);
+	affected = merge_paths(std::move(affected), workspace_->affected_documents({target}));
+	emit_signal("diagnostics_updated", packed_paths(affected));
 }
 
 void GDScriptLanguageService::refresh_files(const PackedStringArray &paths) {
 	if (!ready_) return;
+	std::vector<std::string> changed;
+	for (const auto &path : paths) changed.push_back(service_uri(*workspace_, path));
+	auto affected = workspace_->affected_documents(changed);
 	for (const auto &path : paths) {
 		std::string error;
-		workspace_->refresh_file(to_std(path), &error);
+		workspace_->refresh_file(service_uri(*workspace_, path), &error);
 	}
+	affected = merge_paths(std::move(affected), workspace_->affected_documents(changed));
 	emit_signal("index_updated", paths);
-	emit_signal("diagnostics_updated", all_document_paths(*workspace_));
+	emit_signal("diagnostics_updated", packed_paths(affected));
 }
 
 Dictionary GDScriptLanguageService::completion(const String &uri, int line, int utf16_column) const {
-	Dictionary result;
-	Array items;
-	if (ready_) {
-		for (const auto &item : workspace_->completion(to_std(uri),
-					{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)})) {
-			Dictionary value;
-			value["label"] = to_godot(item.label);
-			value["detail"] = to_godot(item.detail);
-			value["documentation"] = to_godot(item.documentation);
-			value["kind"] = static_cast<int64_t>(item.kind);
-			value["insertText"] = to_godot(item.insert_text);
-			value["filterText"] = to_godot(item.filter_text);
-			value["sortText"] = to_godot(item.sort_text);
-			items.push_back(value);
+	return completion_ex(uri, line, utf16_column);
+}
+
+Dictionary GDScriptLanguageService::completion_ex(const String &uri, int line, int utf16_column,
+		const Dictionary &options) const {
+	if (!ready_) {
+		CompletionResult pending;
+		pending.is_incomplete = true;
+		return completion_dict(pending);
+	}
+	auto profile = CompletionProfile::Full;
+	if (options.has("profile") && String(options["profile"]) == "helpers") profile = CompletionProfile::Helpers;
+	return completion_dict(workspace_->completion_result(service_uri(*workspace_, uri),
+		{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)}, profile));
+}
+
+void GDScriptLanguageService::set_configuration(const Dictionary &configuration) {
+	Dictionary root = configuration;
+	if (root.has("gdscriptLsp") && Variant(root["gdscriptLsp"]).get_type() == Variant::DICTIONARY) {
+		root = root["gdscriptLsp"];
+	}
+	if (!root.has("completion") || Variant(root["completion"]).get_type() != Variant::DICTIONARY) return;
+	Dictionary completion = root["completion"];
+	auto config = workspace_->completion_config();
+	auto boolean = [&](const char *name, bool &target) {
+		if (completion.has(name) && Variant(completion[name]).get_type() == Variant::BOOL) target = completion[name];
+	};
+	boolean("enums", config.enums);
+	boolean("extendedTypeHints", config.extended_type_hints);
+	boolean("constructors", config.constructors);
+	boolean("hidePrivate", config.hide_private);
+	if (completion.has("memberStrings")) {
+		Variant member_value = completion["memberStrings"];
+		if (member_value.get_type() == Variant::BOOL) config.member_strings = member_value;
+		else if (member_value.get_type() == Variant::DICTIONARY) {
+			Dictionary member_strings = member_value;
+			auto member_boolean = [&](const char *name, bool &target) {
+				if (member_strings.has(name) && Variant(member_strings[name]).get_type() == Variant::BOOL) target = member_strings[name];
+			};
+			member_boolean("enabled", config.member_strings);
+			member_boolean("preferStringName", config.member_strings_prefer_string_name);
+			member_boolean("includePrivate", config.member_strings_include_private);
 		}
 	}
-	result["isIncomplete"] = !ready_;
-	result["items"] = items;
-	return result;
+	workspace_->set_completion_config(config);
 }
 
 Dictionary GDScriptLanguageService::hover(const String &uri, int line, int utf16_column) const {
 	Dictionary result;
 	if (!ready_) return result;
-	auto value = workspace_->hover(to_std(uri), {static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)});
+	auto value = workspace_->hover(service_uri(*workspace_, uri), {static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)});
 	if (!value) return result;
 	Dictionary contents;
 	contents["kind"] = "markdown";
@@ -216,7 +311,7 @@ Dictionary GDScriptLanguageService::hover(const String &uri, int line, int utf16
 Array GDScriptLanguageService::definition(const String &uri, int line, int utf16_column) const {
 	Array result;
 	if (!ready_) return result;
-	for (const auto &location : workspace_->definition(to_std(uri),
+	for (const auto &location : workspace_->definition(service_uri(*workspace_, uri),
 				{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)})) {
 		Dictionary value;
 		value["uri"] = to_godot(location.uri);
@@ -229,21 +324,21 @@ Array GDScriptLanguageService::definition(const String &uri, int line, int utf16
 Array GDScriptLanguageService::document_symbols(const String &uri) const {
 	Array result;
 	if (!ready_) return result;
-	for (const auto &symbol : workspace_->document_symbols(to_std(uri))) result.push_back(symbol_dict(symbol));
+	for (const auto &symbol : workspace_->document_symbols(service_uri(*workspace_, uri))) result.push_back(symbol_dict(symbol));
 	return result;
 }
 
 Array GDScriptLanguageService::diagnostics(const String &uri) const {
 	Array result;
 	if (!ready_) return result;
-	for (const auto &diagnostic : workspace_->diagnostics(to_std(uri))) result.push_back(diagnostic_dict(diagnostic));
+	for (const auto &diagnostic : workspace_->diagnostics(service_uri(*workspace_, uri))) result.push_back(diagnostic_dict(diagnostic));
 	return result;
 }
 
 Dictionary GDScriptLanguageService::resolve_type(const String &uri, int line, int utf16_column,
 		const String &expression) const {
 	if (!ready_) return type_dict(ResolvedType::unknown("indexing"));
-	return type_dict(workspace_->resolve_type(to_std(uri),
+	return type_dict(workspace_->resolve_type(service_uri(*workspace_, uri),
 		{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)}, to_std(expression)));
 }
 

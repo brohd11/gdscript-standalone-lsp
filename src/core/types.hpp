@@ -115,6 +115,34 @@ struct CompletionItem {
 	std::string sort_text;
 };
 
+enum class CompletionDisposition : uint8_t {
+	NotHandled,
+	Augment,
+	Replace,
+};
+
+enum class CompletionProfile : uint8_t {
+	Full,
+	Helpers,
+};
+
+struct CompletionConfig {
+	bool enums = true;
+	bool extended_type_hints = true;
+	bool constructors = true;
+	bool hide_private = true;
+	bool member_strings = true;
+	bool member_strings_prefer_string_name = true;
+	bool member_strings_include_private = false;
+};
+
+struct CompletionResult {
+	std::vector<CompletionItem> items;
+	CompletionDisposition disposition = CompletionDisposition::NotHandled;
+	std::string provider;
+	bool is_incomplete = false;
+};
+
 struct Location {
 	std::string uri;
 	Range range;

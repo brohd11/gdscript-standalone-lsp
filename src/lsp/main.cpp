@@ -134,51 +134,173 @@ public:
 	uint64_t begin_update() {
 		std::lock_guard lock(mutex_);
 		++generation_;
+		background_.insert(dirty_.begin(), dirty_.end());
 		dirty_.clear();
-		full_pending_ = false;
+		last_change_ = std::chrono::steady_clock::now();
 		condition_.notify_all();
 		return generation_;
 	}
 
-	void finish_update(uint64_t generation, const std::string &uri) {
+	void finish_update(uint64_t generation, const std::vector<std::string> &immediate,
+			const std::vector<std::string> &affected) {
 		std::lock_guard lock(mutex_);
-		if (generation != generation_) return;
-		dirty_.insert(uri);
-		full_pending_ = true;
+		(void)generation;
+		if (stopping_) return;
+		for (const auto &uri : immediate) {
+			dirty_.insert(uri);
+			background_.erase(uri);
+		}
+		for (const auto &uri : affected) if (!dirty_.contains(uri)) background_.insert(uri);
 		last_change_ = std::chrono::steady_clock::now();
 		condition_.notify_all();
 	}
 
 	void schedule_full() {
+		auto stamps = file_stamps();
+		auto uris = workspace_.document_uris();
 		std::lock_guard lock(mutex_);
 		++generation_;
 		dirty_.clear();
-		full_pending_ = true;
+		background_.clear();
+		background_.insert(uris.begin(), uris.end());
+		stamps_ = std::move(stamps);
+		polling_started_ = true;
 		last_change_ = std::chrono::steady_clock::now();
+		next_poll_ = poll_interval_.count() > 0 ? last_change_ + poll_interval_ : std::chrono::steady_clock::time_point::max();
+		condition_.notify_all();
+	}
+
+	void set_open(const std::string &uri, bool open) {
+		std::lock_guard lock(mutex_);
+		if (open) open_.insert(uri);
+		else open_.erase(uri);
+	}
+
+	void set_poll_interval(std::chrono::milliseconds interval) {
+		std::lock_guard lock(mutex_);
+		poll_interval_ = interval;
+		next_poll_ = polling_started_ && interval.count() > 0 ?
+			std::chrono::steady_clock::now() + interval : std::chrono::steady_clock::time_point::max();
+		condition_.notify_all();
+	}
+
+	void request_stop() {
+		std::lock_guard lock(mutex_);
+		if (stopping_) return;
+		stopping_ = true;
+		++generation_;
+		dirty_.clear();
+		background_.clear();
+		worker_.request_stop();
 		condition_.notify_all();
 	}
 
 	void stop() {
 		if (!worker_.joinable()) return;
-		worker_.request_stop();
-		condition_.notify_all();
+		request_stop();
 		worker_.join();
 	}
 
 private:
 	static constexpr auto full_scan_delay_ = std::chrono::milliseconds(200);
+	struct FileStamp {
+		std::filesystem::file_time_type modified;
+		uintmax_t size = 0;
+		auto operator<=>(const FileStamp &) const = default;
+	};
+
+	std::unordered_map<std::string, FileStamp> file_stamps() const {
+		std::unordered_map<std::string, FileStamp> result;
+		std::error_code error;
+		for (std::filesystem::recursive_directory_iterator iterator(workspace_.root(),
+				std::filesystem::directory_options::skip_permission_denied, error), end;
+				iterator != end; iterator.increment(error)) {
+			if (error) {
+				error.clear();
+				continue;
+			}
+			if (iterator->is_directory()) {
+				if (iterator->path().filename() == ".git" || std::filesystem::exists(iterator->path() / ".gdignore")) {
+					iterator.disable_recursion_pending();
+				}
+				continue;
+			}
+			if (iterator->path().extension() != ".gd" && !iterator->path().string().ends_with(".gd.uid") &&
+					iterator->path().filename() != "project.godot") continue;
+			auto modified = iterator->last_write_time(error);
+			if (error) { error.clear(); continue; }
+			auto size = iterator->file_size(error);
+			if (error) { error.clear(); continue; }
+			result[workspace_.uri_for_path(iterator->path())] = {modified, size};
+		}
+		return result;
+	}
+
+	static std::vector<std::string> merged(std::vector<std::string> first, const std::vector<std::string> &second) {
+		first.insert(first.end(), second.begin(), second.end());
+		std::sort(first.begin(), first.end());
+		first.erase(std::unique(first.begin(), first.end()), first.end());
+		return first;
+	}
+
+	void refresh_external_files() {
+		auto current = file_stamps();
+		std::unordered_map<std::string, FileStamp> previous;
+		std::unordered_set<std::string> open;
+		{
+			std::lock_guard lock(mutex_);
+			previous = stamps_;
+			stamps_ = current;
+			open = open_;
+		}
+		std::vector<std::string> changed;
+		for (const auto &[uri, stamp] : current) {
+			auto found = previous.find(uri);
+			if ((found == previous.end() || found->second != stamp) && !open.contains(uri)) changed.push_back(uri);
+		}
+		for (const auto &[uri, stamp] : previous) {
+			(void)stamp;
+			if (!current.contains(uri) && !open.contains(uri)) changed.push_back(uri);
+		}
+		if (changed.empty()) return;
+		std::sort(changed.begin(), changed.end());
+		changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+		auto generation = begin_update();
+		auto affected = workspace_.affected_documents(changed);
+		std::string error;
+		for (const auto &uri : changed) workspace_.refresh_file(uri, &error);
+		affected = merged(std::move(affected), workspace_.affected_documents(changed));
+		finish_update(generation, {}, affected);
+	}
 
 	bool publish(const std::string &uri, uint64_t generation, bool force, std::stop_token stop) {
+		{
+			std::lock_guard lock(mutex_);
+			if (stopping_ || stop.stop_requested()) return false;
+			if (generation != generation_) {
+				background_.insert(uri);
+				return false;
+			}
+		}
 		json items = json::array();
 		for (const auto &diagnostic : workspace_.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
 		auto version = workspace_.document_version(uri);
 		auto cache_key = items.dump();
 
-		std::lock_guard lock(mutex_);
-		if (stop.stop_requested() || generation != generation_) return false;
-		auto previous = published_.find(uri);
-		if (!force && previous != published_.end() && previous->second == cache_key) return true;
-		published_[uri] = std::move(cache_key);
+		bool should_send = false;
+		{
+			std::lock_guard lock(mutex_);
+			if (stopping_ || stop.stop_requested()) return false;
+			if (generation != generation_) {
+				background_.insert(uri);
+				return false;
+			}
+			auto previous = published_.find(uri);
+			if (previous != published_.end() && previous->second == cache_key) return true;
+			should_send = force || !items.empty() || previous != published_.end();
+			if (should_send) published_[uri] = std::move(cache_key);
+		}
+		if (!should_send) return true;
 		json params = {{"uri", uri}, {"diagnostics", std::move(items)}};
 		if (version >= 0) params["version"] = version;
 		send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", std::move(params)}});
@@ -187,39 +309,42 @@ private:
 
 	void run(std::stop_token stop) {
 		while (!stop.stop_requested()) {
-			std::vector<std::string> dirty;
+			std::string uri;
 			uint64_t generation = 0;
-			bool full_scan = false;
+			bool force = false;
+			bool poll = false;
 			{
 				std::unique_lock lock(mutex_);
-				condition_.wait(lock, [&] {
-					return stop.stop_requested() || !dirty_.empty() || full_pending_;
-				});
-				if (stop.stop_requested()) return;
-				generation = generation_;
-				if (!dirty_.empty()) {
-					dirty.assign(dirty_.begin(), dirty_.end());
-					dirty_.clear();
-				} else {
-					auto deadline = last_change_ + full_scan_delay_;
-					if (condition_.wait_until(lock, deadline, [&] {
-						return stop.stop_requested() || generation_ != generation || !dirty_.empty();
-					})) continue;
-					full_pending_ = false;
-					full_scan = true;
+				while (!stop.stop_requested() && !stopping_) {
+					auto now = std::chrono::steady_clock::now();
+					if (!dirty_.empty()) {
+						auto found = dirty_.begin();
+						uri = *found;
+						dirty_.erase(found);
+						force = true;
+						generation = generation_;
+						break;
+					}
+					if (poll_interval_.count() > 0 && now >= next_poll_) {
+						next_poll_ = now + poll_interval_;
+						poll = true;
+						break;
+					}
+					if (!background_.empty() && now >= last_change_ + full_scan_delay_) {
+						auto found = background_.begin();
+						uri = *found;
+						background_.erase(found);
+						generation = generation_;
+						break;
+					}
+					auto deadline = next_poll_;
+					if (!background_.empty()) deadline = std::min(deadline, last_change_ + full_scan_delay_);
+					condition_.wait_until(lock, deadline);
 				}
+				if (stop.stop_requested() || stopping_) return;
 			}
-			if (!dirty.empty()) {
-				for (const auto &uri : dirty) {
-					if (!publish(uri, generation, true, stop)) break;
-				}
-				continue;
-			}
-			if (full_scan) {
-				for (const auto &uri : workspace_.document_uris()) {
-					if (!publish(uri, generation, false, stop)) break;
-				}
-			}
+			if (poll) refresh_external_files();
+			else if (!uri.empty()) publish(uri, generation, force, stop);
 		}
 	}
 
@@ -227,10 +352,16 @@ private:
 	std::mutex mutex_;
 	std::condition_variable condition_;
 	std::unordered_set<std::string> dirty_;
+	std::unordered_set<std::string> background_;
+	std::unordered_set<std::string> open_;
 	std::unordered_map<std::string, std::string> published_;
+	std::unordered_map<std::string, FileStamp> stamps_;
 	uint64_t generation_ = 0;
-	bool full_pending_ = false;
+	bool stopping_ = false;
+	bool polling_started_ = false;
 	std::chrono::steady_clock::time_point last_change_ = std::chrono::steady_clock::now();
+	std::chrono::milliseconds poll_interval_{1000};
+	std::chrono::steady_clock::time_point next_poll_ = std::chrono::steady_clock::time_point::max();
 	std::jthread worker_;
 };
 
@@ -367,7 +498,8 @@ json initialize_result() {
 		{"capabilities", {
 			{"positionEncoding", "utf-16"},
 			{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
-			{"completionProvider", {{"triggerCharacters", json::array({"."})}, {"resolveProvider", false}}},
+			{"completionProvider", {{"triggerCharacters", json::array({".", "(", ",", ":", "=", "\"", "'"})},
+				{"resolveProvider", false}}},
 			{"hoverProvider", true},
 			{"definitionProvider", true},
 			{"documentSymbolProvider", true},
@@ -376,6 +508,51 @@ json initialize_result() {
 		}},
 		{"serverInfo", {{"name", "gdscript-lsp"}, {"version", "0.1.0"}}}
 	};
+}
+
+std::vector<std::string> merge_uris(std::vector<std::string> first, const std::vector<std::string> &second) {
+	first.insert(first.end(), second.begin(), second.end());
+	std::sort(first.begin(), first.end());
+	first.erase(std::unique(first.begin(), first.end()), first.end());
+	return first;
+}
+
+void apply_configuration(Workspace &workspace, DiagnosticPublisher &publisher, const json &settings) {
+	if (!settings.is_object()) return;
+	const json *root = &settings;
+	if (auto found = root->find("gdscriptLsp"); found != root->end() && found->is_object()) root = &*found;
+	auto completion = root->find("completion");
+	if (completion != root->end() && completion->is_object()) {
+		auto config = workspace.completion_config();
+		auto boolean = [&](const char *name, bool &target) {
+			if (auto found = completion->find(name); found != completion->end() && found->is_boolean()) target = found->get<bool>();
+		};
+		boolean("enums", config.enums);
+		boolean("extendedTypeHints", config.extended_type_hints);
+		boolean("constructors", config.constructors);
+		boolean("hidePrivate", config.hide_private);
+		if (auto member_strings = completion->find("memberStrings"); member_strings != completion->end()) {
+			if (member_strings->is_boolean()) config.member_strings = member_strings->get<bool>();
+			else if (member_strings->is_object()) {
+				auto member_boolean = [&](const char *name, bool &target) {
+					if (auto found = member_strings->find(name); found != member_strings->end() && found->is_boolean()) {
+						target = found->get<bool>();
+					}
+				};
+				member_boolean("enabled", config.member_strings);
+				member_boolean("preferStringName", config.member_strings_prefer_string_name);
+				member_boolean("includePrivate", config.member_strings_include_private);
+			}
+		}
+		workspace.set_completion_config(config);
+	}
+	if (auto diagnostics = root->find("diagnostics"); diagnostics != root->end() && diagnostics->is_object()) {
+		if (auto interval = diagnostics->find("pollIntervalMs"); interval != diagnostics->end() && interval->is_number_integer()) {
+			auto milliseconds = interval->get<int64_t>();
+			if (milliseconds > 0) milliseconds = std::max<int64_t>(milliseconds, 100);
+			publisher.set_poll_interval(std::chrono::milliseconds(std::max<int64_t>(milliseconds, 0)));
+		}
+	}
 }
 
 } // namespace
@@ -420,6 +597,9 @@ int main(int argc, char **argv) {
 				respond_error(id, -32600, "initialize may only be sent once");
 				continue;
 			}
+			if (auto options = params.find("initializationOptions"); options != params.end()) {
+				apply_configuration(workspace, diagnostics, *options);
+			}
 			auto selected_project = project.empty() ? project_from_initialize(params, error) : find_project_root(project);
 			if (!selected_project) {
 				if (error.empty()) error = "project.godot not found at or above " + project.string();
@@ -444,44 +624,60 @@ int main(int argc, char **argv) {
 			diagnostics.schedule_full();
 		} else if (method == "shutdown") {
 			shutdown = true;
-			diagnostics.stop();
+			diagnostics.request_stop();
 			respond(id, nullptr);
 		} else if (method == "textDocument/didOpen") {
 			auto document = params["textDocument"];
 			auto uri = document.value("uri", "");
 			auto text = document.value("text", "");
 			buffers[uri] = text;
+			diagnostics.set_open(uri, true);
 			auto generation = diagnostics.begin_update();
+			auto affected = workspace.affected_documents({uri});
 			if (workspace.update_document(uri, std::move(text), document.value("version", -1), &error)) {
-				diagnostics.finish_update(generation, uri);
-			}
+				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
+				diagnostics.finish_update(generation, {uri}, affected);
+			} else diagnostics.set_open(uri, false);
 		} else if (method == "textDocument/didChange") {
 			auto document = params["textDocument"];
 			auto uri = document.value("uri", "");
 			if (!buffers.contains(uri)) buffers[uri] = "";
 			apply_content_changes(buffers[uri], params.value("contentChanges", json::array()));
 			auto generation = diagnostics.begin_update();
+			auto affected = workspace.affected_documents({uri});
 			if (workspace.update_document(uri, buffers[uri], document.value("version", -1), &error)) {
-				diagnostics.finish_update(generation, uri);
+				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
+				diagnostics.finish_update(generation, {uri}, affected);
 			}
 		} else if (method == "textDocument/didClose") {
 			auto uri = params["textDocument"].value("uri", "");
 			buffers.erase(uri);
+			diagnostics.set_open(uri, false);
 			auto generation = diagnostics.begin_update();
-			if (workspace.close_document(uri, &error)) diagnostics.finish_update(generation, uri);
+			auto affected = workspace.affected_documents({uri});
+			if (workspace.close_document(uri, &error)) {
+				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
+				diagnostics.finish_update(generation, {uri}, affected);
+			}
+		} else if (method == "workspace/didChangeConfiguration") {
+			apply_configuration(workspace, diagnostics, params.value("settings", json::object()));
 		} else if (method == "workspace/didChangeWatchedFiles") {
-			diagnostics.begin_update();
+			auto generation = diagnostics.begin_update();
+			std::vector<std::string> changed;
 			for (const auto &change : params.value("changes", json::array())) {
 				auto uri = change.value("uri", "");
-				if (!buffers.contains(uri)) workspace.refresh_file(uri, &error);
+				if (!buffers.contains(uri)) changed.push_back(uri);
 			}
-			diagnostics.schedule_full();
+			auto affected = workspace.affected_documents(changed);
+			for (const auto &uri : changed) workspace.refresh_file(uri, &error);
+			affected = merge_uris(std::move(affected), workspace.affected_documents(changed));
+			diagnostics.finish_update(generation, {}, affected);
 		} else if (method == "textDocument/completion") {
 			auto uri = params["textDocument"].value("uri", "");
-			auto items = workspace.completion(uri, parse_position(params["position"]));
+			auto completion = workspace.completion_result(uri, parse_position(params["position"]));
 			json output = json::array();
-			for (const auto &item : items) output.push_back(completion_json(item));
-			respond(id, {{"isIncomplete", false}, {"items", std::move(output)}});
+			for (const auto &item : completion.items) output.push_back(completion_json(item));
+			respond(id, {{"isIncomplete", completion.is_incomplete}, {"items", std::move(output)}});
 		} else if (method == "textDocument/hover") {
 			auto uri = params["textDocument"].value("uri", "");
 			auto hover = workspace.hover(uri, parse_position(params["position"]));

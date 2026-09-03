@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_set>
 
 namespace gdscript_lsp {
@@ -180,6 +181,7 @@ ResolvedType iterable_value_type(const ResolvedType &type) {
 struct CompletionContext {
 	bool member_access = false;
 	std::optional<std::string> receiver;
+	std::string member_prefix;
 };
 
 CompletionContext completion_context(std::string_view source, size_t offset) {
@@ -233,6 +235,7 @@ CompletionContext completion_context(std::string_view source, size_t offset) {
 
 	CompletionContext result;
 	result.member_access = true;
+	result.member_prefix = std::string(before_cursor.substr(dot + 1));
 	int parentheses = 0;
 	int brackets = 0;
 	int braces = 0;
@@ -269,6 +272,156 @@ CompletionContext completion_context(std::string_view source, size_t offset) {
 	auto receiver = trim(before_cursor.substr(start, dot - start));
 	if (!receiver.empty()) result.receiver = std::move(receiver);
 	return result;
+}
+
+struct ActiveCall {
+	std::string callee;
+	std::vector<std::string> arguments;
+	size_t argument_index = 0;
+	bool in_string = false;
+	char quote = 0;
+};
+
+size_t expression_start(std::string_view source, size_t end) {
+	int parentheses = 0;
+	int brackets = 0;
+	int braces = 0;
+	while (end > 0) {
+		auto index = end - 1;
+		auto character = source[index];
+		if (character == ')') ++parentheses;
+		else if (character == ']') ++brackets;
+		else if (character == '}') ++braces;
+		else if (character == '(') {
+			if (parentheses == 0) break;
+			--parentheses;
+		} else if (character == '[') {
+			if (brackets == 0) break;
+			--brackets;
+		} else if (character == '{') {
+			if (braces == 0) break;
+			--braces;
+		} else if (parentheses == 0 && brackets == 0 && braces == 0 &&
+				(std::isspace(static_cast<unsigned char>(character)) || character == '=' || character == ',' ||
+				 character == ':' || character == ';' || character == '+' || character == '-' || character == '*' ||
+				 character == '/' || character == '%' || character == '!' || character == '<' || character == '>' ||
+				 character == '&' || character == '|' || character == '^')) {
+			break;
+		}
+		end = index;
+	}
+	return end;
+}
+
+std::optional<ActiveCall> active_call(std::string_view source, size_t offset) {
+	offset = std::min(offset, source.size());
+	struct Delimiter { char value; size_t offset; std::vector<size_t> commas; };
+	std::vector<Delimiter> stack;
+	char quote = 0;
+	bool triple_quote = false;
+	bool escaped = false;
+	bool comment = false;
+	for (size_t index = 0; index < offset; ++index) {
+		auto character = source[index];
+		if (comment) {
+			if (character == '\n') comment = false;
+			continue;
+		}
+		if (quote) {
+			if (triple_quote && character == quote && index + 2 < offset && source[index + 1] == quote &&
+					source[index + 2] == quote) {
+				index += 2;
+				quote = 0;
+				triple_quote = false;
+			} else if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '#') {
+			comment = true;
+		} else if (character == '\'' || character == '"') {
+			quote = character;
+			if (index + 2 < offset && source[index + 1] == quote && source[index + 2] == quote) {
+				triple_quote = true;
+				index += 2;
+			}
+		} else if (character == '(' || character == '[' || character == '{') {
+			stack.push_back({character, index, {}});
+		} else if (character == ')' || character == ']' || character == '}') {
+			if (!stack.empty()) stack.pop_back();
+		} else if (character == ',' && !stack.empty() && stack.back().value == '(') {
+			stack.back().commas.push_back(index);
+		}
+	}
+	auto call = std::find_if(stack.rbegin(), stack.rend(), [](const Delimiter &value) { return value.value == '('; });
+	if (call == stack.rend()) return std::nullopt;
+	auto begin = expression_start(source, call->offset);
+	auto callee = trim(source.substr(begin, call->offset - begin));
+	if (callee.empty()) return std::nullopt;
+	ActiveCall result;
+	result.callee = std::move(callee);
+	result.argument_index = call->commas.size();
+	result.in_string = quote != 0;
+	result.quote = quote;
+	size_t argument_start = call->offset + 1;
+	for (auto comma : call->commas) {
+		result.arguments.push_back(trim(source.substr(argument_start, comma - argument_start)));
+		argument_start = comma + 1;
+	}
+	result.arguments.push_back(trim(source.substr(argument_start, offset - argument_start)));
+	return result;
+}
+
+struct ExpectedValue {
+	ResolvedType type;
+	std::string access;
+};
+
+std::optional<std::pair<std::string, std::string>> assignment_parts(std::string_view source, size_t offset) {
+	auto line_start = source.rfind('\n', offset == 0 ? 0 : offset - 1);
+	line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
+	auto line = source.substr(line_start, offset - line_start);
+	char quote = 0;
+	bool escaped = false;
+	int depth = 0;
+	size_t separator = std::string_view::npos;
+	for (size_t index = 0; index < line.size(); ++index) {
+		auto character = line[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') quote = character;
+		else if (character == '(' || character == '[' || character == '{') ++depth;
+		else if (character == ')' || character == ']' || character == '}') --depth;
+		else if (character == '=' && depth == 0) {
+			auto previous = index == 0 ? '\0' : line[index - 1];
+			auto next = index + 1 < line.size() ? line[index + 1] : '\0';
+			if (previous != ':' && previous != '<' && previous != '>' && previous != '!' && previous != '=' && next != '=') separator = index;
+		}
+	}
+	if (separator == std::string_view::npos) return std::nullopt;
+	return std::pair{trim(line.substr(0, separator)), trim(line.substr(separator + 1))};
+}
+
+bool type_hint_context(std::string_view source, size_t offset) {
+	auto line_start = source.rfind('\n', offset == 0 ? 0 : offset - 1);
+	line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
+	auto line = trim(source.substr(line_start, offset - line_start));
+	if (line.starts_with('#') || line.find('=') != std::string_view::npos) return false;
+	auto arrow = line.rfind("->");
+	auto colon = line.rfind(':');
+	auto marker = arrow != std::string_view::npos ? arrow + 2 :
+		(colon != std::string_view::npos ? colon + 1 : std::string_view::npos);
+	if (marker == std::string_view::npos) return false;
+	auto tail = trim(line.substr(marker));
+	return std::all_of(tail.begin(), tail.end(), [](unsigned char character) {
+		return std::isalnum(character) || character == '_' || character == '.' || character == '[' ||
+			character == ']' || character == ',' || std::isspace(character);
+	});
 }
 
 bool callable_kind(SymbolKind kind) {
@@ -338,6 +491,39 @@ bool can_convert_strict(std::string_view source, std::string_view target) {
 	if (target == "Array" && packed_arrays.contains(source)) return true;
 	if (source == "Array" && packed_arrays.contains(target)) return true;
 	return false;
+}
+
+void collect_identifiers(const Document &document, const SyntaxNode &node,
+		std::unordered_set<std::string> &identifiers) {
+	if (node.kind == "identifier") identifiers.insert(std::string(document.text(node)));
+	for (const auto &child : node.children) collect_identifiers(document, child, identifiers);
+}
+
+std::vector<std::string> quoted_script_paths(std::string_view source) {
+	std::vector<std::string> result;
+	for (size_t index = 0; index < source.size();) {
+		auto quote = source[index];
+		if (quote != '\'' && quote != '"') {
+			++index;
+			continue;
+		}
+		auto begin = ++index;
+		bool escaped = false;
+		while (index < source.size()) {
+			auto character = source[index];
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) break;
+			++index;
+		}
+		if (index >= source.size()) break;
+		auto value = std::string(source.substr(begin, index - begin));
+		if (value.starts_with("res://") || value.starts_with("uid://") || value.ends_with(".gd")) {
+			result.push_back(std::move(value));
+		}
+		++index;
+	}
+	return result;
 }
 
 } // namespace
@@ -419,6 +605,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 }
 
 void Workspace::scan_uid_files() {
+	uid_paths_.clear();
 	std::error_code ec;
 	for (std::filesystem::recursive_directory_iterator iterator(root_, std::filesystem::directory_options::skip_permission_denied, ec), end;
 			iterator != end; iterator.increment(ec)) {
@@ -482,6 +669,8 @@ void Workspace::rebuild_registry() {
 	global_name_counts_.clear();
 	symbol_owners_.clear();
 	static_symbol_types_.clear();
+	document_dependencies_.clear();
+	reverse_document_dependencies_.clear();
 	for (auto &[uri, document] : documents_) {
 		(void)uri;
 		for (auto &record : document->classes()) {
@@ -556,6 +745,50 @@ void Workspace::rebuild_registry() {
 			if (type.known()) static_symbol_types_[member.id] = std::move(type);
 		}
 	}
+
+	// Build a conservative document graph from every resolved structural edge
+	// and every source-level global/script reference. The identifier index also
+	// preserves invalidation when a formerly unresolved global becomes valid.
+	std::unordered_map<std::string, std::string> resource_uris;
+	for (const auto &[uri, document] : documents_) resource_uris[document->resource_path()] = uri;
+	auto dependency_uri = [&](std::string resource) -> std::string {
+		if (auto found = resource_uris.find(resource); found != resource_uris.end()) return found->second;
+		// Inner class IDs append a dotted suffix to the owning .gd resource.
+		auto script_end = resource.find(".gd.");
+		if (script_end != std::string::npos) {
+			resource.resize(script_end + 3);
+			if (auto found = resource_uris.find(resource); found != resource_uris.end()) return found->second;
+		}
+		return {};
+	};
+	for (const auto &[uri, document] : documents_) {
+		auto &dependencies = document_dependencies_[uri];
+		auto add_dependency = [&](const std::string &target) {
+			if (!target.empty() && target != uri) dependencies.insert(target);
+		};
+		for (const auto &record : document->classes()) {
+			if (!record.base_class_id.empty() && !record.base_class_id.starts_with("native:")) {
+				if (auto *base = find_class(record.base_class_id)) add_dependency(base->symbol.uri);
+				else add_dependency(dependency_uri(record.base_class_id));
+			}
+		}
+		std::unordered_set<std::string> identifiers;
+		collect_identifiers(*document, document->syntax_root(), identifiers);
+		for (const auto &identifier : identifiers) {
+			if (auto global = global_classes_.find(identifier); global != global_classes_.end()) {
+				if (auto *record = find_class(global->second)) add_dependency(record->symbol.uri);
+			}
+			if (auto autoload = autoloads_.find(identifier); autoload != autoloads_.end()) {
+				add_dependency(dependency_uri(resolve_path_reference(autoload->second, document->resource_path())));
+			}
+		}
+		for (auto path : quoted_script_paths(document->source())) {
+			add_dependency(dependency_uri(resolve_path_reference(std::move(path), document->resource_path())));
+		}
+	}
+	for (const auto &[dependent, dependencies] : document_dependencies_) {
+		for (const auto &dependency : dependencies) reverse_document_dependencies_[dependency].insert(dependent);
+	}
 }
 
 bool Workspace::update_document(const std::string &uri, std::string text, int64_t version, std::string *error) {
@@ -583,7 +816,20 @@ bool Workspace::close_document(const std::string &uri, std::string *error) {
 		if (error) *error = "document not indexed";
 		return false;
 	}
-	documents_[uri] = std::make_shared<Document>(uri, resource_path(path_for_uri(uri)), found->second);
+	auto path = path_for_uri(uri);
+	if (!std::filesystem::exists(path)) {
+		documents_.erase(uri);
+		disk_sources_.erase(found);
+		rebuild_registry();
+		return true;
+	}
+	auto source = read_file(path);
+	if (source.empty() && std::filesystem::file_size(path) != 0) {
+		if (error) *error = "cannot read file";
+		return false;
+	}
+	found->second = source;
+	documents_[uri] = std::make_shared<Document>(uri, resource_path(path), std::move(source));
 	rebuild_registry();
 	return true;
 }
@@ -591,6 +837,11 @@ bool Workspace::close_document(const std::string &uri, std::string *error) {
 bool Workspace::refresh_file(const std::string &uri, std::string *error) {
 	std::unique_lock lock(mutex_);
 	auto path = path_for_uri(uri);
+	if (path.string().ends_with(".gd.uid")) {
+		scan_uid_files();
+		rebuild_registry();
+		return true;
+	}
 	if (path.lexically_normal() == (root_ / "project.godot").lexically_normal()) {
 		read_project_settings();
 		rebuild_registry();
@@ -1362,11 +1613,9 @@ bool Workspace::is_potential_downcast(const ResolvedType &expected, const Resolv
 	return is_assignable(actual, expected);
 }
 
-std::vector<CompletionItem> Workspace::completion(const std::string &uri, Position position) const {
-	std::shared_lock lock(mutex_);
+std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document &document_value, Position position) const {
 	std::vector<CompletionItem> result;
-	auto *document = find_document(uri);
-	if (!document) return result;
+	auto *document = &document_value;
 	auto offset = position_to_byte(document->source(), position);
 	auto completion_site = completion_context(document->source(), offset);
 	std::set<std::string> names;
@@ -1489,6 +1738,359 @@ std::vector<CompletionItem> Workspace::completion(const std::string &uri, Positi
 	return result;
 }
 
+CompletionResult Workspace::completion_result(const std::string &uri, Position position, CompletionProfile profile) const {
+	std::shared_lock lock(mutex_);
+	CompletionResult output;
+	auto *document = find_document(uri);
+	if (!document) {
+		output.is_incomplete = true;
+		return output;
+	}
+	auto offset = position_to_byte(document->source(), position);
+	auto site = completion_context(document->source(), offset);
+	auto *context = document->class_at(position);
+
+	auto infer = [&](std::string expression) {
+		std::vector<std::string> stack;
+		return infer_expression(std::move(expression), *document, context, position, stack);
+	};
+	auto symbol_by_id = [&](std::string_view id) -> const Symbol * {
+		for (const auto &[class_id, record] : classes_) {
+			(void)class_id;
+			for (const auto &member : record->members) if (member.id == id) return &member;
+		}
+		return nullptr;
+	};
+	auto call = active_call(document->source(), offset);
+	auto callable_argument = [&](const ActiveCall &active) -> std::optional<ExpectedValue> {
+		auto callable = infer(active.callee);
+		std::string declared;
+		if (callable.symbol_id.starts_with("native:")) {
+			auto separator = callable.symbol_id.rfind("::");
+			if (separator != std::string::npos) {
+				auto owner = callable.symbol_id.substr(7, separator - 7);
+				auto name = callable.symbol_id.substr(separator + 2);
+				if (auto *member = native_api_.find_member(owner, name); member && member->signature &&
+						active.argument_index < member->signature->arguments.size()) {
+					declared = member->signature->arguments[active.argument_index].type;
+				}
+			}
+		} else if (callable.symbol_id.starts_with("utility:")) {
+			if (auto *signature = native_api_.find_utility_function(callable.symbol_id.substr(8)); signature &&
+					active.argument_index < signature->arguments.size()) declared = signature->arguments[active.argument_index].type;
+		} else if (callable.symbol_id.starts_with("builtin:")) {
+			if (auto *function = find_gdscript_builtin_function(callable.symbol_id.substr(8)); function &&
+					active.argument_index < function->signature.arguments.size()) declared = function->signature.arguments[active.argument_index].type;
+		} else if (auto *symbol = symbol_by_id(callable.symbol_id)) {
+			size_t argument = 0;
+			for (const auto &child : symbol->children) {
+				if (!child.is_parameter) continue;
+				if (argument++ == active.argument_index) {
+					declared = child.declared_type;
+					break;
+				}
+			}
+		}
+		if (declared.empty()) return std::nullopt;
+		auto type = type_from_name(declared, context);
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), normalize_api_type(declared)}) : std::nullopt;
+	};
+	auto assignment_expected = [&]() -> std::optional<ExpectedValue> {
+		auto parts = assignment_parts(document->source(), offset);
+		if (!parts) return std::nullopt;
+		auto lhs = parts->first;
+		if (lhs.starts_with("var ") || lhs.starts_with("const ")) {
+			auto colon = lhs.rfind(':');
+			if (colon != std::string::npos) {
+				auto declared = trim(std::string_view(lhs).substr(colon + 1));
+				auto type = type_from_name(declared, context);
+				if (type.known()) return ExpectedValue{std::move(type), std::move(declared)};
+			}
+		}
+		auto type = infer(lhs);
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+	};
+	auto comparison_expected = [&]() -> std::optional<ExpectedValue> {
+		auto line_start = document->source().rfind('\n', offset == 0 ? 0 : offset - 1);
+		line_start = line_start == std::string::npos ? 0 : line_start + 1;
+		auto line = std::string_view(document->source()).substr(line_start, offset - line_start);
+		size_t separator = std::string_view::npos;
+		for (auto operation : {std::string_view("=="), std::string_view("!="), std::string_view("<="), std::string_view(">=")}) {
+			auto found = line.rfind(operation);
+			if (found != std::string_view::npos && (separator == std::string_view::npos || found > separator)) separator = found;
+		}
+		if (separator == std::string_view::npos) return std::nullopt;
+		auto type = infer(trim(line.substr(0, separator)));
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+	};
+	auto match_expected = [&]() -> std::optional<ExpectedValue> {
+		auto line_start = document->source().rfind('\n', offset == 0 ? 0 : offset - 1);
+		line_start = line_start == std::string::npos ? 0 : line_start + 1;
+		auto current = std::string_view(document->source()).substr(line_start, offset - line_start);
+		auto indent = current.find_first_not_of(" \t");
+		if (indent == std::string_view::npos) indent = current.size();
+		while (line_start > 0) {
+			auto end = line_start - 1;
+			// Searching at byte zero when byte zero is itself a newline finds the
+			// same boundary forever. The previous line starts at zero in that case.
+			auto begin = end == 0 ? std::string::npos : document->source().rfind('\n', end - 1);
+			begin = begin == std::string::npos ? 0 : begin + 1;
+			auto line = std::string_view(document->source()).substr(begin, end - begin);
+			auto clean = trim(line);
+			auto line_indent = line.find_first_not_of(" \t");
+			if (clean.starts_with("match ") && clean.ends_with(':') && line_indent < indent) {
+				auto type = infer(clean.substr(6, clean.size() - 7));
+				return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+			}
+			line_start = begin;
+		}
+		return std::nullopt;
+	};
+	auto expected = call ? callable_argument(*call) : std::nullopt;
+	if (!expected) expected = assignment_expected();
+	if (!expected) expected = comparison_expected();
+	if (!expected) expected = match_expected();
+
+	auto rank = [](std::vector<CompletionItem> &items) {
+		for (size_t index = 0; index < items.size(); ++index) {
+			auto value = std::to_string(index);
+			items[index].sort_text = std::string(10 - std::min<size_t>(value.size(), 10), '0') + value;
+		}
+	};
+	auto merge_front = [](std::vector<CompletionItem> additions, std::vector<CompletionItem> baseline) {
+		std::vector<CompletionItem> result;
+		std::set<std::tuple<std::string, std::string, SymbolKind>> seen;
+		auto append = [&](std::vector<CompletionItem> &items) {
+			for (auto &item : items) {
+				auto key = std::tuple{item.filter_text, item.insert_text, item.kind};
+				if (seen.insert(key).second) result.push_back(std::move(item));
+			}
+		};
+		append(additions);
+		append(baseline);
+		return result;
+	};
+
+	// String-valued method and property names are true context owners: a normal
+	// identifier list is actively misleading inside these arguments.
+	if (completion_config_.member_strings && call) {
+		struct StringCallSpec { size_t argument; bool methods; bool first_argument_receiver; bool subpath; bool node_path; };
+		static const std::unordered_map<std::string, StringCallSpec> specs = {
+			{"call", {0, true, false, false, false}}, {"call_deferred", {0, true, false, false, false}},
+			{"callv", {0, true, false, false, false}}, {"call_thread_safe", {0, true, false, false, false}},
+			{"call_deferred_thread_group", {0, true, false, false, false}}, {"has_method", {0, true, false, false, false}},
+			{"rpc", {0, true, false, false, false}}, {"rpc_id", {1, true, false, false, false}},
+			{"Callable", {1, true, true, false, false}}, {"set", {0, false, false, false, false}},
+			{"get", {0, false, false, false, false}}, {"set_deferred", {0, false, false, false, false}},
+			{"set_indexed", {0, false, false, true, true}}, {"get_indexed", {0, false, false, true, true}},
+			{"tween_property", {1, false, true, true, false}},
+		};
+		auto member = trailing_member(call->callee);
+		auto function_name = member ? member->second : call->callee;
+		if (auto spec_it = specs.find(function_name); spec_it != specs.end() && call->argument_index == spec_it->second.argument) {
+			auto spec = spec_it->second;
+			std::string receiver_expression;
+			if (spec.first_argument_receiver) {
+				if (!call->arguments.empty()) receiver_expression = call->arguments.front();
+			} else if (member) receiver_expression = member->first;
+			else receiver_expression = "self";
+			auto receiver = infer(receiver_expression);
+			if (!(receiver.kind == TypeKind::Builtin && receiver.name == "Dictionary") && receiver.known()) {
+				auto current_argument = call->arguments.empty() ? std::string{} : call->arguments.back();
+				std::string prefix;
+				if (call->in_string) {
+					auto quote_at = current_argument.rfind(call->quote);
+					prefix = quote_at == std::string::npos ? current_argument : current_argument.substr(quote_at + 1);
+				}
+				auto target = receiver;
+				std::string completed_path;
+				if (spec.subpath) {
+					auto separator = prefix.rfind(':');
+					if (separator != std::string::npos) {
+						completed_path = prefix.substr(0, separator + 1);
+						auto walked = prefix.substr(0, separator);
+						size_t start = 0;
+						while (start < walked.size() && target.known()) {
+							auto end = walked.find(':', start);
+							auto segment = walked.substr(start, end - start);
+							std::vector<std::string> stack;
+							target = member_value_type(target, segment, *document, position, stack);
+							if (end == std::string::npos) break;
+							start = end + 1;
+						}
+					}
+				}
+				std::set<std::string> member_names;
+				auto append_member = [&](const Symbol &symbol) {
+					if (spec.methods != callable_kind(symbol.kind)) return;
+					if (!spec.methods && symbol.kind != SymbolKind::Property && symbol.kind != SymbolKind::Field &&
+							symbol.kind != SymbolKind::Variable) return;
+					if (!completion_config_.member_strings_include_private && symbol.name.starts_with('_')) return;
+					if (!member_names.insert(symbol.name).second) return;
+					auto value = completed_path + symbol.name;
+					CompletionItem item;
+					item.label = value;
+					item.filter_text = value;
+					item.insert_text = call->in_string ? value :
+						(spec.node_path ? "^\"" + value + "\"" :
+						 (completion_config_.member_strings_prefer_string_name ? "&\"" + value + "\"" : "\"" + value + "\""));
+					item.kind = symbol.kind;
+					output.items.push_back(std::move(item));
+				};
+				if (target.kind == TypeKind::ScriptClass) {
+					if (auto *record = find_class(target.symbol_id)) {
+						for (auto *entry : all_members(*record)) append_member(*entry);
+						auto base = native_base(*record);
+						if (!base.empty()) for (auto *entry : native_api_.members(base)) {
+							Symbol symbol;
+							symbol.name = entry->name;
+							symbol.kind = entry->kind;
+							append_member(symbol);
+						}
+					}
+				} else {
+					auto native_name = target.kind == TypeKind::Callable ? std::string("Callable") : target.name;
+					for (auto *entry : native_api_.members(native_name)) {
+						Symbol symbol;
+						symbol.name = entry->name;
+						symbol.kind = entry->kind;
+						append_member(symbol);
+					}
+				}
+				if (!output.items.empty()) {
+					output.disposition = CompletionDisposition::Replace;
+					output.provider = "memberStrings";
+					rank(output.items);
+					return output;
+				}
+			}
+		}
+	}
+
+	if (completion_config_.enums && expected && expected->type.kind == TypeKind::Enum) {
+		std::vector<std::string> values;
+		std::string access = expected->access;
+		if (expected->type.symbol_id.starts_with("global:")) {
+			values = native_api_.global_enum_values(expected->type.symbol_id.substr(7));
+			access.clear();
+		} else if (expected->type.symbol_id.starts_with("nativeenum:")) {
+			auto path = expected->type.symbol_id.substr(11);
+			auto separator = path.rfind('.');
+			if (separator != std::string::npos) {
+				values = native_api_.enum_values(path.substr(0, separator), path.substr(separator + 1));
+				access = path.substr(0, separator);
+			}
+		} else if (auto *symbol = symbol_by_id(expected->type.symbol_id)) {
+			for (const auto &child : symbol->children) values.push_back(child.name);
+		}
+		for (const auto &name : values) {
+			auto inserted = access.empty() ? name : access + "." + name;
+			output.items.push_back(completion_item(inserted, {}, {}, SymbolKind::Enum));
+		}
+		if (!output.items.empty()) {
+			output.disposition = CompletionDisposition::Replace;
+			output.provider = "enums";
+			rank(output.items);
+			return output;
+		}
+	}
+
+	std::vector<CompletionItem> additions;
+	std::string augment_provider;
+	if (completion_config_.extended_type_hints && type_hint_context(document->source(), offset)) {
+		auto add_type = [&](std::string name, SymbolKind kind = SymbolKind::Class) {
+			additions.push_back(completion_item(std::move(name), {}, {}, kind));
+		};
+		if (site.member_access && site.receiver) {
+			for (auto &item : semantic_completion_locked(*document, position)) {
+				if (item.kind == SymbolKind::Class || item.kind == SymbolKind::Enum || item.kind == SymbolKind::Constant) {
+					additions.push_back(std::move(item));
+				}
+			}
+		} else {
+			std::set<std::string> names;
+			for (auto *scope = context; scope; scope = enclosing_class(*scope)) {
+				for (const auto &member : scope->members) {
+					if ((member.kind == SymbolKind::Class || member.kind == SymbolKind::Enum) && names.insert(member.name).second) {
+						add_type(member.name, member.kind);
+					} else if (member.kind == SymbolKind::Constant) {
+						std::unordered_set<std::string> stack;
+						auto type = resolve_static_symbol(member, stack);
+						if ((type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum) && names.insert(member.name).second) {
+							add_type(member.name, type.kind == TypeKind::Enum ? SymbolKind::Enum : SymbolKind::Class);
+						}
+					}
+				}
+			}
+			std::vector<std::string> globals;
+			for (const auto &[name, id] : global_classes_) { (void)id; globals.push_back(name); }
+			std::sort(globals.begin(), globals.end());
+			for (auto &name : globals) if (names.insert(name).second) add_type(std::move(name));
+			std::vector<std::string> natives;
+			for (const auto &[name, record] : native_api_.classes()) { (void)record; natives.push_back(name); }
+			std::sort(natives.begin(), natives.end());
+			for (auto &name : natives) if (names.insert(name).second) add_type(std::move(name));
+		}
+		if (!additions.empty()) augment_provider = "extendedTypeHints";
+	}
+
+	if (completion_config_.constructors && expected && expected->type.instance &&
+			(expected->type.kind == TypeKind::ScriptClass || expected->type.kind == TypeKind::NativeClass ||
+			 expected->type.kind == TypeKind::Builtin)) {
+		bool has_arguments = false;
+		if (expected->type.kind == TypeKind::ScriptClass) {
+			if (auto *record = find_class(expected->type.symbol_id)) if (auto *init = find_member(*record, "_init")) {
+				has_arguments = std::any_of(init->children.begin(), init->children.end(), [](const Symbol &child) { return child.is_parameter; });
+			}
+		} else if (auto *constructors = native_api_.constructors(expected->type.name)) {
+			has_arguments = std::any_of(constructors->begin(), constructors->end(), [](const CallableSignature &signature) {
+				return !signature.arguments.empty() || signature.is_vararg;
+			});
+		}
+		auto access = expected->access.empty() ? expected->type.name : expected->access;
+		CompletionItem item;
+		item.filter_text = access + ".new";
+		item.label = item.filter_text + (has_arguments ? "(â¦)" : "()");
+		item.insert_text = item.filter_text + (has_arguments ? "(" : "()");
+		item.kind = SymbolKind::Constructor;
+		additions.insert(additions.begin(), std::move(item));
+		if (augment_provider.empty()) augment_provider = "constructors";
+	}
+
+	if (profile == CompletionProfile::Helpers) {
+		output.items = std::move(additions);
+		if (!output.items.empty()) {
+			output.disposition = CompletionDisposition::Augment;
+			output.provider = std::move(augment_provider);
+			rank(output.items);
+		}
+		return output;
+	}
+
+	output.items = merge_front(std::move(additions), semantic_completion_locked(*document, position));
+	if (completion_config_.hide_private && site.member_access && !site.member_prefix.starts_with('_')) {
+		std::erase_if(output.items, [](const CompletionItem &item) { return item.filter_text.starts_with('_'); });
+	}
+	output.disposition = CompletionDisposition::Replace;
+	output.provider = augment_provider.empty() ? "semantic" : std::move(augment_provider);
+	rank(output.items);
+	return output;
+}
+
+std::vector<CompletionItem> Workspace::completion(const std::string &uri, Position position) const {
+	return completion_result(uri, position, CompletionProfile::Full).items;
+}
+
+void Workspace::set_completion_config(CompletionConfig config) {
+	std::unique_lock lock(mutex_);
+	completion_config_ = config;
+}
+
+CompletionConfig Workspace::completion_config() const {
+	std::shared_lock lock(mutex_);
+	return completion_config_;
+}
+
 std::optional<HoverResult> Workspace::hover(const std::string &uri, Position position) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);
@@ -1556,6 +2158,32 @@ std::vector<std::string> Workspace::document_uris() const {
 		(void)document;
 		result.push_back(uri);
 	}
+	std::sort(result.begin(), result.end());
+	return result;
+}
+
+std::vector<std::string> Workspace::affected_documents(const std::vector<std::string> &changed_uris) const {
+	std::shared_lock lock(mutex_);
+	std::unordered_set<std::string> affected;
+	std::vector<std::string> queue;
+	for (const auto &uri : changed_uris) {
+		if (uri.ends_with("/project.godot") || uri.ends_with(".gd.uid")) {
+			for (const auto &[document_uri, document] : documents_) {
+				(void)document;
+				affected.insert(document_uri);
+			}
+			break;
+		}
+		if (affected.insert(uri).second) queue.push_back(uri);
+	}
+	for (size_t index = 0; index < queue.size(); ++index) {
+		auto found = reverse_document_dependencies_.find(queue[index]);
+		if (found == reverse_document_dependencies_.end()) continue;
+		for (const auto &dependent : found->second) {
+			if (affected.insert(dependent).second) queue.push_back(dependent);
+		}
+	}
+	std::vector<std::string> result(affected.begin(), affected.end());
 	std::sort(result.begin(), result.end());
 	return result;
 }

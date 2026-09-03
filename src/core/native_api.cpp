@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <unordered_set>
 
@@ -273,6 +274,22 @@ bool NativeApi::has_enum(std::string_view class_name, std::string_view enum_name
 bool NativeApi::enum_has_value(std::string_view class_name, std::string_view enum_name, std::string_view value) const {
 	auto *member = find_member(class_name, enum_name);
 	return member && member->kind == SymbolKind::Enum && member->enum_values.contains(std::string(value));
+}
+
+std::vector<std::string> NativeApi::enum_values(std::string_view class_name, std::string_view enum_name) const {
+	std::vector<std::string> result;
+	auto *member = find_member(class_name, enum_name);
+	if (member && member->kind == SymbolKind::Enum) result.assign(member->enum_values.begin(), member->enum_values.end());
+	std::sort(result.begin(), result.end());
+	return result;
+}
+
+std::vector<std::string> NativeApi::global_enum_values(std::string_view enum_name) const {
+	std::vector<std::string> result;
+	auto found = global_enums_.find(std::string(enum_name));
+	if (found != global_enums_.end()) result.assign(found->second.begin(), found->second.end());
+	std::sort(result.begin(), result.end());
+	return result;
 }
 
 } // namespace gdscript_lsp

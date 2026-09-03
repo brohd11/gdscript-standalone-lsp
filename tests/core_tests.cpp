@@ -77,6 +77,19 @@ int main() {
 	expect(workspace.native_api().version() == "4.6.3", "native API version loaded");
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
+	{
+		Workspace leading_newline_workspace;
+		expect(leading_newline_workspace.open(fixture, fixture / "extension_api.json", &error),
+			"leading-newline completion workspace opens: " + error);
+		auto leading_uri = leading_newline_workspace.uri_for_path(fixture / "consumer.gd");
+		std::string leading_source =
+			"\nextends RefCounted\n\nfunc inspect() -> void:\n\tvar class_obj := {}\n\tc\n";
+		expect(leading_newline_workspace.update_document(leading_uri, leading_source, 41, &error),
+			"leading-newline completion overlay accepted");
+		auto leading_completion = leading_newline_workspace.completion(leading_uri, {5, 2});
+		expect(has_item(leading_completion, "class_obj"),
+			"scope completion terminates and retains locals when byte zero is a newline");
+	}
 	auto completion = workspace.completion(consumer_uri, {6, 7});
 	expect(has_item(completion, "own"), "completion includes direct script member");
 	expect(has_item(completion, "count"), "completion includes inherited script member");
@@ -135,6 +148,11 @@ int main() {
 	auto autoload_type = workspace.resolve_type(consumer_uri, {6, 4}, "FixtureGlobal");
 	expect(autoload_type.kind == TypeKind::ScriptClass && autoload_type.instance, "autoload resolves as script instance");
 	auto inferred_uri = workspace.uri_for_path(fixture / "return_inference.gd");
+	auto factory_uri = workspace.uri_for_path(fixture / "return_factory.gd");
+	auto factory_affected = workspace.affected_documents({factory_uri});
+	expect(std::find(factory_affected.begin(), factory_affected.end(), inferred_uri) != factory_affected.end() &&
+		std::find(factory_affected.begin(), factory_affected.end(), consumer_uri) == factory_affected.end(),
+		"dependency closure includes script-path consumers without invalidating unrelated documents");
 	auto inferred_type = workspace.resolve_type(inferred_uri, {8, 2}, "item");
 	expect(inferred_type.kind == TypeKind::ScriptClass && inferred_type.name == "Product" && inferred_type.instance,
 		"ordinary variable receives a non-binding hint from a qualified script call return type");
@@ -252,6 +270,77 @@ int main() {
 	expect(diagnostic_workspace.open(diagnostic_fixture, fixture / "extension_api.json", &error),
 		"diagnostic workspace opens: " + error);
 	auto diagnostic_uri = diagnostic_workspace.uri_for_path(diagnostic_fixture / "errors.gd");
+	const std::string helper_source =
+		"extends RefCounted\n\n"
+		"enum State { IDLE, READY }\n"
+		"class Product:\n"
+		"\tvar title: String\n"
+		"\tvar _private: int\n"
+		"\tfunc _init(required: int) -> void: pass\n"
+		"\tfunc build(value: int) -> void: pass\n\n"
+		"func accepts(state: State) -> void: pass\n\n"
+		"func inspect(target: Product) -> void:\n"
+		"\tvar state: State = State.IDLE\n"
+		"\taccepts(State.IDLE)\n"
+		"\tvar product: Product = Product.new()\n"
+		"\ttarget.call(\"build\")\n"
+		"\ttarget.set(\"title\", \"value\")\n"
+		"\tvar typed: Product\n"
+		"\tprint(target.title)\n"
+		"\tvar ordinary = 1\n";
+	expect(diagnostic_workspace.update_document(diagnostic_uri, helper_source, 100, &error),
+		"completion helper overlay accepted");
+	auto helper_position = [&](std::string_view marker) {
+		auto found = helper_source.find(marker);
+		expect(found != std::string::npos, "completion helper marker exists");
+		return byte_to_position(helper_source, found + marker.size());
+	};
+	auto enum_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var state: State = "), CompletionProfile::Helpers);
+	expect(enum_result.disposition == CompletionDisposition::Replace && enum_result.provider == "enums" &&
+		has_item(enum_result.items, "State.IDLE") && has_item(enum_result.items, "State.READY"),
+		"enum helper owns an expected script-enum assignment");
+	auto enum_argument = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("accepts("), CompletionProfile::Helpers);
+	expect(enum_argument.disposition == CompletionDisposition::Replace && has_item(enum_argument.items, "State.IDLE"),
+		"enum helper resolves a script function argument type");
+	auto constructor_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var product: Product = "), CompletionProfile::Helpers);
+	auto *constructor = find_item(constructor_result.items, "Product.new");
+	expect(constructor_result.disposition == CompletionDisposition::Augment && constructor &&
+		constructor->insert_text == "Product.new(", "constructor helper preserves Godot's argument-aware insertion");
+	auto method_string = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("target.call(\""), CompletionProfile::Helpers);
+	expect(method_string.disposition == CompletionDisposition::Replace && method_string.provider == "memberStrings" &&
+		has_item(method_string.items, "build") && !has_item(method_string.items, "title"),
+		"member-string helper owns call() and offers methods only");
+	auto property_string = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("target.set(\""), CompletionProfile::Helpers);
+	expect(property_string.disposition == CompletionDisposition::Replace && has_item(property_string.items, "title") &&
+		!has_item(property_string.items, "build"), "member-string helper offers properties for set()");
+	auto type_hint_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var typed: "), CompletionProfile::Helpers);
+	expect(type_hint_result.disposition == CompletionDisposition::Augment && has_item(type_hint_result.items, "Product") &&
+		has_item(type_hint_result.items, "State") && has_item(type_hint_result.items, "RefCounted"),
+		"extended type-hint helper includes local, enum, and native types");
+	auto member_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("print(target."), CompletionProfile::Full);
+	expect(has_item(member_result.items, "title") && !has_item(member_result.items, "_private"),
+		"full completion hides private members until an underscore is typed");
+	auto ordinary_helpers = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var ordinary = "), CompletionProfile::Helpers);
+	expect(ordinary_helpers.disposition == CompletionDisposition::NotHandled && ordinary_helpers.items.empty(),
+		"helper profile leaves ordinary completion untouched");
+	auto helper_config = diagnostic_workspace.completion_config();
+	helper_config.enums = false;
+	diagnostic_workspace.set_completion_config(helper_config);
+	enum_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var state: State = "), CompletionProfile::Helpers);
+	expect(enum_result.disposition != CompletionDisposition::Replace,
+		"completion provider configuration applies without reindexing");
+	helper_config.enums = true;
+	diagnostic_workspace.set_completion_config(helper_config);
+	expect(diagnostic_workspace.close_document(diagnostic_uri, &error), "completion helper overlay closes");
 	auto diagnostics = diagnostic_workspace.diagnostics(diagnostic_uri);
 	if (diagnostic_count(diagnostics, "type-mismatch") != 2) {
 		for (const auto &item : diagnostics) std::cerr << "diagnostic: " << item.code << ": " << item.message << '\n';
@@ -538,7 +627,9 @@ int main() {
 			"addons/addon_lib/brohd/alib_editor/misc/scene_viewer/scene_viewer.gd",
 			"addons/editor_console/src/container/line_edit.gd",
 			"addons/addon_lib/brohd/alib_editor/misc/git_service/git_data_draw.gd",
-			"addons/addon_lib/brohd/collections/class/collection_button.gd"}) {
+			"addons/addon_lib/brohd/collections/class/collection_button.gd",
+			"addons/gdscript_lsp/editor/native_completion.gd",
+			"addons/gdscript_lsp/plugin.gd"}) {
 		auto uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(path));
 		auto reported = repository_workspace.diagnostics(uri);
 		if (!reported.empty()) {

@@ -2,9 +2,12 @@
 import json
 import os
 import pathlib
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 def packet(value):
@@ -215,9 +218,8 @@ assert clearing_push["params"]["version"] == 4
 assert clearing_push["params"]["diagnostics"] == []
 assert fixed_pull["result"]["items"] == []
 
-# A buffer flush immediately followed by completion must not sit behind the
-# project-wide diagnostic pass. The edited document may publish first, but
-# other documents are deliberately deferred until the idle background scan.
+# A buffer flush immediately followed by completion must not sit behind
+# dependency diagnostics. Unrelated documents are not revisited.
 process.stdin.write(
     packet(
         {
@@ -254,15 +256,6 @@ while True:
         break
 assert not foreign_diagnostic_before_completion
 
-background_cross_file_diagnostic = None
-while background_cross_file_diagnostic is None:
-    message = read_packet(process.stdout)
-    if (
-        message.get("method") == "textDocument/publishDiagnostics"
-        and message["params"]["uri"] != diagnostic_uri
-    ):
-        background_cross_file_diagnostic = message
-
 for request in [
     {"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": {}},
     {"jsonrpc": "2.0", "method": "exit", "params": {}},
@@ -271,6 +264,8 @@ for request in [
 process.stdin.flush()
 while True:
     shutdown = read_packet(process.stdout)
+    if shutdown.get("method") == "textDocument/publishDiagnostics":
+        assert shutdown["params"]["uri"] == diagnostic_uri
     if shutdown.get("id") == 5:
         break
 assert shutdown["id"] == 5 and shutdown["result"] is None
@@ -364,6 +359,277 @@ while member_completion is None or unresolved_completion is None or repeated_cal
 assert {item["filterText"] for item in member_completion["items"]} >= {"keys", "size"}
 assert unresolved_completion == {"isIncomplete": False, "items": []}
 assert {item["filterText"] for item in repeated_call_completion["items"]} == {"append_array"}
+stop_server(server)
+
+
+# Regression for the real Gote failure: a leading blank line used to make the
+# expected-value scan revisit byte one forever. That stranded later changes,
+# diagnostics, cancellation, and shutdown behind the completion request.
+server, response = initialize_server(
+    {
+        "rootUri": root.as_uri(),
+        "initializationOptions": {"gdscriptLsp": {"diagnostics": {"pollIntervalMs": 0}}},
+    },
+    args=("--api", root / "extension_api.json"),
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+leading_uri = (root / "consumer.gd").as_uri()
+leading_source = (
+    "\nextends RefCounted\n\nfunc inspect() -> void:\n"
+    "\tvar class_obj: Dictionary = {}\n\tvar class = 1\n"
+)
+messages = queue.Queue()
+
+
+def read_leading_messages():
+    try:
+        while True:
+            messages.put(read_packet(server.stdout))
+    except (EOFError, RuntimeError):
+        return
+
+
+reader = threading.Thread(target=read_leading_messages, daemon=True)
+reader.start()
+
+
+def leading_message(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            message = messages.get(timeout=max(0.01, deadline - time.monotonic()))
+        except queue.Empty:
+            break
+        if predicate(message):
+            return message
+    raise AssertionError("timed out waiting for leading-newline LSP response")
+
+
+server.stdin.write(packet({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": leading_uri,
+                    "languageId": "gdscript",
+                    "version": 1,
+                    "text": leading_source,
+                }
+            },
+        }
+    )
+)
+server.stdin.flush()
+initial_diagnostic = leading_message(
+    lambda message: message.get("method") == "textDocument/publishDiagnostics"
+    and message["params"]["uri"] == leading_uri
+    and message["params"].get("version") == 1
+)
+assert any(item["code"] == "syntax-error" for item in initial_diagnostic["params"]["diagnostics"])
+
+incomplete_source = leading_source.replace("\tvar class = 1\n", "\tc\n")
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 2},
+                "contentChanges": [{"text": incomplete_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 130,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": leading_uri}, "position": {"line": 5, "character": 2}},
+        }
+    )
+)
+server.stdin.flush()
+scope_completion = leading_message(lambda message: message.get("id") == 130)
+assert "class_obj" in {item["filterText"] for item in scope_completion["result"]["items"]}
+
+valid_source = incomplete_source.replace("\tc\n", "\tclass_obj\n")
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 3},
+                "contentChanges": [{"text": valid_source}],
+            },
+        }
+    )
+)
+server.stdin.flush()
+current_diagnostic = leading_message(
+    lambda message: message.get("method") == "textDocument/publishDiagnostics"
+    and message["params"]["uri"] == leading_uri
+    and message["params"].get("version") == 3
+)
+assert all('Identifier "c"' not in item["message"] for item in current_diagnostic["params"]["diagnostics"])
+
+member_source = valid_source.replace("\tclass_obj\n", "\tclass_obj.\n")
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 4},
+                "contentChanges": [{"text": member_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 131,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": leading_uri}, "position": {"line": 5, "character": 11}},
+        }
+    )
+)
+server.stdin.flush()
+member_completion = leading_message(lambda message: message.get("id") == 131)
+assert member_completion["result"]["isIncomplete"] is False
+
+server.stdin.write(packet({"jsonrpc": "2.0", "id": 132, "method": "shutdown", "params": {}}))
+server.stdin.flush()
+shutdown = leading_message(lambda message: message.get("id") == 132)
+assert shutdown["result"] is None
+server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+server.stdin.flush()
+assert server.wait(timeout=2) == 0
+
+
+# The portable disk poll discovers scripts created and removed outside the
+# client. Adding a global class must invalidate its previously unresolved
+# consumers; deleting it must invalidate those consumers through the old graph.
+with tempfile.TemporaryDirectory(prefix="gdscript-lsp-poll-") as temporary:
+    poll_root = pathlib.Path(temporary)
+    (poll_root / "project.godot").write_text('[application]\nconfig/name="Poll fixture"\n')
+    consumer_path = poll_root / "consumer.gd"
+    consumer_path.write_text("extends RefCounted\n\nvar item: PollType\n")
+    poll_server, response = initialize_server(
+        {
+            "rootUri": poll_root.as_uri(),
+            "initializationOptions": {"gdscriptLsp": {"diagnostics": {"pollIntervalMs": 100}}},
+        },
+        args=("--api", root / "extension_api.json"),
+    )
+    assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+    poll_messages = queue.Queue()
+
+    def read_poll_messages():
+        try:
+            while True:
+                poll_messages.put(read_packet(poll_server.stdout))
+        except (EOFError, RuntimeError):
+            return
+
+    poll_reader = threading.Thread(target=read_poll_messages, daemon=True)
+    poll_reader.start()
+
+    def poll_diagnostic(predicate, timeout=4.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                message = poll_messages.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if (
+                message.get("method") == "textDocument/publishDiagnostics"
+                and message["params"]["uri"] == consumer_path.as_uri()
+                and predicate(message["params"]["diagnostics"])
+            ):
+                return message
+        raise AssertionError("timed out waiting for dependency-aware polled diagnostics")
+
+    poll_server.stdin.write(packet({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+    poll_server.stdin.flush()
+    poll_diagnostic(lambda diagnostics: any(item["code"] == "unknown-type" for item in diagnostics))
+
+    external_type = poll_root / "poll_type.gd"
+    external_type.write_text("class_name PollType\nextends RefCounted\n")
+    poll_diagnostic(lambda diagnostics: diagnostics == [])
+
+    external_type.unlink()
+    poll_diagnostic(lambda diagnostics: any(item["code"] == "unknown-type" for item in diagnostics))
+
+    poll_server.stdin.write(packet({"jsonrpc": "2.0", "id": 140, "method": "shutdown", "params": {}}))
+    poll_server.stdin.flush()
+    deadline = time.monotonic() + 2
+    while True:
+        response = poll_messages.get(timeout=max(0.01, deadline - time.monotonic()))
+        if response.get("id") == 140:
+            break
+    assert response["result"] is None
+    poll_server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+    poll_server.stdin.flush()
+    assert poll_server.wait(timeout=2) == 0
+
+
+# Completion provider settings use initializationOptions and the standard live
+# configuration notification; changing a feature does not require reindexing.
+server, response = initialize_server(
+    {
+        "rootUri": diagnostic_root.as_uri(),
+        "initializationOptions": {"gdscriptLsp": {"completion": {"enums": False}}},
+    },
+    args=("--api", root / "extension_api.json"),
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+enum_source = (diagnostic_root / "semantic_valid.gd").read_text()
+enum_uri = (diagnostic_root / "semantic_valid.gd").as_uri()
+enum_line = next(i for i, line in enumerate(enum_source.splitlines()) if "var mode: FileAccess.ModeFlags" in line)
+enum_column = enum_source.splitlines()[enum_line].index("= ") + 2
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": enum_uri}, "position": {"line": enum_line, "character": enum_column}},
+        }
+    )
+)
+server.stdin.flush()
+disabled_items = {item["filterText"] for item in read_packet(server.stdout)["result"]["items"]}
+assert "FileAccess.WRITE" not in disabled_items
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeConfiguration",
+            "params": {"settings": {"gdscriptLsp": {"completion": {"enums": True}}}},
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": enum_uri}, "position": {"line": enum_line, "character": enum_column}},
+        }
+    )
+)
+server.stdin.flush()
+enabled_items = {item["filterText"] for item in read_packet(server.stdout)["result"]["items"]}
+assert {"FileAccess.READ", "FileAccess.WRITE"} <= enabled_items
 stop_server(server)
 
 

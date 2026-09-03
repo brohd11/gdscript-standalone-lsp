@@ -14,6 +14,33 @@ It implements incremental document synchronization, completion, hover, definitio
 
 Callable completions follow Godot's compact presentation: `name()` for zero arguments and `name(…)` otherwise. Parameterized calls insert a trailing `(` so clients with bracket pairing place the caret inside the call. Completion results are ranked by lexical scope and nearest-first inheritance, with type-level members behind instance members at each level; class receivers omit instance-only members. The array order and LSP `sortText` carry the same ranking.
 
+Portable completion helpers add expected enum values, extended type-hint names, expected-type constructors, and method/property names used as strings. Private members are hidden from ordinary member completion until the typed prefix starts with `_`. The helpers are built into the shared core, so they behave the same way over stdio and through the GDExtension.
+
+Completion settings can be supplied as `initializationOptions.gdscriptLsp` and changed later with `workspace/didChangeConfiguration`:
+
+```json
+{
+  "gdscriptLsp": {
+    "completion": {
+      "enums": true,
+      "extendedTypeHints": true,
+      "constructors": true,
+      "hidePrivate": true,
+      "memberStrings": {
+        "enabled": true,
+        "preferStringName": true,
+        "includePrivate": false
+      }
+    },
+    "diagnostics": {
+      "pollIntervalMs": 1000
+    }
+  }
+}
+```
+
+`diagnostics.pollIntervalMs` controls the portable disk-change poll used when a client does not send file-watch notifications. Positive values are clamped to at least 100 ms; `0` disables polling.
+
 Native Godot APIs are read from, in priority order:
 
 1. `--api /path/to/extension_api.json`
@@ -25,7 +52,7 @@ A project-specific snapshot can include APIs contributed by its GDExtensions, so
 
 Run `make test` for core and JSON-RPC integration tests. The implementation recognizes `class_name`, path- and UID-based `extends`, qualified script aliases, script resources versus scenes, inner classes, autoloads, typed containers and `:=` inference, inherited script/native members, callable and signal provenance, arbitrary member/call/subscript chains, and unsaved overlays. Ordinary `var value = expression` declarations remain dynamically typed, although their initializer is retained as a completion hint. Unsupported or ambiguous expressions degrade to `Variant`/unknown instead of consulting a running editor.
 
-Diagnostics cover tree-sitter syntax failures, duplicate members and global classes, unresolved or cyclic inheritance, unknown explicit types, incompatible typed initializers, source-ordered name resolution, statically known members and calls, argument arity/types, and typed return paths. Unsafe property, method, and call-argument access follows the corresponding `debug/gdscript/warnings/unsafe_*` values from `project.godot`, including Godot's disabled defaults and warn/error levels. Edited-file diagnostics are published promptly, while a coalesced background pass refreshes cross-file diagnostics without blocking interactive requests. Dynamic `Variant`, `Dictionary`, node-path, and otherwise unresolved expressions deliberately remain unchecked to avoid speculative errors.
+Diagnostics cover tree-sitter syntax failures, duplicate members and global classes, unresolved or cyclic inheritance, unknown explicit types, incompatible typed initializers, source-ordered name resolution, statically known members and calls, argument arity/types, and typed return paths. Unsafe property, method, and call-argument access follows the corresponding `debug/gdscript/warnings/unsafe_*` values from `project.godot`, including Godot's disabled defaults and warn/error levels. Edited-file diagnostics are published promptly; dependency-aware background work refreshes only affected consumers and suppresses unchanged or initially empty notifications. Standard watched-file events and a cached mtime/size poll keep unopened disk files current without replacing open overlays. Dynamic `Variant`, `Dictionary`, node-path, and otherwise unresolved expressions deliberately remain unchecked to avoid speculative errors.
 
 The pinned tree-sitter-gdscript dependency receives a tracked compatibility patch during `make deps`. The patch adds Godot-valid inline `if` lambda bodies and fixes indentation across comment-only lines; dependency setup verifies the exact upstream commit before applying it.
 
@@ -48,7 +75,15 @@ make test-gdextension
 
 Set `GODOT=/path/to/godot` if the executable is not on `PATH`. `GDScriptLanguageService` indexes asynchronously and exposes LSP-shaped `completion`, `hover`, `definition`, `document_symbols`, `diagnostics`, and `resolve_type` methods to GDScript. `update_document`, `close_document`, and `refresh_files` keep the shared index current without `GDScript` resources or editor services.
 
-The adapter emits `workspace_ready`, `workspace_error`, `index_updated`, and `diagnostics_updated`; callers should wait for readiness before querying. Copy `addons/gdscript_lsp` into a project to package the extension, native metadata, and platform libraries together.
+`completion_ex(uri, line, column, {"profile": "helpers"})` additionally returns `disposition` (`not_handled`, `augment`, or `replace`) and the responsible provider. The default `full` profile remains a complete standalone completion list. `set_configuration()` accepts the `gdscriptLsp` body shown above.
+
+The adapter emits `workspace_ready`, `workspace_error`, `index_updated`, and `diagnostics_updated`; after an update, the latter contains the changed document and its transitive dependents rather than every indexed script. Callers should wait for readiness before querying. Copy `addons/gdscript_lsp` into a project to package the extension, native metadata, and platform libraries together.
+
+### Godot editor completion bridge
+
+When the Code Completions addon is installed, enable the optional **Standalone GDScript Language Service** editor plugin. It registers a priority-zero provider and defaults to `plugin/code_completion/native/mode = "helpers_first"`: native helpers replace or augment narrowly owned contexts, while an unhandled request falls through to Godot and the existing GDScript providers unchanged. `"replace"` uses the native service for the complete popup and `"disabled"` bypasses it.
+
+The bridge indexes asynchronously and falls through while it is not ready. It synchronizes an edited buffer only on Godot's debounced completion request and only when the `CodeEdit` version changed. Godot's internal code completion must therefore remain enabled; its separate network LSP server does not need to be disabled.
 
 ## Architecture
 

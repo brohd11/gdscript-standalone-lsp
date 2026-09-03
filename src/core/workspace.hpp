@@ -43,12 +43,20 @@ public:
 	bool refresh_file(const std::string &uri, std::string *error = nullptr);
 
 	std::vector<CompletionItem> completion(const std::string &uri, Position position) const;
+	CompletionResult completion_result(const std::string &uri, Position position,
+		CompletionProfile profile = CompletionProfile::Full) const;
+	void set_completion_config(CompletionConfig config);
+	CompletionConfig completion_config() const;
 	std::optional<HoverResult> hover(const std::string &uri, Position position) const;
 	std::vector<Location> definition(const std::string &uri, Position position) const;
 	std::vector<Symbol> document_symbols(const std::string &uri) const;
 	ResolvedType resolve_type(const std::string &uri, Position position, std::string expression = {}) const;
 	std::vector<Diagnostic> diagnostics(const std::string &uri) const;
 	std::vector<std::string> document_uris() const;
+	// Returns the changed documents and every document whose semantic view can
+	// depend on them. Callers that replace a document should query both before
+	// and after the replacement, then take the union so removed edges are kept.
+	std::vector<std::string> affected_documents(const std::vector<std::string> &changed_uris) const;
 	int64_t document_version(const std::string &uri) const;
 
 	const NativeApi &native_api() const { return native_api_; }
@@ -73,9 +81,12 @@ private:
 	std::unordered_map<std::string, size_t> global_name_counts_;
 	std::unordered_map<std::string, std::string> symbol_owners_;
 	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
+	std::unordered_map<std::string, std::unordered_set<std::string>> document_dependencies_;
+	std::unordered_map<std::string, std::unordered_set<std::string>> reverse_document_dependencies_;
 	WarningLevel unsafe_property_access_ = WarningLevel::Ignore;
 	WarningLevel unsafe_method_access_ = WarningLevel::Ignore;
 	WarningLevel unsafe_call_argument_ = WarningLevel::Ignore;
+	CompletionConfig completion_config_;
 
 	void rebuild_registry();
 	void read_project_settings();
@@ -109,6 +120,7 @@ private:
 	const Symbol *find_lexical_member(const ClassRecord &record, std::string_view name) const;
 	const Symbol *resolve_identifier(const Document &document, const ClassRecord *context,
 		std::string_view name, Position position) const;
+	std::vector<CompletionItem> semantic_completion_locked(const Document &document, Position position) const;
 };
 
 } // namespace gdscript_lsp

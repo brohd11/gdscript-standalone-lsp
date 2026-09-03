@@ -25,6 +25,9 @@ public:
 	void close_document(const godot::String &uri);
 	void refresh_files(const godot::PackedStringArray &paths);
 	godot::Dictionary completion(const godot::String &uri, int line, int utf16_column) const;
+	godot::Dictionary completion_ex(const godot::String &uri, int line, int utf16_column,
+		const godot::Dictionary &options = {}) const;
+	void set_configuration(const godot::Dictionary &configuration);
 	godot::Dictionary hover(const godot::String &uri, int line, int utf16_column) const;
 	godot::Array definition(const godot::String &uri, int line, int utf16_column) const;
 	godot::Array document_symbols(const godot::String &uri) const;
