@@ -4,6 +4,8 @@
 /.deps/
 /build/
 /build-asan/
+/build-cmake/
+/dist/
 /.sconsign.dblite
 *.os
 /addons/gdscript_lsp/bin/

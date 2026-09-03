@@ -38,6 +38,7 @@ def flatten_symbols(symbols):
 binary = pathlib.Path(sys.argv[1]).resolve()
 root = pathlib.Path("tests/fixtures/basic").resolve()
 uri = (root / "consumer.gd").as_uri()
+outside_root = pathlib.Path(tempfile.gettempdir())
 process = subprocess.Popen(
     [str(binary), "--api", str(root / "extension_api.json")],
     stdin=subprocess.PIPE,
@@ -163,6 +164,7 @@ assert rich_resolved["result"]["origin"]["name"] == "local"
 assert rich_resolved["result"]["origin"]["symbolId"].split("@", 1)[0].endswith("::local")
 assert rich_resolved["result"]["accessPaths"][0]["preferred"] is True
 assert initialize["result"]["capabilities"]["completionProvider"]["resolveProvider"] is True
+assert " " not in initialize["result"]["capabilities"]["completionProvider"]["triggerCharacters"]
 assert shutdown["result"] is None
 assert process.wait(timeout=5) == 0
 
@@ -1046,7 +1048,7 @@ stop_server(server)
 
 # Older clients may only send rootPath, and clients with no root metadata may
 # rely on the server process working directory.
-server, response = initialize_server({"rootPath": str(root), "rootUri": None}, cwd="/tmp")
+server, response = initialize_server({"rootPath": str(root), "rootUri": None}, cwd=outside_root)
 assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
 stop_server(server)
 
@@ -1055,17 +1057,18 @@ assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
 stop_server(server)
 
 # File URI decoding must accept the percent escapes emitted for paths with spaces.
-with tempfile.TemporaryDirectory(prefix="gdscript lsp ") as temporary:
-    linked_root = pathlib.Path(temporary) / "linked project"
-    linked_root.symlink_to(root, target_is_directory=True)
-    server, response = initialize_server({"rootUri": linked_root.as_uri()}, cwd="/tmp")
-    assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
-    stop_server(server)
+if os.name != "nt":
+    with tempfile.TemporaryDirectory(prefix="gdscript lsp ") as temporary:
+        linked_root = pathlib.Path(temporary) / "linked project"
+        linked_root.symlink_to(root, target_is_directory=True)
+        server, response = initialize_server({"rootUri": linked_root.as_uri()}, cwd=outside_root)
+        assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+        stop_server(server)
 
 # A request before initialize gets the standard lifecycle error, without
 # preventing a subsequent valid initialization.
 server = subprocess.Popen(
-    [str(binary)], cwd="/tmp", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    [str(binary)], cwd=outside_root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
 )
 server.stdin.write(
     packet(
@@ -1094,7 +1097,7 @@ server, response = initialize_server(
             {"uri": diagnostic_root.as_uri(), "name": "diagnostics"},
         ]
     },
-    cwd="/tmp",
+    cwd=outside_root,
 )
 assert response["error"]["code"] == -32602
 assert "multiple Godot project roots" in response["error"]["message"]
@@ -1137,6 +1140,86 @@ def stop_tcp_session(stream, request_id):
     assert response["result"] is None
 
 
+# Space-prefix completion is opt-in at startup. Trigger-character requests are
+# admitted only after one of the normal completion prefixes; explicit requests
+# remain unrestricted.
+space_server, space_initialize = initialize_server(
+    {"rootUri": caret_root.as_uri()},
+    args=("--space-prefix", "--api", root / "extension_api.json"),
+)
+assert " " in space_initialize["result"]["capabilities"]["completionProvider"]["triggerCharacters"]
+space_uri = (caret_root / "space_prefix.gd").as_uri()
+space_prelude = (
+    "extends RefCounted\n\n"
+    "enum LocalState { IDLE, READY }\n\n"
+    "func accept_state(value: LocalState) -> void:\n\tpass\n\n"
+    "func accept_pair(first: LocalState, second: LocalState) -> void:\n\tpass\n\n"
+    "func inspect() -> void:\n\tvar state: LocalState = LocalState.IDLE\n"
+)
+
+
+def request_space_completion(source, version, request_id, trigger_kind=2):
+    method = "textDocument/didOpen" if version == 1 else "textDocument/didChange"
+    if version == 1:
+        params = {
+            "textDocument": {
+                "uri": space_uri,
+                "languageId": "gdscript",
+                "version": version,
+                "text": source,
+            }
+        }
+    else:
+        params = {
+            "textDocument": {"uri": space_uri, "version": version},
+            "contentChanges": [{"text": source}],
+        }
+    space_server.stdin.write(packet({"jsonrpc": "2.0", "method": method, "params": params}))
+    position = {
+        "line": source.count("\n"),
+        "character": len(source.rsplit("\n", 1)[-1]),
+    }
+    context = {"triggerKind": trigger_kind}
+    if trigger_kind == 2:
+        context["triggerCharacter"] = " "
+    space_server.stdin.write(
+        packet(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": {"uri": space_uri},
+                    "position": position,
+                    "context": context,
+                },
+            }
+        )
+    )
+    space_server.stdin.flush()
+    return read_response(space_server.stdout, request_id)["result"]["items"]
+
+
+prefix_cases = (
+    ("\tstate = ", "LocalState.IDLE"),
+    ("\tif state == ", "LocalState.IDLE"),
+    ("\taccept_state( ", "LocalState.IDLE"),
+    ("\taccept_pair(state, ", "LocalState.IDLE"),
+    ("\tvar typed: ", "LocalState"),
+)
+for version, (suffix, expected) in enumerate(prefix_cases, start=1):
+    items = request_space_completion(space_prelude + suffix, version, 180 + version)
+    assert expected in {item["filterText"] for item in items}, (suffix, items)
+
+ordinary_items = request_space_completion(space_prelude + "\tvar ", 6, 186)
+assert not ordinary_items
+repeated_items = request_space_completion(space_prelude + "\tif state ==  ", 7, 187)
+assert not repeated_items
+explicit_items = request_space_completion(space_prelude + "\tstate = ", 8, 188, trigger_kind=1)
+assert "LocalState.IDLE" in {item["filterText"] for item in explicit_items}
+stop_server(space_server)
+
+
 # The optional TCP supervisor bridges Godot Tools' socket transport to an
 # otherwise unchanged stdio session and remains available for reconnects.
 with socket.socket() as port_probe:
@@ -1144,7 +1227,7 @@ with socket.socket() as port_probe:
     tcp_port = port_probe.getsockname()[1]
 
 tcp_server = subprocess.Popen(
-    [str(binary), "--tcp", str(tcp_port), "--api", str(root / "extension_api.json")],
+    [str(binary), "--tcp", str(tcp_port), "--space-prefix", "--api", str(root / "extension_api.json")],
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
@@ -1154,7 +1237,9 @@ try:
         stream.write(
             packet({"jsonrpc": "2.0", "id": 201, "method": "initialize", "params": {"rootUri": root.as_uri()}})
         )
-        assert read_response(stream, 201)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+        tcp_initialize = read_response(stream, 201)["result"]
+        assert tcp_initialize["serverInfo"]["name"] == "gdscript-lsp"
+        assert " " in tcp_initialize["capabilities"]["completionProvider"]["triggerCharacters"]
         source = (root / "consumer.gd").read_text()
         stream.write(
             packet(
@@ -1197,6 +1282,25 @@ try:
         stream.flush()
         tcp_completion = read_response(stream, 202)
         assert "own" in {item["filterText"] for item in tcp_completion["result"]["items"]}
+
+        # A second client gets an independent child while the first session is
+        # still active.
+        with connect_tcp(tcp_port) as concurrent_client:
+            concurrent_stream = concurrent_client.makefile("rwb", buffering=0)
+            concurrent_stream.write(
+                packet(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 207,
+                        "method": "initialize",
+                        "params": {"rootUri": root.as_uri()},
+                    }
+                )
+            )
+            assert read_response(concurrent_stream, 207)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+            stop_tcp_session(concurrent_stream, 208)
+            concurrent_stream.close()
+
         stop_tcp_session(stream, 203)
         stream.close()
 
@@ -1218,14 +1322,14 @@ try:
         )
         assert read_response(stream, 206)["result"]["serverInfo"]["name"] == "gdscript-lsp"
         tcp_server.terminate()
-        assert tcp_server.wait(timeout=5) == 0
+        assert tcp_server.wait(timeout=5) == (1 if os.name == "nt" else 0)
         client.settimeout(5)
         assert client.recv(1) == b""
         stream.close()
 finally:
     if tcp_server.poll() is None:
         tcp_server.terminate()
-        assert tcp_server.wait(timeout=5) == 0
+        assert tcp_server.wait(timeout=5) == (1 if os.name == "nt" else 0)
 
 for invalid_port in ("0", "65536", "not-a-port"):
     invalid = subprocess.run(

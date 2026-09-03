@@ -20,6 +20,12 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef _WIN32
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 using json = nlohmann::json;
 using namespace gdscript_lsp;
 
@@ -541,12 +547,16 @@ std::filesystem::path discover_api(const std::filesystem::path &project, const s
 	return {};
 }
 
-json initialize_result() {
+constexpr std::string_view completion_prefixes = ".(,:=\"'";
+
+json initialize_result(bool space_prefix) {
+	auto trigger_characters = json::array({".", "(", ",", ":", "=", "\"", "'"});
+	if (space_prefix) trigger_characters.push_back(" ");
 	return {
 		{"capabilities", {
 			{"positionEncoding", "utf-16"},
 			{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
-			{"completionProvider", {{"triggerCharacters", json::array({".", "(", ",", ":", "=", "\"", "'"})},
+			{"completionProvider", {{"triggerCharacters", std::move(trigger_characters)},
 				{"resolveProvider", true}}},
 			{"hoverProvider", true},
 			{"definitionProvider", true},
@@ -556,6 +566,18 @@ json initialize_result() {
 		}},
 		{"serverInfo", {{"name", "gdscript-lsp"}, {"version", "0.1.0"}}}
 	};
+}
+
+bool is_space_completion_trigger(const json &params) {
+	auto context = params.find("context");
+	return context != params.end() && context->is_object() &&
+		context->value("triggerKind", 0) == 2 && context->value("triggerCharacter", "") == " ";
+}
+
+bool follows_completion_prefix(std::string_view source, Position position) {
+	auto offset = position_to_byte(source, position);
+	return offset >= 2 && source[offset - 1] == ' ' &&
+		completion_prefixes.find(source[offset - 2]) != std::string_view::npos;
 }
 
 std::vector<std::string> merge_uris(std::vector<std::string> first, const std::vector<std::string> &second) {
@@ -606,13 +628,19 @@ void apply_configuration(Workspace &workspace, DiagnosticPublisher &publisher, c
 } // namespace
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+#endif
 	std::filesystem::path project;
 	std::filesystem::path configured_api;
 	std::optional<uint16_t> tcp_port;
+	bool space_prefix = false;
 	for (int index = 1; index < argc; ++index) {
 		std::string argument = argv[index];
 		if (argument == "--project" && index + 1 < argc) project = argv[++index];
 		else if (argument == "--api" && index + 1 < argc) configured_api = argv[++index];
+		else if (argument == "--space-prefix") space_prefix = true;
 		else if (argument == "--tcp") {
 			if (tcp_port || index + 1 >= argc) {
 				std::cerr << "gdscript-lsp: --tcp requires one port\n";
@@ -679,7 +707,7 @@ int main(int argc, char **argv) {
 			const auto &stats = workspace.stats();
 			std::cerr << "gdscript-lsp: indexed " << stats.document_count << " documents / " << stats.class_count
 					  << " classes in " << stats.elapsed_ms << " ms; syntax errors: " << stats.syntax_error_count << '\n';
-			respond(id, initialize_result());
+			respond(id, initialize_result(space_prefix));
 		} else if (method == "exit") {
 			return shutdown ? 0 : 1;
 		} else if (!initialized) {
@@ -736,10 +764,17 @@ int main(int argc, char **argv) {
 			diagnostics.finish_update(generation, {}, affected);
 		} else if (method == "textDocument/completion") {
 			auto uri = params["textDocument"].value("uri", "");
-			auto completion = workspace.completion_result(uri, parse_position(params["position"]));
-			json output = json::array();
-			for (const auto &item : completion.items) output.push_back(completion_json(item));
-			respond(id, {{"isIncomplete", completion.is_incomplete}, {"items", std::move(output)}});
+			auto position = parse_position(params["position"]);
+			auto buffer = buffers.find(uri);
+			if (is_space_completion_trigger(params) && (!space_prefix || buffer == buffers.end() ||
+					!follows_completion_prefix(buffer->second, position))) {
+				respond(id, {{"isIncomplete", false}, {"items", json::array()}});
+			} else {
+				auto completion = workspace.completion_result(uri, position);
+				json output = json::array();
+				for (const auto &item : completion.items) output.push_back(completion_json(item));
+				respond(id, {{"isIncomplete", completion.is_incomplete}, {"items", std::move(output)}});
+			}
 		} else if (method == "completionItem/resolve") {
 			auto item = params;
 			std::string symbol_id;

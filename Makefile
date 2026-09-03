@@ -18,7 +18,8 @@ LDFLAGS += -pthread
 CORE_CPP := $(wildcard src/core/*.cpp)
 CORE_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP))
 TS_OBJ := $(BUILD_DIR)/vendor/tree_sitter.o $(BUILD_DIR)/vendor/gdscript_parser.o $(BUILD_DIR)/vendor/gdscript_scanner.o
-LSP_OBJ := $(BUILD_DIR)/lsp/main.o $(BUILD_DIR)/lsp/tcp_adapter.o
+LSP_CPP := $(wildcard src/lsp/*.cpp)
+LSP_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(LSP_CPP))
 DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 	$(BUILD_DIR)/tests/caret_context_tests.d $(BUILD_DIR)/tests/completion_provider_tests.d \
 	$(BUILD_DIR)/tests/incremental_update_tests.d $(BUILD_DIR)/tools/dump_tree.d

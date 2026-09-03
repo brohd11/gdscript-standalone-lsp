@@ -8,17 +8,32 @@ make
 build/gdscript-lsp
 ```
 
+The Makefile remains the shortest Unix build path. A pinned CMake build is also
+available for Linux, macOS, and Windows:
+
+```sh
+cmake -S . -B build-cmake
+cmake --build build-cmake --config Release
+ctest --test-dir build-cmake -C Release --output-on-failure
+```
+
+On Windows, run those commands from a Visual Studio developer shell (or let
+CMake select the installed Visual Studio generator). Running `cmake --install build-cmake --config Release --prefix dist`
+produces a self-contained layout with the executable and bundled Godot API
+metadata. The Windows GitHub Actions workflow publishes the same layout as
+`gdscript-lsp-windows-x64`.
+
 The server communicates over standard input/output using LSP 3.17. An editor should launch it without project arguments; the server selects and indexes the Godot project from `workspaceFolders` or `rootUri` during the standard `initialize` request. `--project /path/to/project` remains available for fixed-root integrations. One server process serves one Godot project.
 
 ### VS Code Godot Tools TCP adapter
 
-The Godot Tools extension for VS Code expects the language server to listen on a TCP port. On Linux, the optional TCP adapter exposes the same standalone server on the IPv4 loopback interface:
+The Godot Tools extension for VS Code expects the language server to listen on a TCP port. On Linux, macOS, and Windows, the optional TCP adapter exposes the same standalone server on the IPv4 loopback interface:
 
 ```sh
-build/gdscript-lsp --tcp 6010
+build/gdscript-lsp --tcp 6010 --space-prefix
 ```
 
-The adapter stays running and starts a fresh, isolated LSP session for each connection. Standard input/output remains the default transport. Port `6010` is recommended to avoid Godot's usual editor, LSP, DAP, debugger, and legacy Godot Tools ports; another available port can be used if needed.
+The adapter stays running and starts a fresh, isolated LSP session for each connection, including concurrent clients. Standard input/output remains the default transport. Port `6010` is recommended to avoid Godot's usual editor, LSP, DAP, debugger, and legacy Godot Tools ports; another available port can be used if needed.
 
 Disable Godot Tools' headless LSP mode and point it at the adapter in VS Code's `settings.json`:
 
@@ -30,7 +45,7 @@ Disable Godot Tools' headless LSP mode and point it at the adapter in VS Code's 
 }
 ```
 
-Start the adapter before opening VS Code, or use the extension's retry action after starting it. A Godot editor can still run separately for debugging and other editor-backed features; leave its own LSP server on a different port. The adapter only exposes the capabilities advertised by this standalone server. `--project` and `--api` may be combined with `--tcp` as usual.
+Start the adapter before opening VS Code, or use the extension's retry action after starting it. A Godot editor can still run separately for debugging and other editor-backed features; leave its own LSP server on a different port. The adapter only exposes the capabilities advertised by this standalone server. `--project`, `--api`, and the optional `--space-prefix` completion behavior may be combined with `--tcp` as shown above.
 
 It implements incremental document synchronization, completion, completion-item resolve, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType`, `gdscript/resolveExpression`, and `gdscript/documentSymbols` requests.
 
@@ -41,6 +56,8 @@ Callable completions follow Godot's compact presentation: `name()` for zero argu
 Every semantic completion item carries an opaque declaration ID in `data.gdscriptLsp`, along with its provider and access-path kind. Clients may pass the item to standard `completionItem/resolve` for declaration-backed detail and documentation. `gdscript/resolveExpression` accepts the same parameters as `gdscript/resolveType`, but returns `{ type, origin, accessPaths }`: `origin` identifies the member, local, or native API declaration that produced the value, and `accessPaths` lists caller-verified spellings in preferred order (preload alias, local/inherited, then global). Clients should treat these IDs as opaque.
 
 Portable completion helpers add expected enum values, extended type-hint names, expected-type constructors, and method/property names used as strings. Private members are hidden from ordinary member completion until the typed prefix starts with `_`. The helpers are built into the shared core, so they behave the same way over stdio and through the GDExtension.
+
+`--space-prefix` opts into Godot-editor-style automatic completion after one space following an existing completion prefix, including `= `, `== `, `!= `, `<= `, `>= `, argument separators, opening parentheses, and type-hint colons. Ordinary and repeated spaces are ignored, and explicit completion requests such as Ctrl+Space are unaffected. Because trigger characters are negotiated when the LSP session starts, changing this option requires reconnecting the client. Omit the flag to avoid sending completion requests after spaces.
 
 Completion settings can be supplied as `initializationOptions.gdscriptLsp` and changed later with `workspace/didChangeConfiguration`:
 
@@ -74,7 +91,7 @@ Native Godot APIs are read from, in priority order:
 3. the generated API used by the existing parser in the target project
 4. the bundled, reduced Godot 4.6 API snapshot
 
-A project-specific snapshot can include APIs contributed by its GDExtensions, so it takes precedence over the baseline. `make install DESTDIR=... PREFIX=...` installs both the executable and its bundled API.
+A project-specific snapshot can include APIs contributed by its GDExtensions, so it takes precedence over the baseline. `make install DESTDIR=... PREFIX=...` and `cmake --install` both install the executable and its bundled API.
 
 Run `make test` for core and JSON-RPC integration tests. The implementation recognizes `class_name`, path- and UID-based `extends`, qualified script aliases, script resources versus scenes, inner classes, autoloads, typed containers and `:=` inference, inherited script/native members, callable and signal provenance, arbitrary member/call/subscript chains, and unsaved overlays. Ordinary `var value = expression` declarations remain dynamically typed, although their initializer is retained as a completion hint. Unsupported or ambiguous expressions degrade to `Variant`/unknown instead of consulting a running editor.
 
@@ -116,7 +133,7 @@ The bridge indexes asynchronously and falls through while it is not ready. It sy
 ## Architecture
 
 - `src/core`: engine-neutral C++20 parser, symbol graph, inheritance resolver, type inference, and query API.
-- `src/lsp`: LSP 3.17 JSON-RPC over stdin/stdout, with an optional Linux loopback TCP adapter.
+- `src/lsp`: LSP 3.17 JSON-RPC over stdin/stdout, with optional POSIX and Windows loopback TCP adapters.
 - `src/gdextension`: thin godot-cpp wrapper over the same `Workspace` API.
 - `addons/gdscript_lsp/data`: reduced Godot 4.6 native class baseline.
 
