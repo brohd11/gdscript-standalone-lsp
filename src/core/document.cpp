@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstring>
 #include <functional>
+#include <limits>
 
 extern "C" const TSLanguage *tree_sitter_gdscript(void);
 
@@ -287,16 +288,20 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	return symbol;
 }
 
-void collect_locals(TSNode node, Symbol &function, std::string_view source) {
+void collect_locals(TSNode node, Symbol &function, std::string_view source,
+		size_t begin = 0, size_t end = std::numeric_limits<size_t>::max()) {
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		auto child = ts_node_named_child(node, i);
+		auto child_start = static_cast<size_t>(ts_node_start_byte(child));
+		auto child_end = static_cast<size_t>(ts_node_end_byte(child));
+		if (child_end < begin || child_start >= end) continue;
 		auto type = node_type(child);
-		if (type == "variable_statement" || type == "const_statement") {
+		if ((type == "variable_statement" || type == "const_statement") && child_start >= begin) {
 			auto local = variable_symbol(child, function.uri, function.id, source, true);
 			auto malformed = local.malformed;
 			function.children.push_back(std::move(local));
 			if (malformed) continue;
-		} else if (type == "for_statement") {
+		} else if (type == "for_statement" && child_start >= begin) {
 			auto left = field(child, "left");
 			Symbol local;
 			local.name = trim(node_text(left, source));
@@ -318,8 +323,146 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 			local.is_local = true;
 			function.children.push_back(std::move(local));
 		}
-		collect_locals(child, function, source);
+		collect_locals(child, function, source, begin, end);
 	}
+}
+
+size_t line_end(std::string_view source, size_t byte) {
+	auto found = source.find('\n', std::min(byte, source.size()));
+	return found == std::string_view::npos ? source.size() : found;
+}
+
+size_t indentation_width(std::string_view line) {
+	size_t width = 0;
+	for (auto character : line) {
+		if (character == ' ') ++width;
+		else if (character == '\t') width = (width / 4 + 1) * 4;
+		else break;
+	}
+	return width;
+}
+
+std::vector<bool> source_code_mask(std::string_view source) {
+	std::vector<bool> code(source.size(), true);
+	bool comment = false;
+	char quote = 0;
+	bool triple = false;
+	bool escaped = false;
+	for (size_t index = 0; index < source.size(); ++index) {
+		auto character = source[index];
+		if (comment) {
+			code[index] = false;
+			if (character == '\n') comment = false;
+			continue;
+		}
+		if (quote) {
+			code[index] = false;
+			if (triple && character == quote && index + 2 < source.size() &&
+					source[index + 1] == quote && source[index + 2] == quote) {
+				code[index + 1] = false;
+				code[index + 2] = false;
+				index += 2;
+				quote = 0;
+				triple = false;
+			} else if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (!triple && character == quote) quote = 0;
+			continue;
+		}
+		if (character == '#') {
+			code[index] = false;
+			comment = true;
+		} else if (character == '\'' || character == '"') {
+			code[index] = false;
+			quote = character;
+			if (index + 2 < source.size() && source[index + 1] == character && source[index + 2] == character) {
+				triple = true;
+				code[index + 1] = false;
+				code[index + 2] = false;
+				index += 2;
+			}
+		}
+	}
+	return code;
+}
+
+struct FunctionExtent {
+	size_t keyword = 0;
+	size_t name_start = 0;
+	size_t name_end = 0;
+	size_t header_end = 0;
+	size_t body_start = 0;
+	size_t end = 0;
+	bool is_static = false;
+	bool valid = false;
+};
+
+FunctionExtent function_extent(std::string_view source, const std::vector<bool> &code, size_t start) {
+	FunctionExtent result;
+	auto current_end = line_end(source, start);
+	auto cursor = start;
+	while (cursor < current_end && (source[cursor] == ' ' || source[cursor] == '\t')) ++cursor;
+	if (cursor >= code.size() || !code[cursor]) return result;
+	if (source.substr(cursor, 7) == "static ") {
+		result.is_static = true;
+		cursor += 7;
+	}
+	if (source.substr(cursor, 4) != "func" || (cursor + 4 < source.size() &&
+			(std::isalnum(static_cast<unsigned char>(source[cursor + 4])) || source[cursor + 4] == '_'))) return result;
+	result.keyword = cursor;
+	cursor += 4;
+	while (cursor < source.size() && std::isspace(static_cast<unsigned char>(source[cursor])) && source[cursor] != '\n') ++cursor;
+	if (cursor >= source.size() || !(std::isalpha(static_cast<unsigned char>(source[cursor])) || source[cursor] == '_')) return result;
+	result.name_start = cursor++;
+	while (cursor < source.size() && (std::isalnum(static_cast<unsigned char>(source[cursor])) || source[cursor] == '_')) ++cursor;
+	result.name_end = cursor;
+
+	int grouping = 0;
+	size_t colon = std::string_view::npos;
+	auto limit = std::min(source.size(), start + 64 * 1024);
+	for (size_t index = cursor; index < limit; ++index) {
+		if (index >= code.size() || !code[index]) continue;
+		auto character = source[index];
+		if (character == '(' || character == '[' || character == '{') ++grouping;
+		else if ((character == ')' || character == ']' || character == '}') && grouping > 0) --grouping;
+		else if (character == ':' && grouping == 0) { colon = index; break; }
+		else if (character == '\n' && grouping == 0) break;
+	}
+	if (colon == std::string_view::npos) return result;
+	result.header_end = colon + 1;
+	auto header_line_end = line_end(source, colon);
+	auto tail = trim(source.substr(colon + 1, header_line_end - colon - 1));
+	if (!tail.empty() && !tail.starts_with('#')) {
+		result.body_start = colon + 1;
+		result.end = header_line_end;
+		result.valid = true;
+		return result;
+	}
+	result.body_start = header_line_end < source.size() ? header_line_end + 1 : source.size();
+	auto header_indent = indentation_width(source.substr(start, result.keyword - start));
+	result.end = source.size();
+	for (size_t next = result.body_start; next < source.size();) {
+		auto next_end = line_end(source, next);
+		auto line = source.substr(next, next_end - next);
+		auto clean = trim(line);
+		if (!clean.empty() && !clean.starts_with('#') && indentation_width(line) <= header_indent) {
+			result.end = next == 0 ? 0 : next - 1;
+			break;
+		}
+		next = next_end < source.size() ? next_end + 1 : source.size();
+	}
+	result.valid = true;
+	return result;
+}
+
+TSNode first_kind_between(TSNode node, std::string_view kind, size_t begin, size_t end) {
+	if (ts_node_is_null(node) || ts_node_end_byte(node) < begin || ts_node_start_byte(node) >= end) return {};
+	if (node_type(node) == kind && ts_node_start_byte(node) >= begin && ts_node_end_byte(node) <= end) return node;
+	for (uint32_t index = 0; index < ts_node_named_child_count(node); ++index) {
+		auto found = first_kind_between(ts_node_named_child(node, index), kind, begin, end);
+		if (!ts_node_is_null(found)) return found;
+	}
+	return {};
 }
 
 Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view source) {
@@ -581,6 +724,64 @@ void Document::parse() {
 	};
 	collect_class(root, root_class, root_class.symbol.id);
 	classes_.insert(classes_.begin(), std::move(root_class));
+
+	// A parser error at the caret can shorten a function node to the last valid
+	// token, or replace the whole function with ERROR. Recover the lexical block
+	// so symbols declared before the error remain usable while editing.
+	auto code = source_code_mask(source_);
+	for (size_t line = 0; line < source_.size();) {
+		auto extent = function_extent(source_, code, line);
+		if (extent.valid) {
+			auto header_position = byte_to_position(source_, extent.keyword);
+			auto name_position = byte_to_position(source_, extent.name_start);
+			auto name = std::string(source_.substr(extent.name_start, extent.name_end - extent.name_start));
+			ClassRecord *owner = classes_.empty() ? nullptr : &classes_.front();
+			for (auto &candidate : classes_) {
+				if (!candidate.symbol.range.contains(header_position)) continue;
+				if (!owner || candidate.symbol.range.start >= owner->symbol.range.start) owner = &candidate;
+			}
+			Symbol *existing = nullptr;
+			if (owner) for (auto &member : owner->members) {
+				if ((member.kind == SymbolKind::Method || member.kind == SymbolKind::Constructor) &&
+						member.name == name && (member.selection_range.start == name_position ||
+							(member.kind == SymbolKind::Constructor && member.range.contains(header_position)))) {
+					existing = &member;
+					break;
+				}
+			}
+			if (existing) {
+				existing->range.end = byte_to_position(source_, extent.end);
+			} else if (owner) {
+				Symbol recovered;
+				recovered.name = name;
+				recovered.id = owner->symbol.id + "::" + name;
+				recovered.qualified_name = recovered.id;
+				recovered.uri = uri_;
+				recovered.kind = name == "_init" ? SymbolKind::Constructor : SymbolKind::Method;
+				recovered.range = {header_position, byte_to_position(source_, extent.end)};
+				recovered.selection_range = {name_position, byte_to_position(source_, extent.name_end)};
+				recovered.is_static = extent.is_static;
+				recovered.malformed = true;
+				recovered.detail = (extent.is_static ? "static func " : "func ") + name + "(";
+				auto parameters = first_kind_between(root, "parameters", extent.keyword, extent.header_end);
+				for (uint32_t index = 0; index < ts_node_named_child_count(parameters); ++index) {
+					auto parameter = parameter_symbol(ts_node_named_child(parameters, index), recovered, source_);
+					if (parameter.name.empty()) continue;
+					if (!recovered.children.empty()) recovered.detail += ", ";
+					recovered.detail += parameter.name;
+					if (!parameter.declared_type.empty()) recovered.detail += ": " + parameter.declared_type;
+					recovered.children.push_back(std::move(parameter));
+				}
+				recovered.detail += ") -> Variant";
+				collect_locals(root, recovered, source_, extent.body_start,
+					extent.end == source_.size() ? extent.end : extent.end + 1);
+				owner->members.push_back(std::move(recovered));
+			}
+		}
+		auto end = line_end(source_, line);
+		if (end == source_.size()) break;
+		line = end + 1;
+	}
 }
 
 std::string_view Document::text(const SyntaxNode &node) const {

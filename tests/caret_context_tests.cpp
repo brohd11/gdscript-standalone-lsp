@@ -122,6 +122,10 @@ int main() {
 			CaretRole::ComparisonRight, {}, {}, {}, {}, {}, "==", "n"},
 		{"nested comparison", "func f(em):\n\tif ((em == <caret>)): pass", CaretLexicalContext::Code,
 			CaretRole::ComparisonRight, {}, {}, {}, {}, {}, "==", "em"},
+		{"logical comparison at eof", "func f(em, n):\n\tif em != 1 or n == <caret>", CaretLexicalContext::Code,
+			CaretRole::ComparisonRight, {}, {}, {}, {}, {}, "==", "n"},
+		{"grouped comparison at eof", "func f(em):\n\tif (em == <caret>", CaretLexicalContext::Code,
+			CaretRole::ComparisonRight, {}, {}, {}, {}, {}, "==", "em"},
 		{"operator in string", "func f(n):\n\tif n == \"not != an op\" or n >= <caret>: pass", CaretLexicalContext::Code,
 			CaretRole::ComparisonRight, {}, {}, {}, {}, {}, ">=", "n"},
 		{"arithmetic operation", "func f(n):\n\tvar x = n * <caret>", CaretLexicalContext::Code,
@@ -154,6 +158,13 @@ int main() {
 			CaretRole::ConditionalTrue, {}, {}, {}, {}, {}, {}, {}, {}, {}, ConditionalBranch::TrueValue},
 		{"nested ternary", "func f(a, b):\n\tvar x = (1 if a else 2) if b else <caret>", CaretLexicalContext::Code,
 			CaretRole::ConditionalFalse, {}, {}, {}, {}, {}, {}, {}, {}, {}, ConditionalBranch::FalseValue},
+
+		{"blank match pattern", "func f(n):\n\tmatch n:\n\t\t<caret>", CaretLexicalContext::Code,
+			CaretRole::MatchPattern},
+		{"partial match pattern", "func f(n):\n\tmatch n:\n\t\tn<caret>", CaretLexicalContext::Code,
+			CaretRole::MatchPattern},
+		{"match arm body", "func f(n):\n\tmatch n:\n\t\t_:\n\t\t\tvalue<caret>", CaretLexicalContext::Code,
+			CaretRole::None},
 	};
 	for (auto &test : cases) check(std::move(test));
 	if (failures) {

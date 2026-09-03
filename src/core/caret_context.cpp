@@ -376,20 +376,33 @@ std::optional<CaretConditionalContext> scanned_conditional(std::string_view sour
 }
 
 std::string enclosing_match(std::string_view source, size_t offset) {
+	auto indentation = [](std::string_view line) {
+		size_t width = 0;
+		for (auto character : line) {
+			if (character == ' ') ++width;
+			else if (character == '\t') width = (width / 4 + 1) * 4;
+			else break;
+		}
+		return width;
+	};
 	auto line_start = source.rfind('\n', offset == 0 ? 0 : offset - 1);
 	line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
 	auto current = source.substr(line_start, offset - line_start);
-	auto indent = current.find_first_not_of(" \t");
-	if (indent == std::string_view::npos) indent = current.size();
+	auto indent = indentation(current);
 	while (line_start > 0) {
 		auto end = line_start - 1;
 		auto begin = end == 0 ? std::string_view::npos : source.rfind('\n', end - 1);
 		begin = begin == std::string_view::npos ? 0 : begin + 1;
 		auto line = source.substr(begin, end - begin);
 		auto clean = trim(line);
-		auto line_indent = line.find_first_not_of(" \t");
-		if (clean.starts_with("match ") && clean.ends_with(':') && line_indent < indent) {
-			return trim(clean.substr(6, clean.size() - 7));
+		if (!clean.empty() && !clean.starts_with('#')) {
+			auto line_indent = indentation(line);
+			if (line_indent < indent) {
+				if (clean.starts_with("match ") && clean.ends_with(':')) {
+					return trim(clean.substr(6, clean.size() - 7));
+				}
+				return {};
+			}
 		}
 		line_start = begin;
 	}

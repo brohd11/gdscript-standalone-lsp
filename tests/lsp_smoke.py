@@ -625,9 +625,73 @@ server.stdin.flush()
 post_recovery_completion = leading_message(lambda message: message.get("id") == 132)
 assert "keys" in {item["filterText"] for item in post_recovery_completion["result"]["items"]}, post_recovery_completion
 
-server.stdin.write(packet({"jsonrpc": "2.0", "id": 133, "method": "shutdown", "params": {}}))
+incomplete_comparison_source = (
+    "enum EditState { READY, STOPPED }\n\nfunc inspect() -> void:\n"
+    "\tvar state = EditState.READY\n\tif state == "
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 8},
+                "contentChanges": [{"text": incomplete_comparison_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 133,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": leading_uri}, "position": {"line": 4, "character": 13}},
+        }
+    )
+)
 server.stdin.flush()
-shutdown = leading_message(lambda message: message.get("id") == 133)
+comparison_completion = leading_message(lambda message: message.get("id") == 133)
+assert {"EditState.READY", "EditState.STOPPED"} <= {
+    item["filterText"] for item in comparison_completion["result"]["items"]
+}
+
+incomplete_match_source = (
+    "enum EditState { READY, STOPPED }\n\nfunc inspect() -> void:\n"
+    "\tvar state = EditState.READY\n\tmatch state:\n\t\ts"
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 9},
+                "contentChanges": [{"text": incomplete_match_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 134,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": leading_uri}, "position": {"line": 5, "character": 3}},
+        }
+    )
+)
+server.stdin.flush()
+match_completion = leading_message(lambda message: message.get("id") == 134)
+assert {"EditState.READY", "EditState.STOPPED"} <= {
+    item["filterText"] for item in match_completion["result"]["items"]
+}
+
+server.stdin.write(packet({"jsonrpc": "2.0", "id": 135, "method": "shutdown", "params": {}}))
+server.stdin.flush()
+shutdown = leading_message(lambda message: message.get("id") == 135)
 assert shutdown["result"] is None
 server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 server.stdin.flush()

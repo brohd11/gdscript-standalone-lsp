@@ -370,6 +370,39 @@ int main() {
 		"\tvar em: LocalState\n\tif (em == LocalState.IDLE):\n\t\tpass\n", "em == ");
 	expect(has_item(grouped_enum.items, "LocalState.IDLE"),
 		"grouping parentheses do not hide comparison enum completion");
+	auto logical_enum_at_eof = probe(
+		"\tvar n = OtherState.FIRST\n\tvar em: LocalState\n"
+		"\tif em != LocalState.IDLE or n == ", "n == ", CompletionProfile::Helpers);
+	expect(logical_enum_at_eof.disposition == CompletionDisposition::Replace &&
+		has_item(logical_enum_at_eof.items, "OtherState.FIRST"),
+		"an incomplete logical comparison at EOF retains its local enum scope");
+	auto grouped_enum_at_eof = probe(
+		"\tvar em: LocalState\n\tif (em == ", "em == ", CompletionProfile::Helpers);
+	expect(grouped_enum_at_eof.disposition == CompletionDisposition::Replace &&
+		has_item(grouped_enum_at_eof.items, "LocalState.IDLE"),
+		"an incomplete grouped comparison at EOF retains its local enum scope");
+	auto blank_match_at_eof = probe(
+		"\tvar n = OtherState.FIRST\n\tmatch n:\n\t\t", "match n:\n\t\t", CompletionProfile::Helpers);
+	expect(blank_match_at_eof.disposition == CompletionDisposition::Replace &&
+		has_item(blank_match_at_eof.items, "OtherState.FIRST"),
+		"a blank match pattern resolves the subject enum even when the function is an error node");
+	auto partial_match_at_eof = probe(
+		"\tvar n = OtherState.FIRST\n\tmatch n:\n\t\tn", "\t\tn", CompletionProfile::Helpers);
+	expect(partial_match_at_eof.disposition == CompletionDisposition::Replace &&
+		has_item(partial_match_at_eof.items, "OtherState.FIRST"),
+		"a partially typed match pattern retains enum-path completion without a colon");
+	auto recovered_symbols = caret_workspace.document_symbols(caret_uri);
+	size_t recovered_inspect_count = 0;
+	bool recovered_local = false;
+	for (const auto &record : recovered_symbols) for (const auto &member : record.children) {
+		if (member.name != "inspect" || member.kind != SymbolKind::Method) continue;
+		++recovered_inspect_count;
+		recovered_local = std::any_of(member.children.begin(), member.children.end(), [](const Symbol &child) {
+			return child.name == "n" && child.is_local;
+		});
+	}
+	expect(recovered_inspect_count == 1 && recovered_local,
+		"the outline retains one recovered function and its stable locals during an incomplete match arm");
 	auto typed_ternary = probe(
 		"\tvar flag := true\n"
 		"\tvar state: LocalState = LocalState.IDLE if flag else LocalState.READY\n",
