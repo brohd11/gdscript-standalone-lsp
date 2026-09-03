@@ -20,7 +20,7 @@ project/assembly_name="gdscript-lsp"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/code_completions/plugin.cfg", "res://addons/editor_console/plugin.cfg")
+enabled=PackedStringArray("res://addons/editor_console/plugin.cfg", "res://addons/gdscript_lsp/plugin.cfg")
 
 [physics]
 

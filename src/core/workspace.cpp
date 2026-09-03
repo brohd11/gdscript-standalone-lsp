@@ -1921,8 +1921,16 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		return output;
 	}
 	auto site = analyze_caret(*document, position);
+	if (site.role == CaretRole::Suppressed) {
+		// An empty replacement is intentional: standalone clients receive no
+		// candidates, and the helpers-first editor bridge consumes the request
+		// instead of allowing another provider to repopulate a structural colon.
+		output.disposition = CompletionDisposition::Replace;
+		output.provider = "context";
+		return output;
+	}
 	auto *context = document->class_at(position);
-	auto in_type_hint = site.in_type_hint;
+	auto in_type_hint = site.role == CaretRole::TypeHint;
 
 	auto infer = [&](std::string expression) {
 		std::vector<std::string> stack;
@@ -2040,11 +2048,25 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name,
 			access_provenance(site.match_expression, type, *document, context, position)}) : std::nullopt;
 	};
-	auto expected = !in_type_hint && call ? callable_argument(*call) : std::nullopt;
-	if (!expected) expected = assignment_expected();
-	if (!expected) expected = comparison_expected();
-	if (!expected) expected = match_expected();
-	if (!expected && site.conditional && site.conditional->branch != ConditionalBranch::Condition) {
+	std::optional<ExpectedValue> expected;
+	switch (site.role) {
+		case CaretRole::AssignmentValue:
+			expected = assignment_expected();
+			break;
+		case CaretRole::ComparisonRight:
+			expected = comparison_expected();
+			break;
+		case CaretRole::CallArgument:
+			if (call) expected = callable_argument(*call);
+			break;
+		case CaretRole::MatchPattern:
+			expected = match_expected();
+			break;
+		default:
+			break;
+	}
+	if (!expected && site.conditional &&
+			(site.role == CaretRole::ConditionalTrue || site.role == CaretRole::ConditionalFalse)) {
 		auto sibling = site.conditional->branch == ConditionalBranch::TrueValue ?
 			site.conditional->false_expression : site.conditional->true_expression;
 		if (!sibling.empty()) {

@@ -61,11 +61,16 @@ func _on_ready() -> void:
 		push_error("res:// URI did not resolve against the opened workspace")
 		quit(1)
 		return
-	var helper_source := "class_name HelperConsumer extends RefCounted\n\nfunc inspect() -> void:\n\tvar child: ChildThing = ChildThing.new()\n"
+	var helper_source := "class_name HelperConsumer extends RefCounted\n\nfunc inspect() -> void:\n\tvar child: ChildThing = ChildThing.new()\n\tif true:\n"
 	service.update_document(uri, helper_source, 6)
 	var constructor: Dictionary = service.completion_ex(uri, 3, 25, {"profile": "helpers"})
 	if constructor.disposition != "augment" or constructor.provider != "constructors":
 		push_error("constructor helper did not augment: %s" % [constructor])
+		quit(1)
+		return
+	var suppressed: Dictionary = service.completion_ex(uri, 4, 9, {"profile": "helpers"})
+	if suppressed.disposition != "replace" or suppressed.provider != "context" or not suppressed.items.is_empty():
+		push_error("structural colon completion was not suppressed: %s" % [suppressed])
 		quit(1)
 		return
 	service.set_configuration({"completion": {"constructors": false}})

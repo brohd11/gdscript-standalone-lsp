@@ -208,6 +208,26 @@ std::optional<size_t> root_assignment(std::string_view source, const std::vector
 	return result;
 }
 
+std::optional<size_t> last_root_colon(std::string_view source, const std::vector<bool> &code,
+		size_t begin, size_t end) {
+	int parentheses = 0;
+	int brackets = 0;
+	int braces = 0;
+	std::optional<size_t> result;
+	for (size_t index = begin; index < end; ++index) {
+		if (index >= code.size() || !code[index]) continue;
+		auto character = source[index];
+		if (character == '(') ++parentheses;
+		else if (character == ')') --parentheses;
+		else if (character == '[') ++brackets;
+		else if (character == ']') --brackets;
+		else if (character == '{') ++braces;
+		else if (character == '}') --braces;
+		else if (character == ':' && parentheses == 0 && brackets == 0 && braces == 0) result = index;
+	}
+	return result;
+}
+
 bool type_tail(std::string_view value) {
 	return std::all_of(value.begin(), value.end(), [](unsigned char character) {
 		return std::isalnum(character) || character == '_' || character == '.' || character == '[' ||
@@ -469,6 +489,12 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	}
 
 	size_t expression_scope = result.statement_start;
+	auto root_colon = last_root_colon(source, scan.code, result.statement_start, result.byte_offset);
+	// A root colon ends a control-flow header or match pattern. Anything after
+	// it belongs to the suite, so comparisons in the header must not keep
+	// supplying expected values there. Colons inside dictionaries, subscripts,
+	// and parameter lists are nested and intentionally do not form a boundary.
+	if (root_colon) expression_scope = *root_colon + 1;
 	if (!scan.stack.empty()) expression_scope = scan.stack.back().offset + 1;
 	result.operation = operation_at(source, scan.code, expression_scope, result.byte_offset);
 
@@ -492,10 +518,16 @@ CaretContext analyze_caret(const Document &document, Position position) {
 		}
 	}
 
-	result.match_expression = enclosing_match(source, result.byte_offset);
+	// On a match-arm line the root colon is the boundary between the pattern
+	// and its body. Keep the subject only while the caret is still in the
+	// pattern, including incomplete patterns that do not have a colon yet.
+	if (!root_colon) result.match_expression = enclosing_match(source, result.byte_offset);
 	if (result.lexical != CaretLexicalContext::Code) return result;
+	auto previous = previous_code_nonspace(source, scan.code, result.byte_offset);
+	auto immediately_after_root_colon = root_colon && previous == *root_colon;
 	if (result.in_type_hint) result.role = CaretRole::TypeHint;
 	else if (result.member_access) result.role = CaretRole::MemberAccess;
+	else if (immediately_after_root_colon) result.role = CaretRole::Suppressed;
 	else if (result.conditional) {
 		switch (result.conditional->branch) {
 			case ConditionalBranch::TrueValue: result.role = CaretRole::ConditionalTrue; break;
@@ -507,14 +539,14 @@ CaretContext analyze_caret(const Document &document, Position position) {
 			result.operation->operation == "<" || result.operation->operation == "<=" ||
 			result.operation->operation == ">" || result.operation->operation == ">=")) {
 		result.role = CaretRole::ComparisonRight;
-	} else if (result.call) result.role = CaretRole::CallArgument;
-	else if (!scan.stack.empty() && scan.stack.back().value == '[') {
+	} else if (!scan.stack.empty() && scan.stack.back().value == '[') {
 		auto previous = previous_code_nonspace(source, scan.code, scan.stack.back().offset);
 		result.role = previous != std::string_view::npos &&
 			(identifier_character(source[previous]) || source[previous] == ')' || source[previous] == ']') ?
 			CaretRole::IndexAccess : CaretRole::ArrayElement;
 	}
 	else if (!scan.stack.empty() && scan.stack.back().value == '{') result.role = CaretRole::DictionaryEntry;
+	else if (result.call) result.role = CaretRole::CallArgument;
 	else if (!result.assignment_left.empty()) result.role = CaretRole::AssignmentValue;
 	else if (!result.match_expression.empty()) result.role = CaretRole::MatchPattern;
 	return result;

@@ -816,8 +816,8 @@ enabled_items = {item["filterText"] for item in read_packet(server.stdout)["resu
 assert {"FileAccess.READ", "FileAccess.WRITE"} <= enabled_items
 stop_server(server)
 
-# The serialized completion path uses the same nested comparison and foreign
-# constructor context as the core API, including alternate enum access paths.
+# The serialized completion path uses the same nested comparison, member,
+# structural-colon, and foreign constructor contexts as the core API.
 caret_root = pathlib.Path("tests/fixtures/caret_completion").resolve()
 caret_uri = (caret_root / "main.gd").as_uri()
 caret_source = (
@@ -861,7 +861,12 @@ server.stdin.write(
         }
     )
 )
-for request_id, needle in ((140, "n == "), (141, 'new("", TF.USEC')):
+for request_id, needle in (
+    (140, "n == "),
+    (141, 'new("", '),
+    (143, "OtherState.FIRST:"),
+    (144, "TF."),
+):
     server.stdin.write(
         packet(
             {
@@ -884,14 +889,19 @@ server.stdin.write(
 )
 server.stdin.flush()
 caret_responses = {}
-while len(caret_responses) < 3:
+while len(caret_responses) < 5:
     message = read_packet(server.stdout)
-    if message.get("id") in (140, 141, 142):
+    if message.get("id") in (140, 141, 142, 143, 144):
         caret_responses[message["id"]] = message["result"]
 comparison_items = {item["filterText"] for item in caret_responses[140]["items"]}
 constructor_items = {item["filterText"] for item in caret_responses[141]["items"]}
+colon_items = {item["filterText"] for item in caret_responses[143]["items"]}
+member_items = {item["filterText"] for item in caret_responses[144]["items"]}
 assert "OtherState.FIRST" in comparison_items
 assert {"TF.MSEC", "ContextRoot.Utils.Profile.TimeFunction.TimeScale.MSEC"} <= constructor_items
+assert not colon_items
+assert {"MSEC", "USEC"} <= member_items
+assert "TF.MSEC" not in member_items
 assert any(item["code"] == "argument-type" for item in caret_responses[142]["items"])
 stop_server(server)
 

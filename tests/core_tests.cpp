@@ -391,6 +391,25 @@ int main() {
 	expect(partial_match_at_eof.disposition == CompletionDisposition::Replace &&
 		has_item(partial_match_at_eof.items, "OtherState.FIRST"),
 		"a partially typed match pattern retains enum-path completion without a colon");
+	auto comparison_after_colon = probe(
+		"\tvar n = OtherState.FIRST\n\tvar em: LocalState\n"
+		"\tif em == LocalState.IDLE and n == OtherState.FIRST:",
+		"OtherState.FIRST:", CompletionProfile::Helpers);
+	expect(comparison_after_colon.disposition == CompletionDisposition::Replace &&
+		comparison_after_colon.provider == "context" && comparison_after_colon.items.empty(),
+		"a completed control-flow header suppresses helper completion after its colon");
+	auto comparison_after_colon_full = probe(
+		"\tvar n = OtherState.FIRST\n\tif n == OtherState.FIRST:   ",
+		"OtherState.FIRST:   ", CompletionProfile::Full);
+	expect(comparison_after_colon_full.disposition == CompletionDisposition::Replace &&
+		comparison_after_colon_full.provider == "context" && comparison_after_colon_full.items.empty(),
+		"a structural colon suppresses standalone completion through trailing whitespace");
+	auto match_after_colon = probe(
+		"\tvar n = OtherState.FIRST\n\tmatch n:\n\t\tOtherState.FIRST:",
+		"\t\tOtherState.FIRST:", CompletionProfile::Helpers);
+	expect(match_after_colon.disposition == CompletionDisposition::Replace &&
+		match_after_colon.provider == "context" && match_after_colon.items.empty(),
+		"a completed match pattern suppresses completion after its colon");
 	auto recovered_symbols = caret_workspace.document_symbols(caret_uri);
 	size_t recovered_inspect_count = 0;
 	bool recovered_local = false;
@@ -505,6 +524,7 @@ int main() {
 		"\tvar inferred = State.IDLE\n"
 		"\tinferred = State.READY\n"
 		"\tprint(target.title)\n"
+		"\taccepts({\"state\": state})\n"
 		"\tvar ordinary = 1\n";
 	expect(diagnostic_workspace.update_document(diagnostic_uri, helper_source, 100, &error),
 		"completion helper overlay accepted");
@@ -522,6 +542,16 @@ int main() {
 		helper_position("accepts("), CompletionProfile::Helpers);
 	expect(enum_argument.disposition == CompletionDisposition::Replace && has_item(enum_argument.items, "State.IDLE"),
 		"enum helper resolves a script function argument type");
+	auto enum_member_helpers = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var state: State = State."), CompletionProfile::Helpers);
+	expect(enum_member_helpers.disposition == CompletionDisposition::NotHandled && enum_member_helpers.items.empty(),
+		"enum helpers leave member access to the active member provider");
+	auto enum_member_full = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("var state: State = State."), CompletionProfile::Full);
+	expect(enum_member_full.provider == "semantic" &&
+		has_item(enum_member_full.items, "IDLE") && has_item(enum_member_full.items, "READY") &&
+		!has_item(enum_member_full.items, "State.IDLE"),
+		"standalone enum member access returns members rather than expected-value paths");
 	auto constructor_result = diagnostic_workspace.completion_result(diagnostic_uri,
 		helper_position("var product: Product = "), CompletionProfile::Helpers);
 	auto *constructor = find_item(constructor_result.items, "Product.new");
@@ -575,6 +605,14 @@ int main() {
 		helper_position("print(target."), CompletionProfile::Full);
 	expect(has_item(member_result.items, "title") && !has_item(member_result.items, "_private"),
 		"full completion hides private members until an underscore is typed");
+	auto dictionary_result = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("{\"state\": "), CompletionProfile::Full);
+	expect(dictionary_result.provider == "semantic" && has_item(dictionary_result.items, "state"),
+		"a dictionary value outranks an enclosing expected call argument after its colon");
+	auto dictionary_helpers = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("{\"state\": "), CompletionProfile::Helpers);
+	expect(dictionary_helpers.disposition == CompletionDisposition::NotHandled && dictionary_helpers.items.empty(),
+		"enum helpers leave a dictionary value inside an enum argument untouched");
 	auto ordinary_helpers = diagnostic_workspace.completion_result(diagnostic_uri,
 		helper_position("var ordinary = "), CompletionProfile::Helpers);
 	expect(ordinary_helpers.disposition == CompletionDisposition::NotHandled && ordinary_helpers.items.empty(),

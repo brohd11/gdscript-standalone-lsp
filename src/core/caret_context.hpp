@@ -18,6 +18,7 @@ enum class CaretLexicalContext : uint8_t {
 
 enum class CaretRole : uint8_t {
 	None,
+	Suppressed,
 	MemberAccess,
 	TypeHint,
 	AssignmentValue,
