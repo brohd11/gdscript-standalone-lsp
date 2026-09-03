@@ -127,6 +127,9 @@ if(BUILD_TESTING)
       target_compile_options(${test_name}-tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME ${test_name}-tests COMMAND ${test_name}-tests)
+    set_tests_properties(${test_name}-tests PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
   endforeach()
   add_test(
     NAME lsp-smoke

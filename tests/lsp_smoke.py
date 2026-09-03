@@ -173,11 +173,10 @@ assert process.wait(timeout=5) == 0
 native_root = pathlib.Path("tests/fixtures/native").resolve()
 native_uri = (native_root / "main.gd").as_uri()
 process = subprocess.Popen(
-    [binary.name],
+    [str(binary)],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
-    env={**os.environ, "PATH": str(binary.parent) + os.pathsep + os.environ.get("PATH", "")},
 )
 for request in [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": native_root.as_uri()}},
