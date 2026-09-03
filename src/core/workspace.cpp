@@ -1,4 +1,5 @@
 #include "core/workspace.hpp"
+#include "core/caret_context.hpp"
 #include "core/gdscript_api.hpp"
 #include "core/semantic_analyzer.hpp"
 #include "core/text.hpp"
@@ -178,290 +179,10 @@ ResolvedType iterable_value_type(const ResolvedType &type) {
 	return {TypeKind::Variant, "Variant"};
 }
 
-struct CompletionContext {
-	bool member_access = false;
-	std::optional<std::string> receiver;
-	std::string member_prefix;
-};
-
-enum class LexicalContext { Code, Comment, String };
-
-LexicalContext lexical_context_at(std::string_view source, size_t offset) {
-	offset = std::min(offset, source.size());
-	char quote = 0;
-	bool triple = false;
-	bool escaped = false;
-	bool comment = false;
-	for (size_t index = 0; index < offset; ++index) {
-		auto character = source[index];
-		if (comment) {
-			if (character == '\n') comment = false;
-			continue;
-		}
-		if (quote) {
-			if (triple && character == quote && index + 2 < offset && source[index + 1] == quote &&
-					source[index + 2] == quote) {
-				index += 2;
-				quote = 0;
-				triple = false;
-			} else if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (!triple && character == quote) quote = 0;
-			continue;
-		}
-		if (character == '#') comment = true;
-		else if (character == '\'' || character == '"') {
-			quote = character;
-			if (index + 2 < offset && source[index + 1] == quote && source[index + 2] == quote) {
-				triple = true;
-				index += 2;
-			}
-		}
-	}
-	if (comment) return LexicalContext::Comment;
-	if (quote) return LexicalContext::String;
-	return LexicalContext::Code;
-}
-
-CompletionContext completion_context(std::string_view source, size_t offset) {
-	offset = std::min(offset, source.size());
-	auto before_cursor = source.substr(0, offset);
-	auto dot = before_cursor.rfind('.');
-	if (dot == std::string_view::npos) return {};
-	for (size_t index = dot + 1; index < before_cursor.size(); ++index) {
-		if (!std::isalnum(static_cast<unsigned char>(before_cursor[index])) && before_cursor[index] != '_') return {};
-	}
-
-	std::vector<bool> string_character(dot + 1, false);
-	char quote = 0;
-	bool triple_quote = false;
-	bool escaped = false;
-	bool comment = false;
-	for (size_t index = 0; index <= dot; ++index) {
-		auto character = before_cursor[index];
-		if (comment) {
-			if (character == '\n') comment = false;
-			continue;
-		}
-		if (quote) {
-			string_character[index] = true;
-			if (triple_quote) {
-				if (character == quote && index + 2 <= dot && before_cursor[index + 1] == quote &&
-						before_cursor[index + 2] == quote) {
-					string_character[index + 1] = true;
-					string_character[index + 2] = true;
-					index += 2;
-					quote = 0;
-					triple_quote = false;
-				}
-			} else if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-		} else if (character == '#') {
-			comment = true;
-		} else if (character == '\'' || character == '"') {
-			quote = character;
-			string_character[index] = true;
-			if (index + 2 <= dot && before_cursor[index + 1] == quote && before_cursor[index + 2] == quote) {
-				triple_quote = true;
-				string_character[index + 1] = true;
-				string_character[index + 2] = true;
-				index += 2;
-			}
-		}
-	}
-	if (quote || string_character[dot]) return {};
-
-	CompletionContext result;
-	result.member_access = true;
-	result.member_prefix = std::string(before_cursor.substr(dot + 1));
-	int parentheses = 0;
-	int brackets = 0;
-	int braces = 0;
-	size_t start = dot;
-	while (start > 0) {
-		auto index = start - 1;
-		auto character = before_cursor[index];
-		if (index < string_character.size() && string_character[index]) {
-			start = index;
-			continue;
-		}
-		if (character == ')') ++parentheses;
-		else if (character == ']') ++brackets;
-		else if (character == '}') ++braces;
-		else if (character == '(') {
-			if (parentheses == 0) break;
-			--parentheses;
-		} else if (character == '[') {
-			if (brackets == 0) break;
-			--brackets;
-		} else if (character == '{') {
-			if (braces == 0) break;
-			--braces;
-		} else if (parentheses == 0 && brackets == 0 && braces == 0 &&
-				(std::isspace(static_cast<unsigned char>(character)) || character == '=' || character == ',' ||
-				 character == ':' || character == ';' || character == '+' || character == '-' || character == '*' ||
-				 character == '/' || character == '%' || character == '!' || character == '<' || character == '>' ||
-				 character == '&' || character == '|' || character == '^')) {
-			break;
-		}
-		start = index;
-	}
-	if (parentheses || brackets || braces) return result;
-	auto receiver = trim(before_cursor.substr(start, dot - start));
-	if (!receiver.empty()) result.receiver = std::move(receiver);
-	return result;
-}
-
-struct ActiveCall {
-	std::string callee;
-	std::vector<std::string> arguments;
-	size_t argument_index = 0;
-	bool in_string = false;
-	char quote = 0;
-};
-
-size_t expression_start(std::string_view source, size_t end) {
-	int parentheses = 0;
-	int brackets = 0;
-	int braces = 0;
-	while (end > 0) {
-		auto index = end - 1;
-		auto character = source[index];
-		if (character == ')') ++parentheses;
-		else if (character == ']') ++brackets;
-		else if (character == '}') ++braces;
-		else if (character == '(') {
-			if (parentheses == 0) break;
-			--parentheses;
-		} else if (character == '[') {
-			if (brackets == 0) break;
-			--brackets;
-		} else if (character == '{') {
-			if (braces == 0) break;
-			--braces;
-		} else if (parentheses == 0 && brackets == 0 && braces == 0 &&
-				(std::isspace(static_cast<unsigned char>(character)) || character == '=' || character == ',' ||
-				 character == ':' || character == ';' || character == '+' || character == '-' || character == '*' ||
-				 character == '/' || character == '%' || character == '!' || character == '<' || character == '>' ||
-				 character == '&' || character == '|' || character == '^')) {
-			break;
-		}
-		end = index;
-	}
-	return end;
-}
-
-std::optional<ActiveCall> active_call(std::string_view source, size_t offset) {
-	offset = std::min(offset, source.size());
-	struct Delimiter { char value; size_t offset; std::vector<size_t> commas; };
-	std::vector<Delimiter> stack;
-	char quote = 0;
-	bool triple_quote = false;
-	bool escaped = false;
-	bool comment = false;
-	for (size_t index = 0; index < offset; ++index) {
-		auto character = source[index];
-		if (comment) {
-			if (character == '\n') comment = false;
-			continue;
-		}
-		if (quote) {
-			if (triple_quote && character == quote && index + 2 < offset && source[index + 1] == quote &&
-					source[index + 2] == quote) {
-				index += 2;
-				quote = 0;
-				triple_quote = false;
-			} else if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '#') {
-			comment = true;
-		} else if (character == '\'' || character == '"') {
-			quote = character;
-			if (index + 2 < offset && source[index + 1] == quote && source[index + 2] == quote) {
-				triple_quote = true;
-				index += 2;
-			}
-		} else if (character == '(' || character == '[' || character == '{') {
-			stack.push_back({character, index, {}});
-		} else if (character == ')' || character == ']' || character == '}') {
-			if (!stack.empty()) stack.pop_back();
-		} else if (character == ',' && !stack.empty() && stack.back().value == '(') {
-			stack.back().commas.push_back(index);
-		}
-	}
-	auto call = std::find_if(stack.rbegin(), stack.rend(), [](const Delimiter &value) { return value.value == '('; });
-	if (call == stack.rend()) return std::nullopt;
-	auto begin = expression_start(source, call->offset);
-	auto callee = trim(source.substr(begin, call->offset - begin));
-	if (callee.empty()) return std::nullopt;
-	ActiveCall result;
-	result.callee = std::move(callee);
-	result.argument_index = call->commas.size();
-	result.in_string = quote != 0;
-	result.quote = quote;
-	size_t argument_start = call->offset + 1;
-	for (auto comma : call->commas) {
-		result.arguments.push_back(trim(source.substr(argument_start, comma - argument_start)));
-		argument_start = comma + 1;
-	}
-	result.arguments.push_back(trim(source.substr(argument_start, offset - argument_start)));
-	return result;
-}
-
 struct ExpectedValue {
 	ResolvedType type;
 	std::string access;
 };
-
-std::optional<std::pair<std::string, std::string>> assignment_parts(std::string_view source, size_t offset) {
-	auto line_start = source.rfind('\n', offset == 0 ? 0 : offset - 1);
-	line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
-	auto line = source.substr(line_start, offset - line_start);
-	char quote = 0;
-	bool escaped = false;
-	int depth = 0;
-	size_t separator = std::string_view::npos;
-	for (size_t index = 0; index < line.size(); ++index) {
-		auto character = line[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') quote = character;
-		else if (character == '(' || character == '[' || character == '{') ++depth;
-		else if (character == ')' || character == ']' || character == '}') --depth;
-		else if (character == '=' && depth == 0) {
-			auto previous = index == 0 ? '\0' : line[index - 1];
-			auto next = index + 1 < line.size() ? line[index + 1] : '\0';
-			if (previous != ':' && previous != '<' && previous != '>' && previous != '!' && previous != '=' && next != '=') separator = index;
-		}
-	}
-	if (separator == std::string_view::npos) return std::nullopt;
-	return std::pair{trim(line.substr(0, separator)), trim(line.substr(separator + 1))};
-}
-
-bool type_hint_context(std::string_view source, size_t offset) {
-	auto line_start = source.rfind('\n', offset == 0 ? 0 : offset - 1);
-	line_start = line_start == std::string_view::npos ? 0 : line_start + 1;
-	auto line = trim(source.substr(line_start, offset - line_start));
-	if (line.starts_with('#') || line.find('=') != std::string_view::npos) return false;
-	auto arrow = line.rfind("->");
-	auto colon = line.rfind(':');
-	auto marker = arrow != std::string_view::npos ? arrow + 2 :
-		(colon != std::string_view::npos ? colon + 1 : std::string_view::npos);
-	if (marker == std::string_view::npos) return false;
-	auto tail = trim(line.substr(marker));
-	return std::all_of(tail.begin(), tail.end(), [](unsigned char character) {
-		return std::isalnum(character) || character == '_' || character == '.' || character == '[' ||
-			character == ']' || character == ',' || std::isspace(character);
-	});
-}
 
 bool callable_kind(SymbolKind kind) {
 	return kind == SymbolKind::Method || kind == SymbolKind::Function || kind == SymbolKind::Constructor;
@@ -1404,7 +1125,13 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 		const Document &document, Position position, std::vector<std::string> &stack) const {
 	if (!receiver.instance && member_name == "new" && (receiver.kind == TypeKind::ScriptClass ||
 			receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin)) {
-		auto result = ResolvedType{TypeKind::Callable, "Callable", receiver.symbol_id + "::new"};
+		auto callable_id = receiver.symbol_id + "::new";
+		if (receiver.kind == TypeKind::ScriptClass) {
+			if (auto *record = find_class(receiver.symbol_id)) {
+				if (auto *constructor = find_member(*record, "_init")) callable_id = constructor->id;
+			}
+		}
+		auto result = ResolvedType{TypeKind::Callable, "Callable", std::move(callable_id)};
 		result.declaration_id = result.symbol_id;
 		auto instance = receiver;
 		instance.instance = true;
@@ -1794,6 +1521,46 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 			}
 			return {};
 		};
+		// Namespace scripts frequently expose another preloaded namespace through
+		// constants, so the target is not necessarily a lexical inner class of the
+		// visible root. Memoize target-specific suffixes to avoid revisiting a shared
+		// namespace graph once for every possible path into it.
+		std::unordered_map<std::string, std::vector<std::string>> graph_suffix_cache;
+		std::function<std::vector<std::string>(const ResolvedType &,
+			std::unordered_set<std::string> &, size_t)> graph_suffixes;
+		graph_suffixes = [&](const ResolvedType &reached, std::unordered_set<std::string> &visiting,
+				size_t depth) -> std::vector<std::string> {
+			if (same_type(reached)) return {""};
+			if (depth >= 16 || reached.kind != TypeKind::ScriptClass || reached.symbol_id.empty()) return {};
+			if (auto cached = graph_suffix_cache.find(reached.symbol_id); cached != graph_suffix_cache.end()) {
+				return cached->second;
+			}
+			if (!visiting.insert(reached.symbol_id).second) return {};
+			std::vector<std::string> result;
+			if (auto *record = find_class(reached.symbol_id)) {
+				for (const auto &member : record->members) {
+					if (result.size() >= 32) break;
+					if (!(member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum ||
+							member.kind == SymbolKind::Class || member.is_static)) continue;
+					std::unordered_set<std::string> stack;
+					auto next = resolve_static_symbol(member, stack);
+					if (!next.known()) continue;
+					for (auto &suffix : graph_suffixes(next, visiting, depth + 1)) {
+						result.push_back(member.name + (suffix.empty() ? std::string{} : "." + suffix));
+						if (result.size() >= 32) break;
+					}
+				}
+			}
+			visiting.erase(reached.symbol_id);
+			graph_suffix_cache[reached.symbol_id] = result;
+			return result;
+		};
+		auto add_graph_paths = [&](const ResolvedType &reached, const std::string &prefix, AccessPathKind kind) {
+			std::unordered_set<std::string> visiting;
+			for (const auto &suffix : graph_suffixes(reached, visiting, 0)) {
+				add(prefix + (suffix.empty() ? std::string{} : "." + suffix), kind);
+			}
+		};
 
 		// Constants/classes visible from this scope are the most useful spelling:
 		// preload aliases first, then ordinary local/inherited names.
@@ -1817,6 +1584,8 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 					if (!suffix.empty()) add(member->name + "." + suffix,
 						aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
 				}
+				add_graph_paths(reached, member->name,
+					aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
 			}
 		};
 		add_visible(true);
@@ -1835,6 +1604,7 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 			auto suffix = suffix_from_reachable_class(class_id);
 			if (owner == class_id && terminal.empty()) add(global, AccessPathKind::Global);
 			else if (!suffix.empty()) add(global + "." + suffix, AccessPathKind::Global);
+			add_graph_paths({TypeKind::ScriptClass, global, class_id, false}, global, AccessPathKind::Global);
 		}
 	}
 	if (!paths.empty()) paths.front().preferred = true;
@@ -1923,19 +1693,18 @@ bool Workspace::is_potential_downcast(const ResolvedType &expected, const Resolv
 	return is_assignable(actual, expected);
 }
 
-std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document &document_value, Position position) const {
+std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document &document_value, Position position,
+		const CaretContext &caret) const {
 	std::vector<CompletionItem> result;
 	auto *document = &document_value;
-	auto offset = position_to_byte(document->source(), position);
-	auto completion_site = completion_context(document->source(), offset);
 	std::set<std::string> names;
 	auto add_symbol = [&](const Symbol &symbol) {
 		if (!names.insert(symbol.name).second) return;
 		result.push_back(completion_item(symbol));
 	};
-	if (completion_site.member_access) {
-		if (!completion_site.receiver) return result;
-		auto &receiver_text = *completion_site.receiver;
+	if (caret.member_access) {
+		if (!caret.member_receiver) return result;
+		auto &receiver_text = *caret.member_receiver;
 		std::vector<std::string> stack;
 		auto *context = document->class_at(position);
 		auto receiver = infer_expression(receiver_text, *document, context, position, stack);
@@ -2066,10 +1835,9 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		output.is_incomplete = true;
 		return output;
 	}
-	auto offset = position_to_byte(document->source(), position);
-	auto site = completion_context(document->source(), offset);
+	auto site = analyze_caret(*document, position);
 	auto *context = document->class_at(position);
-	auto in_type_hint = type_hint_context(document->source(), offset);
+	auto in_type_hint = site.in_type_hint;
 
 	auto infer = [&](std::string expression) {
 		std::vector<std::string> stack;
@@ -2079,11 +1847,37 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		auto found = symbols_.find(std::string(id));
 		return found == symbols_.end() ? nullptr : found->second;
 	};
-	auto call = active_call(document->source(), offset);
-	auto callable_argument = [&](const ActiveCall &active) -> std::optional<ExpectedValue> {
+	auto &call = site.call;
+	auto callable_argument = [&](const CaretCallContext &active) -> std::optional<ExpectedValue> {
 		auto callable = infer(active.callee);
 		std::string declared;
-		if (callable.symbol_id.starts_with("native:")) {
+		if (callable.symbol_id.ends_with("::new")) {
+			auto owner_id = callable.symbol_id.substr(0, callable.symbol_id.size() - 5);
+			if (owner_id.starts_with("native:")) {
+				if (auto *constructors = native_api_.constructors(owner_id.substr(7))) {
+					for (const auto &signature : *constructors) {
+						if (active.argument_index < signature.arguments.size()) {
+							declared = signature.arguments[active.argument_index].type;
+							break;
+						}
+					}
+				}
+			} else if (auto *record = find_class(owner_id)) {
+				if (auto *constructor = find_member(*record, "_init")) {
+					size_t argument = 0;
+					for (const auto &child : constructor->children) {
+						if (!child.is_parameter) continue;
+						if (argument++ != active.argument_index) continue;
+						declared = child.declared_type;
+						break;
+					}
+					if (!declared.empty()) {
+						auto type = type_from_name(declared, record);
+						return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), declared}) : std::nullopt;
+					}
+				}
+			}
+		} else if (callable.symbol_id.starts_with("native:")) {
 			auto separator = callable.symbol_id.rfind("::");
 			if (separator != std::string::npos) {
 				auto owner = callable.symbol_id.substr(7, separator - 7);
@@ -2120,13 +1914,11 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), normalize_api_type(declared)}) : std::nullopt;
 	};
 	auto assignment_expected = [&]() -> std::optional<ExpectedValue> {
-		auto parts = assignment_parts(document->source(), offset);
-		if (!parts) return std::nullopt;
-		auto lhs = parts->first;
+		if (site.assignment_left.empty()) return std::nullopt;
+		auto lhs = site.assignment_left;
 		if (lhs.starts_with("var ") || lhs.starts_with("const ")) {
-			auto colon = lhs.rfind(':');
-			if (colon != std::string::npos) {
-				auto declared = trim(std::string_view(lhs).substr(colon + 1));
+			if (!site.declared_type.empty()) {
+				auto declared = site.declared_type;
 				auto type = type_from_name(declared, context);
 				if (type.known()) return ExpectedValue{std::move(type), std::move(declared)};
 			}
@@ -2135,51 +1927,39 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
 	};
 	auto comparison_expected = [&]() -> std::optional<ExpectedValue> {
-		auto line_start = document->source().rfind('\n', offset == 0 ? 0 : offset - 1);
-		line_start = line_start == std::string::npos ? 0 : line_start + 1;
-		auto line = std::string_view(document->source()).substr(line_start, offset - line_start);
-		size_t separator = std::string_view::npos;
-		for (auto operation : {std::string_view("=="), std::string_view("!="), std::string_view("<="), std::string_view(">=")}) {
-			auto found = line.rfind(operation);
-			if (found != std::string_view::npos && (separator == std::string_view::npos || found > separator)) separator = found;
-		}
-		if (separator == std::string_view::npos) return std::nullopt;
-		auto left = trim(line.substr(0, separator));
-		for (auto prefix : {std::string_view("if "), std::string_view("elif "), std::string_view("while "),
-				std::string_view("assert ")}) if (left.starts_with(prefix)) {
-			left = trim(std::string_view(left).substr(prefix.size()));
-			break;
-		}
-		auto type = infer(left);
+		if (!site.operation) return std::nullopt;
+		auto &operation = site.operation->operation;
+		if (operation != "==" && operation != "!=" && operation != "<" && operation != "<=" &&
+				operation != ">" && operation != ">=") return std::nullopt;
+		auto type = infer(site.operation->left_expression);
 		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
 	};
 	auto match_expected = [&]() -> std::optional<ExpectedValue> {
-		auto line_start = document->source().rfind('\n', offset == 0 ? 0 : offset - 1);
-		line_start = line_start == std::string::npos ? 0 : line_start + 1;
-		auto current = std::string_view(document->source()).substr(line_start, offset - line_start);
-		auto indent = current.find_first_not_of(" \t");
-		if (indent == std::string_view::npos) indent = current.size();
-		while (line_start > 0) {
-			auto end = line_start - 1;
-			// Searching at byte zero when byte zero is itself a newline finds the
-			// same boundary forever. The previous line starts at zero in that case.
-			auto begin = end == 0 ? std::string::npos : document->source().rfind('\n', end - 1);
-			begin = begin == std::string::npos ? 0 : begin + 1;
-			auto line = std::string_view(document->source()).substr(begin, end - begin);
-			auto clean = trim(line);
-			auto line_indent = line.find_first_not_of(" \t");
-			if (clean.starts_with("match ") && clean.ends_with(':') && line_indent < indent) {
-				auto type = infer(clean.substr(6, clean.size() - 7));
-				return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
-			}
-			line_start = begin;
-		}
-		return std::nullopt;
+		if (site.match_expression.empty()) return std::nullopt;
+		auto type = infer(site.match_expression);
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
 	};
 	auto expected = !in_type_hint && call ? callable_argument(*call) : std::nullopt;
 	if (!expected) expected = assignment_expected();
 	if (!expected) expected = comparison_expected();
 	if (!expected) expected = match_expected();
+	if (!expected && site.conditional && site.conditional->branch != ConditionalBranch::Condition) {
+		auto sibling = site.conditional->branch == ConditionalBranch::TrueValue ?
+			site.conditional->false_expression : site.conditional->true_expression;
+		if (!sibling.empty()) {
+			auto sibling_type = infer(sibling);
+			auto current_expression = site.conditional->branch == ConditionalBranch::TrueValue ?
+				site.conditional->true_expression : site.conditional->false_expression;
+			auto current_type = current_expression.empty() ? ResolvedType::unknown() : infer(current_expression);
+			auto aligned = !current_type.known() || current_type.kind == TypeKind::Variant ||
+				(current_type.kind == sibling_type.kind && current_type.name == sibling_type.name &&
+				 (current_type.symbol_id.empty() || sibling_type.symbol_id.empty() ||
+				  current_type.symbol_id == sibling_type.symbol_id));
+			if (aligned && sibling_type.known() && sibling_type.kind != TypeKind::Variant) {
+				expected = ExpectedValue{sibling_type, sibling_type.name};
+			}
+		}
+	}
 
 	auto rank = [](std::vector<CompletionItem> &items, std::string_view provider) {
 		for (size_t index = 0; index < items.size(); ++index) {
@@ -2297,7 +2077,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			}
 		}
 	}
-	if (lexical_context_at(document->source(), offset) != LexicalContext::Code) {
+	if (site.lexical != CaretLexicalContext::Code) {
 		output.disposition = CompletionDisposition::Replace;
 		output.provider = "semantic";
 		return output;
@@ -2355,12 +2135,12 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			additions.push_back(completion_item(std::move(name),
 				kind == SymbolKind::Enum ? "enum" : "class", {}, kind));
 		};
-		if (site.member_access && site.receiver) {
-			for (auto &item : semantic_completion_locked(*document, position)) {
+		if (site.member_receiver) {
+			for (auto &item : semantic_completion_locked(*document, position, site)) {
 				if (item.kind == SymbolKind::Class || item.kind == SymbolKind::Enum || item.kind == SymbolKind::Constant) {
 					if (item.kind == SymbolKind::Constant) {
 						std::unordered_set<std::string> stack;
-						auto type = resolve_static_reference(*site.receiver + "." + item.filter_text, context, stack);
+					auto type = resolve_static_reference(*site.member_receiver + "." + item.filter_text, context, stack);
 						if (!(type.kind == TypeKind::Enum || (!type.instance && (type.kind == TypeKind::ScriptClass ||
 								type.kind == TypeKind::NativeClass || type.kind == TypeKind::Builtin)))) continue;
 					}
@@ -2417,6 +2197,11 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		item.detail = "constructor";
 		item.symbol_id = expected->type.symbol_id + "::new";
 		item.origin_id = item.symbol_id;
+		if (expected->type.kind == TypeKind::ScriptClass) {
+			if (auto *record = find_class(expected->type.symbol_id)) {
+				if (auto *constructor = find_member(*record, "_init")) item.origin_id = constructor->id;
+			}
+		}
 		item.access_kind = paths.empty() ? "local" : std::string(access_path_kind_name(paths.front().kind));
 		additions.insert(additions.begin(), std::move(item));
 		if (augment_provider.empty()) augment_provider = "constructors";
@@ -2431,8 +2216,20 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		}
 		return output;
 	}
+	if (in_type_hint) {
+		output.items = std::move(additions);
+		output.disposition = CompletionDisposition::Replace;
+		output.provider = augment_provider.empty() ? "extendedTypeHints" : std::move(augment_provider);
+		rank(output.items, output.provider);
+		return output;
+	}
 
-	output.items = merge_front(std::move(additions), semantic_completion_locked(*document, position));
+	output.items = merge_front(std::move(additions), semantic_completion_locked(*document, position, site));
+	if (!site.suppressed_symbol.empty()) {
+		std::erase_if(output.items, [&](const CompletionItem &item) {
+			return item.filter_text == site.suppressed_symbol;
+		});
+	}
 	if (completion_config_.hide_private && site.member_access && !site.member_prefix.starts_with('_')) {
 		std::erase_if(output.items, [](const CompletionItem &item) { return item.filter_text.starts_with('_'); });
 	}

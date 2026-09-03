@@ -10,6 +10,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -43,6 +44,14 @@ struct Value {
 	std::vector<CallableSignature> signatures;
 	bool resolved = false;
 	bool callable = false;
+	// Script signature type names are relative to the class that declares the
+	// callable, not the class containing the call site.
+	std::string callable_context_id;
+	Value() = default;
+	Value(ResolvedType p_type, std::vector<CallableSignature> p_signatures,
+			bool p_resolved, bool p_callable, std::string p_callable_context_id = {}) :
+			type(std::move(p_type)), signatures(std::move(p_signatures)), resolved(p_resolved),
+			callable(p_callable), callable_context_id(std::move(p_callable_context_id)) {}
 };
 
 using Scope = std::unordered_map<std::string, Value>;
@@ -134,6 +143,9 @@ private:
 			result.type = {TypeKind::Callable, "Callable", symbol.id};
 			result.callable = true;
 			result.signatures.push_back(script_signature(symbol));
+			if (auto owner = workspace.symbol_owners_.find(symbol.id); owner != workspace.symbol_owners_.end()) {
+				result.callable_context_id = owner->second;
+			}
 			return result;
 		}
 		std::vector<std::string> stack;
@@ -171,6 +183,7 @@ private:
 			if (constructor) result.signatures.push_back(script_signature(*constructor));
 			else result.signatures.push_back({});
 			for (auto &signature : result.signatures) signature.return_type = current_class->symbol.id;
+			result.callable_context_id = current_class->symbol.id;
 			return result;
 		}
 		if (current_class) {
@@ -278,13 +291,15 @@ private:
 				auto *constructor = record ? workspace.find_member(*record, "_init") : nullptr;
 				if (constructor) result.signatures.push_back(script_signature(*constructor));
 				else result.signatures.push_back({});
+				result.callable_context_id = receiver.type.symbol_id;
 			} else if (auto *constructors = workspace.native_api_.constructors(receiver.type.name)) {
 				result.signatures = *constructors;
 				if (result.signatures.empty()) result.signatures.push_back({});
 			} else {
 				result.signatures.push_back({});
 			}
-			for (auto &signature : result.signatures) signature.return_type = receiver.type.name;
+			auto return_type = receiver.type.kind == TypeKind::ScriptClass ? receiver.type.symbol_id : receiver.type.name;
+			for (auto &signature : result.signatures) signature.return_type = return_type;
 			return result;
 		}
 		if (receiver.type.kind == TypeKind::ScriptClass) {
@@ -360,6 +375,8 @@ private:
 			}
 			return {};
 		}
+		auto *signature_context = callee.callable_context_id.empty() ? current_class :
+			workspace.find_class(callee.callable_context_id);
 		std::vector<const CallableSignature *> arity_matches;
 		for (const auto &signature : callee.signatures) {
 			size_t minimum = 0;
@@ -376,14 +393,14 @@ private:
 		for (auto *signature : arity_matches) {
 			bool compatible = true;
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
-				auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
 				if (expected.known() && values[index].type.known() && !workspace.is_assignable(expected, values[index].type)) {
 					compatible = false;
 					break;
 				}
 			}
 			if (compatible) {
-				auto result_type = workspace.type_from_name(signature->return_type, current_class);
+				auto result_type = workspace.type_from_name(signature->return_type, signature_context);
 				if (!result_type.known()) result_type = {TypeKind::Variant, "Variant"};
 				return {result_type, {}, true, false};
 			}
@@ -391,7 +408,7 @@ private:
 		for (auto *signature : arity_matches) {
 			bool compatible = true;
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
-				auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
 				if (expected.known() && values[index].type.known() &&
 						!workspace.is_assignable(expected, values[index].type) &&
 						!workspace.is_potential_downcast(expected, values[index].type)) {
@@ -401,27 +418,27 @@ private:
 			}
 			if (!compatible) continue;
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
-				auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
 				if (!workspace.is_potential_downcast(expected, values[index].type) ||
 						workspace.unsafe_call_argument_ == WarningLevel::Ignore) continue;
 				add("unsafe-call-argument", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
 					"\", but the value has the broader type \"" + values[index].type.display() + "\".", nodes[index]->range,
 					workspace.unsafe_call_argument_ == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
 			}
-			auto result_type = workspace.type_from_name(signature->return_type, current_class);
+			auto result_type = workspace.type_from_name(signature->return_type, signature_context);
 			if (!result_type.known()) result_type = {TypeKind::Variant, "Variant"};
 			return {result_type, {}, true, false};
 		}
 		auto *signature = arity_matches.front();
 		for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
-			auto expected = workspace.type_from_name(signature->arguments[index].type, current_class);
+			auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
 			if (expected.known() && values[index].type.known() && !workspace.is_assignable(expected, values[index].type)) {
 				add("argument-type", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
 					"\", but received \"" + values[index].type.display() + "\".", nodes[index]->range);
 				break;
 			}
 		}
-		auto result_type = workspace.type_from_name(signature->return_type, current_class);
+		auto result_type = workspace.type_from_name(signature->return_type, signature_context);
 		return {result_type, {}, true, false};
 	}
 
@@ -533,7 +550,10 @@ private:
 			if (auto *condition = field(node, "condition")) evaluate(*condition);
 			auto left = field(node, "left") ? evaluate(*field(node, "left")) : Value{};
 			auto right = field(node, "right") ? evaluate(*field(node, "right")) : Value{};
-			return left.type.known() && right.type.known() && left.type.name == right.type.name ? left :
+			auto aligned = left.type.known() && right.type.known() && left.type.kind == right.type.kind &&
+				left.type.name == right.type.name && left.type.instance == right.type.instance &&
+				(left.type.symbol_id.empty() || right.type.symbol_id.empty() || left.type.symbol_id == right.type.symbol_id);
+			return aligned ? left :
 				Value{{TypeKind::Variant, "Variant"}, {}, true, false};
 		}
 		if (node.kind == "assignment" || node.kind == "augmented_assignment") {
@@ -587,7 +607,9 @@ private:
 		}
 		if (node.kind == "lambda") {
 			analyze_lambda(node);
-			return {{TypeKind::Callable, "Callable"}, {syntax_signature(node)}, true, true};
+			Value result{{TypeKind::Callable, "Callable"}, {syntax_signature(node)}, true, true};
+			if (current_class) result.callable_context_id = current_class->symbol.id;
+			return result;
 		}
 		Value last;
 		for (const auto &child : node.children) last = evaluate(child);

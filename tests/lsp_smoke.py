@@ -667,6 +667,85 @@ enabled_items = {item["filterText"] for item in read_packet(server.stdout)["resu
 assert {"FileAccess.READ", "FileAccess.WRITE"} <= enabled_items
 stop_server(server)
 
+# The serialized completion path uses the same nested comparison and foreign
+# constructor context as the core API, including alternate enum access paths.
+caret_root = pathlib.Path("tests/fixtures/caret_completion").resolve()
+caret_uri = (caret_root / "main.gd").as_uri()
+caret_source = (
+    "extends RefCounted\n\n"
+    "const TF = ContextRoot.Utils.Profile.TimeFunction.TimeScale\n\n"
+    "enum LocalState { IDLE, READY }\n"
+    "enum OtherState { FIRST, SECOND }\n\n"
+    "func inspect() -> void:\n"
+    "\tvar n := OtherState.FIRST\n"
+    "\tvar em: LocalState\n"
+    "\tif (em != LocalState.IDLE) or n == OtherState.FIRST:\n"
+    "\t\tpass\n"
+    "\tContextRoot.Utils.Profile.TimeFunction.new(\"\", TF.USEC)\n"
+    "\tContextRoot.Utils.Profile.TimeFunction.new(\"\", \"bad\")\n"
+)
+
+
+def caret_position(needle):
+    offset = caret_source.index(needle) + len(needle)
+    before = caret_source[:offset]
+    return {"line": before.count("\n"), "character": len(before.rsplit("\n", 1)[-1])}
+
+
+server, response = initialize_server(
+    {"rootUri": caret_root.as_uri()}, args=("--api", root / "extension_api.json")
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": caret_uri,
+                    "languageId": "gdscript",
+                    "version": 1,
+                    "text": caret_source,
+                }
+            },
+        }
+    )
+)
+for request_id, needle in ((140, "n == "), (141, 'new("", TF.USEC')):
+    server.stdin.write(
+        packet(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "textDocument/completion",
+                "params": {"textDocument": {"uri": caret_uri}, "position": caret_position(needle)},
+            }
+        )
+    )
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 142,
+            "method": "textDocument/diagnostic",
+            "params": {"textDocument": {"uri": caret_uri}},
+        }
+    )
+)
+server.stdin.flush()
+caret_responses = {}
+while len(caret_responses) < 3:
+    message = read_packet(server.stdout)
+    if message.get("id") in (140, 141, 142):
+        caret_responses[message["id"]] = message["result"]
+comparison_items = {item["filterText"] for item in caret_responses[140]["items"]}
+constructor_items = {item["filterText"] for item in caret_responses[141]["items"]}
+assert "OtherState.FIRST" in comparison_items
+assert {"TF.MSEC", "ContextRoot.Utils.Profile.TimeFunction.TimeScale.MSEC"} <= constructor_items
+assert any(item["code"] == "argument-type" for item in caret_responses[142]["items"])
+stop_server(server)
+
 
 # Older clients may only send rootPath, and clients with no root metadata may
 # rely on the server process working directory.

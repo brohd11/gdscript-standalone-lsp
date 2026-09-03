@@ -17,6 +17,7 @@ namespace gdscript_lsp {
 
 class SemanticAnalyzer;
 class SemanticAnalyzerImpl;
+struct CaretContext;
 
 enum class WarningLevel : uint8_t {
 	Ignore = 0,
@@ -130,7 +131,8 @@ private:
 	const Symbol *find_lexical_member(const ClassRecord &record, std::string_view name) const;
 	const Symbol *resolve_identifier(const Document &document, const ClassRecord *context,
 		std::string_view name, Position position) const;
-	std::vector<CompletionItem> semantic_completion_locked(const Document &document, Position position) const;
+	std::vector<CompletionItem> semantic_completion_locked(const Document &document, Position position,
+		const CaretContext &caret) const;
 };
 
 } // namespace gdscript_lsp

@@ -291,6 +291,88 @@ int main() {
 		inherited_origin.origin->uri.ends_with("/base.gd"),
 		"an inherited callable points to the script that declares it, not the receiver script");
 
+	// End-to-end caret contexts mirror the remaining cases from the exploratory
+	// root test.gd without making that user-owned scratch file part of the suite.
+	Workspace caret_workspace;
+	auto caret_fixture = std::filesystem::weakly_canonical("tests/fixtures/caret_completion");
+	expect(caret_workspace.open(caret_fixture, fixture / "extension_api.json", &error),
+		"caret completion fixture opens: " + error);
+	auto caret_uri = caret_workspace.uri_for_path(caret_fixture / "main.gd");
+	const std::string caret_prelude =
+		"extends RefCounted\n\n"
+		"const TF = ContextRoot.Utils.Profile.TimeFunction.TimeScale\n\n"
+		"enum LocalState { IDLE, READY }\n"
+		"enum OtherState { FIRST, SECOND }\n\n"
+		"func consume(value: ContextRoot.Utils.Profile.TimeFunction.TimeScale) -> void:\n\tpass\n\n"
+		"func inspect() -> void:\n";
+	int64_t caret_version = 1;
+	auto probe = [&](std::string body, std::string_view marker, CompletionProfile profile = CompletionProfile::Full) {
+		auto source = caret_prelude + std::move(body);
+		auto found = source.rfind(marker);
+		expect(found != std::string::npos, "caret completion marker exists");
+		auto position = byte_to_position(source, found + marker.size());
+		expect(caret_workspace.update_document(caret_uri, std::move(source), ++caret_version, &error),
+			"caret completion overlay accepted: " + error);
+		return caret_workspace.completion_result(caret_uri, position, profile);
+	};
+	auto qualified_type = probe("\tvar typed: ContextRoot.Utils.Profile\n", "ContextRoot.Utils.");
+	expect(has_item(qualified_type.items, "Profile") && !has_item(qualified_type.items, "helper"),
+		"qualified type completion is owned by the type context and excludes functions");
+	auto declaration_self = probe("\tvar current := 1\n", "var current");
+	expect(!has_item(declaration_self.items, "current"),
+		"a local declaration does not suggest the symbol currently being declared");
+	auto assignment_self = probe("\tvar current: int\n\tcurrent = current\n", "current = ");
+	expect(!has_item(assignment_self.items, "current"),
+		"a simple assignment does not suggest its own target on the right-hand side");
+	auto logical_enum = probe(
+		"\tvar n := OtherState.FIRST\n\tvar em: LocalState\n"
+		"\tif em != LocalState.IDLE or n == OtherState.FIRST:\n\t\tpass\n", "n == ");
+	expect(logical_enum.disposition == CompletionDisposition::Replace &&
+		has_item(logical_enum.items, "OtherState.FIRST"),
+		"the nearest logical clause supplies comparison enum completion");
+	auto grouped_enum = probe(
+		"\tvar em: LocalState\n\tif (em == LocalState.IDLE):\n\t\tpass\n", "em == ");
+	expect(has_item(grouped_enum.items, "LocalState.IDLE"),
+		"grouping parentheses do not hide comparison enum completion");
+	auto typed_ternary = probe(
+		"\tvar flag := true\n"
+		"\tvar state: LocalState = LocalState.IDLE if flag else LocalState.READY\n",
+		"else ");
+	expect(has_item(typed_ternary.items, "LocalState.IDLE"),
+		"an outer declared type supplies completion inside a ternary value branch");
+	auto inferred_ternary = probe(
+		"\tvar flag := true\n"
+		"\tvar state = LocalState.IDLE if flag else LocalState.READY\n",
+		"else ");
+	expect(has_item(inferred_ternary.items, "LocalState.READY"),
+		"an untyped ternary uses its compatible opposite value branch for completion");
+	auto constructor_enum = probe(
+		"\tContextRoot.Utils.Profile.TimeFunction.new(\"\", TF.USEC)\n", "new(\"\", ");
+	expect(has_item(constructor_enum.items, "TF.MSEC") &&
+		has_item(constructor_enum.items, "ContextRoot.Utils.Profile.TimeFunction.TimeScale.MSEC"),
+		"constructor arguments retain declaring-script type context and all caller access paths");
+	auto constructor_callable = caret_workspace.resolve_expression(caret_uri, {12, 2},
+		"ContextRoot.Utils.Profile.TimeFunction.new");
+	expect(constructor_callable.origin && constructor_callable.origin->name == "_init" &&
+		constructor_callable.origin->uri.ends_with("/time_function.gd"),
+		"a synthetic new callable retains the script constructor declaration origin");
+	auto resolved_tf = caret_workspace.resolve_expression(caret_uri, {2, 10}, "TF");
+	expect(!resolved_tf.access_paths.empty() && resolved_tf.access_paths.front().text == "TF" &&
+		std::any_of(resolved_tf.access_paths.begin(), resolved_tf.access_paths.end(), [](const AccessPath &path) {
+			return path.text == "ContextRoot.Utils.Profile.TimeFunction.TimeScale";
+		}), "rich type resolution returns alias and nested global namespace paths");
+	auto invalid_constructor_source = caret_prelude +
+		"\tContextRoot.Utils.Profile.TimeFunction.new(\"\", \"not a scale\")\n";
+	expect(caret_workspace.update_document(caret_uri, invalid_constructor_source, ++caret_version, &error),
+		"constructor diagnostic overlay accepted");
+	auto constructor_diagnostics = caret_workspace.diagnostics(caret_uri);
+	auto invalid_constructor = std::find_if(constructor_diagnostics.begin(), constructor_diagnostics.end(),
+		[](const Diagnostic &diagnostic) { return diagnostic.code == "argument-type" &&
+			diagnostic.message.find("TimeScale") != std::string::npos &&
+			diagnostic.message.find("String") != std::string::npos; });
+	expect(invalid_constructor != constructor_diagnostics.end(),
+		"foreign constructor parameter types are diagnosed in their declaring class");
+
 	auto unicode = std::string("a😀b\nvalue");
 	auto byte = position_to_byte(unicode, {0, 3});
 	expect(byte == 5, "UTF-16 position converts surrogate pair");
@@ -372,7 +454,8 @@ int main() {
 		helper_position("var product: Product = "), CompletionProfile::Helpers);
 	auto *constructor = find_item(constructor_result.items, "Product.new");
 	expect(constructor_result.disposition == CompletionDisposition::Augment && constructor &&
-		constructor->insert_text == "Product.new(", "constructor helper preserves Godot's argument-aware insertion");
+		constructor->insert_text == "Product.new(" && constructor->origin_id.ends_with("::_init"),
+		"constructor helper preserves Godot insertion and points to the _init declaration");
 	auto method_string = diagnostic_workspace.completion_result(diagnostic_uri,
 		helper_position("target.call(\""), CompletionProfile::Helpers);
 	expect(method_string.disposition == CompletionDisposition::Replace && method_string.provider == "memberStrings" &&
@@ -582,9 +665,9 @@ int main() {
 	expect(has_item(singleton_completion, "get_version_info"),
 		"native singleton completion retains instance members despite its class-like identifier");
 	auto native_class_completion = diagnostic_workspace.completion(semantic_valid_uri, {52, 22});
-	expect(has_item(native_class_completion, "ModeFlags") && has_item(native_class_completion, "READ") &&
+	expect(has_item(native_class_completion, "ModeFlags") && !has_item(native_class_completion, "READ") &&
 		!has_item(native_class_completion, "reference_method"),
-		"native class receiver exposes type-level members and omits inherited instance methods");
+		"native type-hint receiver exposes metatypes and omits value and instance members");
 
 	auto warning_fixture = std::filesystem::temp_directory_path() /
 		("gdscript-lsp-warning-fixture-" + std::to_string(

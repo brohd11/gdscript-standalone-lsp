@@ -18,7 +18,8 @@ LDFLAGS += -pthread
 CORE_CPP := $(wildcard src/core/*.cpp)
 CORE_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP))
 TS_OBJ := $(BUILD_DIR)/vendor/tree_sitter.o $(BUILD_DIR)/vendor/gdscript_parser.o $(BUILD_DIR)/vendor/gdscript_scanner.o
-DEPFILES := $(CORE_OBJ:.o=.d) $(BUILD_DIR)/lsp/main.d $(BUILD_DIR)/tests/core_tests.d $(BUILD_DIR)/tools/dump_tree.d
+DEPFILES := $(CORE_OBJ:.o=.d) $(BUILD_DIR)/lsp/main.d $(BUILD_DIR)/tests/core_tests.d \
+	$(BUILD_DIR)/tests/caret_context_tests.d $(BUILD_DIR)/tools/dump_tree.d
 
 -include $(DEPFILES)
 
@@ -34,8 +35,12 @@ $(BUILD_DIR)/gdscript-lsp: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/lsp/main.o
 $(BUILD_DIR)/core-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/core_tests.o
 	$(CXX) $^ $(LDFLAGS) -o $@
 
-test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/gdscript-lsp
+$(BUILD_DIR)/caret-context-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/caret_context_tests.o
+	$(CXX) $^ $(LDFLAGS) -o $@
+
+test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/gdscript-lsp
 	$(BUILD_DIR)/core-tests
+	$(BUILD_DIR)/caret-context-tests
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
 
 test-conformance: $(BUILD_DIR)/gdscript-lsp
