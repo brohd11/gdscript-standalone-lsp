@@ -21,6 +21,8 @@ struct ClassRecord {
 class Document {
 public:
 	Document(std::string uri, std::string resource_path, std::string source, int64_t version = -1);
+	Document(std::string uri, std::string resource_path, std::string source, int64_t version,
+		const Document &previous);
 	~Document();
 	Document(Document &&) noexcept;
 	Document &operator=(Document &&) noexcept;
@@ -35,6 +37,7 @@ public:
 	std::vector<ClassRecord> &classes() { return classes_; }
 	const std::vector<ParseIssue> &syntax_errors() const { return syntax_errors_; }
 	const SyntaxNode &syntax_root() const { return syntax_root_; }
+	bool used_incremental_parse() const { return used_incremental_parse_; }
 	std::string_view text(const SyntaxNode &node) const;
 
 	const ClassRecord *class_at(Position position) const;
@@ -52,8 +55,9 @@ private:
 	std::vector<ClassRecord> classes_;
 	std::vector<ParseIssue> syntax_errors_;
 	SyntaxNode syntax_root_;
+	bool used_incremental_parse_ = false;
 
-	void parse();
+	void parse(const Document *previous = nullptr);
 };
 
 } // namespace gdscript_lsp

@@ -250,14 +250,13 @@ void GDScriptLanguageService::_finish_open(const String &error) {
 void GDScriptLanguageService::update_document(const String &uri, const String &text, int64_t version) {
 	if (!ready_) return;
 	auto target = service_uri(*workspace_, uri);
-	auto affected = workspace_->affected_documents({target});
 	std::string error;
-	workspace_->update_document(target, to_std(text), version, &error);
-	affected = merge_paths(std::move(affected), workspace_->affected_documents({target}));
+	UpdateImpact impact;
+	workspace_->update_document(target, to_std(text), version, &error, &impact);
 	PackedStringArray changed_paths;
 	changed_paths.push_back(uri);
 	emit_signal("index_updated", changed_paths);
-	emit_signal("diagnostics_updated", packed_paths(affected));
+	emit_signal("diagnostics_updated", packed_paths(impact.affected_documents));
 }
 
 void GDScriptLanguageService::close_document(const String &uri) {

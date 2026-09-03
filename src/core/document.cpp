@@ -70,6 +70,48 @@ Range syntax_range(TSNode node, std::string_view source) {
 		syntax_position(source, end_byte, ts_node_end_point(node))};
 }
 
+TSPoint tree_sitter_point(std::string_view source, size_t byte) {
+	TSPoint result{};
+	for (size_t index = 0; index < std::min(byte, source.size()); ++index) {
+		if (source[index] == '\n') {
+			++result.row;
+			result.column = 0;
+		} else {
+			++result.column;
+		}
+	}
+	return result;
+}
+
+bool utf8_continuation(char value) {
+	return (static_cast<unsigned char>(value) & 0xC0U) == 0x80U;
+}
+
+TSInputEdit replacement_edit(std::string_view old_source, std::string_view new_source) {
+	size_t start = 0;
+	while (start < old_source.size() && start < new_source.size() && old_source[start] == new_source[start]) ++start;
+	while (start > 0 && ((start < old_source.size() && utf8_continuation(old_source[start])) ||
+			(start < new_source.size() && utf8_continuation(new_source[start])))) --start;
+
+	size_t old_end = old_source.size();
+	size_t new_end = new_source.size();
+	while (old_end > start && new_end > start && old_source[old_end - 1] == new_source[new_end - 1]) {
+		--old_end;
+		--new_end;
+	}
+	while (old_end < old_source.size() && new_end < new_source.size() &&
+			(utf8_continuation(old_source[old_end]) || utf8_continuation(new_source[new_end]))) {
+		++old_end;
+		++new_end;
+	}
+
+	return {
+		static_cast<uint32_t>(start), static_cast<uint32_t>(old_end), static_cast<uint32_t>(new_end),
+		tree_sitter_point(old_source, start), tree_sitter_point(old_source, old_end),
+		tree_sitter_point(new_source, new_end)
+	};
+}
+
 SyntaxNode syntax_node(TSNode node, std::string_view source, std::string_view field_name = {}) {
 	SyntaxNode result;
 	result.kind = ts_node_type(node);
@@ -126,6 +168,7 @@ struct DeclarationScan {
 	size_t code_end = 0;
 	std::optional<size_t> colon;
 	std::optional<size_t> assignment;
+	bool inferred_assignment = false;
 	bool missing_type = false;
 	bool missing_value = false;
 	bool recovered_type = false;
@@ -238,7 +281,9 @@ DeclarationScan scan_declaration(TSNode node, std::string_view source) {
 		}
 		return false;
 	};
-	if (result.colon && (!result.assignment || *result.assignment != *result.colon + 1)) {
+	result.inferred_assignment = result.colon && result.assignment &&
+		!has_non_space(*result.colon + 1, *result.assignment);
+	if (result.colon && !result.inferred_assignment) {
 		auto type_end = result.assignment.value_or(result.code_end);
 		result.missing_type = !has_non_space(*result.colon + 1, type_end);
 		// An untyped property may use the colon solely to introduce get/set.
@@ -246,7 +291,7 @@ DeclarationScan scan_declaration(TSNode node, std::string_view source) {
 	}
 	if (result.assignment) result.missing_value = !has_non_space(*result.assignment + 1, result.code_end);
 	auto type_node = field(node, "type");
-	if (result.colon && (!result.assignment || *result.assignment != *result.colon + 1) && !ts_node_is_null(type_node)) {
+	if (result.colon && !result.inferred_assignment && !ts_node_is_null(type_node)) {
 		result.recovered_type = ts_node_start_byte(type_node) >= result.end || ts_node_end_byte(type_node) > result.end;
 	}
 	auto value_node = field(node, "value");
@@ -465,6 +510,20 @@ TSNode first_kind_between(TSNode node, std::string_view kind, size_t begin, size
 	return {};
 }
 
+TSNode first_field_between(TSNode node, std::string_view wanted, size_t begin, size_t end) {
+	if (ts_node_is_null(node) || ts_node_end_byte(node) < begin || ts_node_start_byte(node) >= end) return {};
+	for (uint32_t index = 0; index < ts_node_child_count(node); ++index) {
+		auto child = ts_node_child(node, index);
+		if (!ts_node_is_named(child)) continue;
+		const char *field_name = ts_node_field_name_for_child(node, index);
+		if (field_name && wanted == field_name && ts_node_start_byte(child) >= begin &&
+				ts_node_end_byte(child) <= end) return child;
+		auto found = first_field_between(child, wanted, begin, end);
+		if (!ts_node_is_null(found)) return found;
+	}
+	return {};
+}
+
 Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view source) {
 	Symbol result;
 	auto identifier = first_descendant(node, "identifier");
@@ -505,6 +564,7 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.selection_range = ts_node_is_null(name_node) ? symbol.range : node_range(name_node, source);
 	symbol.declared_type = trim(node_text(field(node, "return_type"), source));
 	symbol.is_static = has_named_child(node, "static_keyword");
+	symbol.body_recovered = ts_node_has_error(field(node, "body"));
 	symbol.detail = (symbol.is_static ? "static func " : "func ") + symbol.name + "(";
 	auto parameters = field(node, "parameters");
 	for (uint32_t i = 0; i < ts_node_named_child_count(parameters); ++i) {
@@ -619,14 +679,29 @@ Document::Document(std::string uri, std::string resource_path, std::string sourc
 	parse();
 }
 
+Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version,
+		const Document &previous) :
+		impl_(std::make_unique<Impl>()), uri_(std::move(uri)), resource_path_(std::move(resource_path)),
+		source_(std::move(source)), version_(version) {
+	parse(&previous);
+}
+
 Document::~Document() = default;
 Document::Document(Document &&) noexcept = default;
 Document &Document::operator=(Document &&) noexcept = default;
 
-void Document::parse() {
+void Document::parse(const Document *previous) {
 	impl_->parser = ts_parser_new();
 	if (!ts_parser_set_language(impl_->parser, tree_sitter_gdscript())) return;
-	impl_->tree = ts_parser_parse_string(impl_->parser, nullptr, source_.data(), static_cast<uint32_t>(source_.size()));
+	TSTree *edited_tree = nullptr;
+	if (previous && previous->impl_ && previous->impl_->tree) {
+		edited_tree = ts_tree_copy(previous->impl_->tree);
+		auto edit = replacement_edit(previous->source_, source_);
+		ts_tree_edit(edited_tree, &edit);
+		used_incremental_parse_ = true;
+	}
+	impl_->tree = ts_parser_parse_string(impl_->parser, edited_tree, source_.data(), static_cast<uint32_t>(source_.size()));
+	if (edited_tree) ts_tree_delete(edited_tree);
 	if (!impl_->tree) return;
 	auto root = ts_tree_root_node(impl_->tree);
 	syntax_root_ = syntax_node(root, source_);
@@ -761,9 +836,10 @@ void Document::parse() {
 				recovered.range = {header_position, byte_to_position(source_, extent.end)};
 				recovered.selection_range = {name_position, byte_to_position(source_, extent.name_end)};
 				recovered.is_static = extent.is_static;
-				recovered.malformed = true;
+				recovered.body_recovered = true;
 				recovered.detail = (extent.is_static ? "static func " : "func ") + name + "(";
 				auto parameters = first_kind_between(root, "parameters", extent.keyword, extent.header_end);
+				recovered.malformed = ts_node_is_null(parameters);
 				for (uint32_t index = 0; index < ts_node_named_child_count(parameters); ++index) {
 					auto parameter = parameter_symbol(ts_node_named_child(parameters, index), recovered, source_);
 					if (parameter.name.empty()) continue;
@@ -772,7 +848,10 @@ void Document::parse() {
 					if (!parameter.declared_type.empty()) recovered.detail += ": " + parameter.declared_type;
 					recovered.children.push_back(std::move(parameter));
 				}
-				recovered.detail += ") -> Variant";
+				auto return_type = first_field_between(root, "return_type", extent.keyword, extent.header_end);
+				recovered.declared_type = trim(node_text(return_type, source_));
+				recovered.detail += ") -> " +
+					(recovered.declared_type.empty() ? std::string("Variant") : recovered.declared_type);
 				collect_locals(root, recovered, source_, extent.body_start,
 					extent.end == source_.size() ? extent.end : extent.end + 1);
 				owner->members.push_back(std::move(recovered));

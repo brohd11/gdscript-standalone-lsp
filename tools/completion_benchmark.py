@@ -38,13 +38,16 @@ def response_for(process, request_id):
             return message["result"]
 
 
-def source_with_prefix(prefix):
+def source_with_prefix(prefix, title_type="String"):
     return (
         "extends RefCounted\n\n"
         "enum BenchState { IDLE, READY }\n\n"
         "class Product:\n"
-        "\tvar title: String\n"
+        f"\tvar title: {title_type}\n"
         "\tfunc tick() -> void: pass\n\n"
+        "class BenchRoot:\n"
+        "\tclass Utils:\n"
+        "\t\tstatic func some_func(value: int) -> void: pass\n\n"
         "func inspect(target: Product) -> void:\n"
         f"\t{prefix}\n"
     )
@@ -74,8 +77,9 @@ def main():
     parser.add_argument("--api", type=pathlib.Path)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--semantic-iterations", type=int, default=10)
     args = parser.parse_args()
-    if args.iterations < 1 or args.warmup < 0:
+    if args.iterations < 1 or args.warmup < 0 or args.semantic_iterations < 1:
         parser.error("iterations must be positive and warmup must be non-negative")
 
     binary = args.binary.resolve()
@@ -143,6 +147,9 @@ def main():
         process.stdin.flush()
         return response_for(process, request_id)
 
+    # Let the immediate didOpen diagnostic finish before measuring requests.
+    # Otherwise one sample can include unrelated diagnostic CPU/output work.
+    time.sleep(0.25)
     for _ in range(args.warmup):
         complete(current_source)
 
@@ -173,6 +180,47 @@ def main():
         complete(current_source)
         edit_samples.append((time.perf_counter() - started) * 1000.0)
 
+    chain_samples = []
+    chain_expressions = ("BenchRoot.", "BenchRoot.Utils.", "BenchRoot.Utils.some_func(")
+    for index in range(args.iterations):
+        current_source = source_with_prefix(chain_expressions[index % len(chain_expressions)])
+        version += 1
+        started = time.perf_counter()
+        process.stdin.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": {"uri": synthetic_uri, "version": version},
+                        "contentChanges": [{"text": current_source}],
+                    },
+                }
+            )
+        )
+        complete(current_source)
+        chain_samples.append((time.perf_counter() - started) * 1000.0)
+
+    semantic_samples = []
+    for index in range(args.semantic_iterations):
+        current_source = source_with_prefix("target.t", "int" if index % 2 == 0 else "String")
+        version += 1
+        started = time.perf_counter()
+        process.stdin.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": {"uri": synthetic_uri, "version": version},
+                        "contentChanges": [{"text": current_source}],
+                    },
+                }
+            )
+        )
+        complete(current_source)
+        semantic_samples.append((time.perf_counter() - started) * 1000.0)
+
     request_id += 1
     process.stdin.write(packet({"jsonrpc": "2.0", "id": request_id, "method": "shutdown", "params": {}}))
     process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
@@ -183,7 +231,9 @@ def main():
     print(f"project: {project}")
     print(f"initialize/index: {initialize_ms:.2f} ms")
     summary("warm completion", warm_samples)
-    summary("didChange + completion", edit_samples)
+    summary("body didChange + completion", edit_samples)
+    summary("member-chain didChange + completion", chain_samples)
+    summary("declaration didChange + completion", semantic_samples)
 
 
 if __name__ == "__main__":

@@ -37,10 +37,17 @@ struct IndexStats {
 	double elapsed_ms = 0.0;
 };
 
+struct UpdateImpact {
+	bool incremental_parse = false;
+	bool full_rebuild = true;
+	std::vector<std::string> affected_documents;
+};
+
 class Workspace {
 public:
 	bool open(const std::filesystem::path &root, const std::filesystem::path &api_path = {}, std::string *error = nullptr);
-	bool update_document(const std::string &uri, std::string text, int64_t version, std::string *error = nullptr);
+	bool update_document(const std::string &uri, std::string text, int64_t version, std::string *error = nullptr,
+		UpdateImpact *impact = nullptr);
 	bool close_document(const std::string &uri, std::string *error = nullptr);
 	bool refresh_file(const std::string &uri, std::string *error = nullptr);
 
@@ -79,6 +86,7 @@ private:
 	mutable std::shared_mutex mutex_;
 	std::unordered_map<std::string, std::shared_ptr<Document>> documents_;
 	std::unordered_map<std::string, std::string> disk_sources_;
+	std::unordered_map<std::string, std::string> resource_uris_;
 	std::unordered_map<std::string, ClassRecord *> classes_;
 	std::unordered_map<std::string, std::string> global_classes_;
 	std::unordered_map<std::string, std::string> autoloads_;
@@ -97,6 +105,14 @@ private:
 	CompletionConfig completion_config_;
 
 	void rebuild_registry();
+	void register_document(Document &document);
+	void unregister_document(const Document &document);
+	std::vector<std::string> document_topology(const Document &document) const;
+	std::vector<std::string> document_semantics(const Document &document) const;
+	std::unordered_set<std::string> dependencies_for_document(const std::string &uri,
+		const Document &document) const;
+	void replace_document_dependencies(const std::string &uri, const Document &document);
+	std::vector<std::string> affected_documents_locked(const std::vector<std::string> &changed_uris) const;
 	void read_project_settings();
 	void scan_uid_files();
 	std::string resource_path(const std::filesystem::path &path) const;

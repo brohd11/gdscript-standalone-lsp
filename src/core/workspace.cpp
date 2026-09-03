@@ -13,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <unordered_set>
 
 namespace gdscript_lsp {
@@ -450,6 +451,159 @@ void Workspace::read_project_settings() {
 	}
 }
 
+void Workspace::register_document(Document &document) {
+	for (auto &record : document.classes()) {
+		classes_[record.symbol.id] = &record;
+		symbols_[record.symbol.id] = &record.symbol;
+		std::function<void(const Symbol &, const std::string &)> register_symbol =
+				[&](const Symbol &symbol, const std::string &owner) {
+			symbols_[symbol.id] = &symbol;
+			symbol_owners_[symbol.id] = owner;
+			for (const auto &child : symbol.children) register_symbol(child, symbol.id);
+		};
+		for (const auto &member : record.members) register_symbol(member, record.symbol.id);
+	}
+}
+
+void Workspace::unregister_document(const Document &document) {
+	std::function<void(const Symbol &)> unregister_symbol = [&](const Symbol &symbol) {
+		for (const auto &child : symbol.children) unregister_symbol(child);
+		symbols_.erase(symbol.id);
+		symbol_owners_.erase(symbol.id);
+		static_symbol_types_.erase(symbol.id);
+	};
+	for (const auto &record : document.classes()) {
+		for (const auto &member : record.members) unregister_symbol(member);
+		symbols_.erase(record.symbol.id);
+		classes_.erase(record.symbol.id);
+	}
+}
+
+std::vector<std::string> Workspace::document_topology(const Document &document) const {
+	std::vector<std::string> result;
+	auto add = [&](std::string_view label, const auto &value) {
+		result.push_back(std::string(label));
+		if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>) result.push_back(value);
+		else if constexpr (std::is_convertible_v<decltype(value), std::string_view>) result.emplace_back(value);
+		else result.push_back(std::to_string(value));
+	};
+	std::function<void(const Symbol &, bool)> append_symbol = [&](const Symbol &symbol, bool include_id) {
+		if (include_id) add("symbol", symbol.id);
+		add("name", symbol.name);
+		add("kind", static_cast<int>(symbol.kind));
+		add("declared", symbol.declared_type);
+		add("static", symbol.is_static);
+		add("variadic", symbol.is_variadic);
+		add("inferred", symbol.is_inferred);
+		add("malformed", symbol.malformed);
+		if (symbol.kind != SymbolKind::Method && symbol.kind != SymbolKind::Function &&
+				symbol.kind != SymbolKind::Constructor && symbol.kind != SymbolKind::Event) {
+			add("initializer", symbol.initializer);
+		}
+		for (const auto &child : symbol.children) {
+			if (child.is_parameter || symbol.kind == SymbolKind::Enum) {
+				add("child-default", child.initializer);
+				// Parameter IDs contain their source position. Moving a declaration
+				// without changing its signature must remain eligible for the fast path.
+				append_symbol(child, symbol.kind == SymbolKind::Enum);
+			}
+		}
+		result.push_back("end-symbol");
+	};
+	for (const auto &record : document.classes()) {
+		add("class", record.symbol.id);
+		add("global", record.global_name);
+		add("extends", record.extends_text);
+		for (const auto &member : record.members) append_symbol(member, true);
+		result.push_back("end-class");
+	}
+	return result;
+}
+
+std::vector<std::string> Workspace::document_semantics(const Document &document) const {
+	std::vector<std::string> result;
+	std::function<void(const ResolvedType &, size_t)> append_type = [&](const ResolvedType &type, size_t depth) {
+		result.push_back(std::to_string(static_cast<int>(type.kind)));
+		result.push_back(type.name);
+		result.push_back(type.symbol_id);
+		result.push_back(type.instance ? "instance" : "type");
+		if (depth >= 8) return;
+		for (const auto &argument : type.arguments) append_type(argument, depth + 1);
+		result.push_back("end-arguments");
+		if (type.callable_return) append_type(*type.callable_return, depth + 1);
+		result.push_back("end-return");
+		for (const auto &argument : type.signal_arguments) append_type(argument, depth + 1);
+		result.push_back("end-signal");
+	};
+	for (const auto &record : document.classes()) {
+		result.push_back(record.symbol.id);
+		result.push_back(record.base_class_id);
+		for (const auto &member : record.members) {
+			result.push_back(member.id);
+			std::vector<std::string> stack;
+			if (member.kind == SymbolKind::Method || member.kind == SymbolKind::Function ||
+					member.kind == SymbolKind::Constructor) {
+				append_type(callable_return_type(member, document, stack), 0);
+			} else {
+				append_type(hinted_type_of_symbol(member, document, member.range.start, stack), 0);
+			}
+		}
+	}
+	return result;
+}
+
+std::unordered_set<std::string> Workspace::dependencies_for_document(const std::string &uri,
+		const Document &document) const {
+	std::unordered_set<std::string> result;
+	auto dependency_uri = [&](std::string resource) -> std::string {
+		if (auto found = resource_uris_.find(resource); found != resource_uris_.end()) return found->second;
+		auto script_end = resource.find(".gd.");
+		if (script_end != std::string::npos) {
+			resource.resize(script_end + 3);
+			if (auto found = resource_uris_.find(resource); found != resource_uris_.end()) return found->second;
+		}
+		return {};
+	};
+	auto add = [&](const std::string &target) {
+		if (!target.empty() && target != uri) result.insert(target);
+	};
+	for (const auto &record : document.classes()) {
+		if (!record.base_class_id.empty() && !record.base_class_id.starts_with("native:")) {
+			if (auto *base = find_class(record.base_class_id)) add(base->symbol.uri);
+			else add(dependency_uri(record.base_class_id));
+		}
+	}
+	std::unordered_set<std::string> identifiers;
+	collect_identifiers(document, document.syntax_root(), identifiers);
+	for (const auto &identifier : identifiers) {
+		if (auto global = global_classes_.find(identifier); global != global_classes_.end()) {
+			if (auto *record = find_class(global->second)) add(record->symbol.uri);
+		}
+		if (auto autoload = autoloads_.find(identifier); autoload != autoloads_.end()) {
+			add(dependency_uri(resolve_path_reference(autoload->second, document.resource_path())));
+		}
+	}
+	for (auto path : quoted_script_paths(document.source())) {
+		add(dependency_uri(resolve_path_reference(std::move(path), document.resource_path())));
+	}
+	return result;
+}
+
+void Workspace::replace_document_dependencies(const std::string &uri, const Document &document) {
+	if (auto old = document_dependencies_.find(uri); old != document_dependencies_.end()) {
+		for (const auto &dependency : old->second) {
+			if (auto reverse = reverse_document_dependencies_.find(dependency);
+					reverse != reverse_document_dependencies_.end()) {
+				reverse->second.erase(uri);
+				if (reverse->second.empty()) reverse_document_dependencies_.erase(reverse);
+			}
+		}
+	}
+	auto dependencies = dependencies_for_document(uri, document);
+	document_dependencies_[uri] = dependencies;
+	for (const auto &dependency : dependencies) reverse_document_dependencies_[dependency].insert(uri);
+}
+
 void Workspace::rebuild_registry() {
 	classes_.clear();
 	global_classes_.clear();
@@ -463,20 +617,13 @@ void Workspace::rebuild_registry() {
 	static_symbol_types_.clear();
 	document_dependencies_.clear();
 	reverse_document_dependencies_.clear();
+	resource_uris_.clear();
 	for (auto &[uri, document] : documents_) {
-		(void)uri;
+		resource_uris_[document->resource_path()] = uri;
 		for (auto &record : document->classes()) {
-			classes_[record.symbol.id] = &record;
-			symbols_[record.symbol.id] = &record.symbol;
 			if (!record.global_name.empty()) ++global_name_counts_[record.global_name];
-			std::function<void(const Symbol &, const std::string &)> register_symbol =
-					[&](const Symbol &symbol, const std::string &owner) {
-				symbols_[symbol.id] = &symbol;
-				symbol_owners_[symbol.id] = owner;
-				for (const auto &child : symbol.children) register_symbol(child, symbol.id);
-			};
-			for (const auto &member : record.members) register_symbol(member, record.symbol.id);
 		}
+		register_document(*document);
 	}
 	for (auto &[id, record] : classes_) {
 		if (!record->global_name.empty() && global_name_counts_[record->global_name] == 1) {
@@ -548,50 +695,18 @@ void Workspace::rebuild_registry() {
 	// Build a conservative document graph from every resolved structural edge
 	// and every source-level global/script reference. The identifier index also
 	// preserves invalidation when a formerly unresolved global becomes valid.
-	std::unordered_map<std::string, std::string> resource_uris;
-	for (const auto &[uri, document] : documents_) resource_uris[document->resource_path()] = uri;
-	auto dependency_uri = [&](std::string resource) -> std::string {
-		if (auto found = resource_uris.find(resource); found != resource_uris.end()) return found->second;
-		// Inner class IDs append a dotted suffix to the owning .gd resource.
-		auto script_end = resource.find(".gd.");
-		if (script_end != std::string::npos) {
-			resource.resize(script_end + 3);
-			if (auto found = resource_uris.find(resource); found != resource_uris.end()) return found->second;
-		}
-		return {};
-	};
 	for (const auto &[uri, document] : documents_) {
-		auto &dependencies = document_dependencies_[uri];
-		auto add_dependency = [&](const std::string &target) {
-			if (!target.empty() && target != uri) dependencies.insert(target);
-		};
-		for (const auto &record : document->classes()) {
-			if (!record.base_class_id.empty() && !record.base_class_id.starts_with("native:")) {
-				if (auto *base = find_class(record.base_class_id)) add_dependency(base->symbol.uri);
-				else add_dependency(dependency_uri(record.base_class_id));
-			}
-		}
-		std::unordered_set<std::string> identifiers;
-		collect_identifiers(*document, document->syntax_root(), identifiers);
-		for (const auto &identifier : identifiers) {
-			if (auto global = global_classes_.find(identifier); global != global_classes_.end()) {
-				if (auto *record = find_class(global->second)) add_dependency(record->symbol.uri);
-			}
-			if (auto autoload = autoloads_.find(identifier); autoload != autoloads_.end()) {
-				add_dependency(dependency_uri(resolve_path_reference(autoload->second, document->resource_path())));
-			}
-		}
-		for (auto path : quoted_script_paths(document->source())) {
-			add_dependency(dependency_uri(resolve_path_reference(std::move(path), document->resource_path())));
-		}
+		document_dependencies_[uri] = dependencies_for_document(uri, *document);
 	}
 	for (const auto &[dependent, dependencies] : document_dependencies_) {
 		for (const auto &dependency : dependencies) reverse_document_dependencies_[dependency].insert(dependent);
 	}
 }
 
-bool Workspace::update_document(const std::string &uri, std::string text, int64_t version, std::string *error) {
+bool Workspace::update_document(const std::string &uri, std::string text, int64_t version, std::string *error,
+		UpdateImpact *impact) {
 	std::unique_lock lock(mutex_);
+	if (impact) *impact = {};
 	auto path = path_for_uri(uri);
 	if (path.empty()) {
 		if (error) *error = "invalid file URI";
@@ -603,8 +718,71 @@ bool Workspace::update_document(const std::string &uri, std::string text, int64_
 		return false;
 	}
 	if (!disk_sources_.contains(uri)) disk_sources_[uri] = read_file(path);
-	documents_[uri] = std::make_shared<Document>(uri, resource_path(path), std::move(text), version);
-	rebuild_registry();
+	auto previous = documents_.find(uri);
+	auto old_affected = affected_documents_locked({uri});
+	std::shared_ptr<Document> replacement;
+	if (previous == documents_.end()) {
+		replacement = std::make_shared<Document>(uri, resource_path(path), std::move(text), version);
+	} else {
+		replacement = std::make_shared<Document>(uri, resource_path(path), std::move(text), version, *previous->second);
+	}
+	if (impact) impact->incremental_parse = replacement->used_incremental_parse();
+
+	if (previous == documents_.end() || document_topology(*previous->second) != document_topology(*replacement)) {
+		documents_[uri] = std::move(replacement);
+		rebuild_registry();
+		if (impact) {
+			auto next = affected_documents_locked({uri});
+			old_affected.insert(old_affected.end(), next.begin(), next.end());
+			std::sort(old_affected.begin(), old_affected.end());
+			old_affected.erase(std::unique(old_affected.begin(), old_affected.end()), old_affected.end());
+			impact->affected_documents = std::move(old_affected);
+		}
+		return true;
+	}
+
+	auto old_semantics = document_semantics(*previous->second);
+	std::unordered_map<std::string, std::pair<std::string, std::string>> inheritance;
+	for (const auto &record : previous->second->classes()) {
+		inheritance[record.symbol.id] = {record.base_class_id, record.inheritance_error};
+	}
+	unregister_document(*previous->second);
+	documents_[uri] = replacement;
+	for (auto &record : replacement->classes()) {
+		if (auto found = inheritance.find(record.symbol.id); found != inheritance.end()) {
+			record.base_class_id = found->second.first;
+			record.inheritance_error = found->second.second;
+		}
+	}
+	register_document(*replacement);
+	{
+		std::lock_guard cache_lock(access_path_cache_mutex_);
+		access_path_cache_.clear();
+	}
+	for (const auto &record : replacement->classes()) {
+		for (const auto &member : record.members) {
+			std::unordered_set<std::string> stack;
+			auto type = resolve_static_symbol(member, stack);
+			if (type.known()) static_symbol_types_[member.id] = std::move(type);
+		}
+	}
+	if (old_semantics != document_semantics(*replacement)) {
+		rebuild_registry();
+		if (impact) {
+			auto next = affected_documents_locked({uri});
+			old_affected.insert(old_affected.end(), next.begin(), next.end());
+			std::sort(old_affected.begin(), old_affected.end());
+			old_affected.erase(std::unique(old_affected.begin(), old_affected.end()), old_affected.end());
+			impact->affected_documents = std::move(old_affected);
+		}
+		return true;
+	}
+
+	replace_document_dependencies(uri, *replacement);
+	if (impact) {
+		impact->full_rebuild = false;
+		impact->affected_documents = {uri};
+	}
 	return true;
 }
 
@@ -1093,22 +1271,22 @@ ResolvedType Workspace::callable_return_type(const Symbol &symbol, const Documen
 	};
 	find_function(declaration_document->syntax_root());
 	std::vector<ResolvedType> returns;
-	if (function) {
-		std::function<void(const SyntaxNode &, bool)> collect_returns = [&](const SyntaxNode &node, bool root) {
-			if (!root && (node.kind == "function_definition" || node.kind == "constructor_definition" ||
-					node.kind == "lambda" || node.kind == "class_definition")) return;
-			if (node.kind == "return_statement") {
-				if (!node.children.empty()) {
-					auto expression = std::string(declaration_document->text(node.children.front()));
-					returns.push_back(infer_expression(std::move(expression), *declaration_document,
-						declaration_context, node.children.front().range.start, stack));
-				}
-				return;
+	const bool recovered_range = function == nullptr;
+	std::function<void(const SyntaxNode &, bool)> collect_returns = [&](const SyntaxNode &node, bool root) {
+		if (recovered_range && (node.range.end < symbol.range.start || symbol.range.end < node.range.start)) return;
+		if (!root && (node.kind == "function_definition" || node.kind == "constructor_definition" ||
+				node.kind == "lambda" || node.kind == "class_definition")) return;
+		if (node.kind == "return_statement") {
+			if (!node.children.empty()) {
+				auto expression = std::string(declaration_document->text(node.children.front()));
+				returns.push_back(infer_expression(std::move(expression), *declaration_document,
+					declaration_context, node.children.front().range.start, stack));
 			}
-			for (const auto &child : node.children) collect_returns(child, false);
-		};
-		collect_returns(*function, true);
-	}
+			return;
+		}
+		for (const auto &child : node.children) collect_returns(child, false);
+	};
+	collect_returns(function ? *function : declaration_document->syntax_root(), true);
 	stack.pop_back();
 	if (returns.empty()) return {TypeKind::Variant, "Variant"};
 	auto result = returns.front();
@@ -2456,6 +2634,11 @@ std::vector<std::string> Workspace::document_uris() const {
 
 std::vector<std::string> Workspace::affected_documents(const std::vector<std::string> &changed_uris) const {
 	std::shared_lock lock(mutex_);
+	return affected_documents_locked(changed_uris);
+}
+
+std::vector<std::string> Workspace::affected_documents_locked(
+		const std::vector<std::string> &changed_uris) const {
 	std::unordered_set<std::string> affected;
 	std::vector<std::string> queue;
 	for (const auto &uri : changed_uris) {

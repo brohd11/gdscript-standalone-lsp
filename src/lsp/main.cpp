@@ -656,10 +656,9 @@ int main(int argc, char **argv) {
 			buffers[uri] = text;
 			diagnostics.set_open(uri, true);
 			auto generation = diagnostics.begin_update();
-			auto affected = workspace.affected_documents({uri});
-			if (workspace.update_document(uri, std::move(text), document.value("version", -1), &error)) {
-				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
-				diagnostics.finish_update(generation, {uri}, affected);
+			UpdateImpact impact;
+			if (workspace.update_document(uri, std::move(text), document.value("version", -1), &error, &impact)) {
+				diagnostics.finish_update(generation, {uri}, impact.affected_documents);
 			} else diagnostics.set_open(uri, false);
 		} else if (method == "textDocument/didChange") {
 			auto document = params["textDocument"];
@@ -667,10 +666,9 @@ int main(int argc, char **argv) {
 			if (!buffers.contains(uri)) buffers[uri] = "";
 			apply_content_changes(buffers[uri], params.value("contentChanges", json::array()));
 			auto generation = diagnostics.begin_update();
-			auto affected = workspace.affected_documents({uri});
-			if (workspace.update_document(uri, buffers[uri], document.value("version", -1), &error)) {
-				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
-				diagnostics.finish_update(generation, {uri}, affected);
+			UpdateImpact impact;
+			if (workspace.update_document(uri, buffers[uri], document.value("version", -1), &error, &impact)) {
+				diagnostics.finish_update(generation, {uri}, impact.affected_documents);
 			}
 		} else if (method == "textDocument/didClose") {
 			auto uri = params["textDocument"].value("uri", "");

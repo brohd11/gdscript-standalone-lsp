@@ -117,6 +117,12 @@ func _on_ready() -> void:
 		push_error("structural colon completion was not suppressed: %s" % [suppressed])
 		quit(1)
 		return
+	service.update_document(uri, helper_source.replace("print(target.title)", "print(target.title) # fast edit"), 7)
+	var updated_completion: Dictionary = service.completion_ex(uri, 16, 14, {"profile": "full"})
+	if updated_completion.items.is_empty():
+		push_error("completion failed after a same-surface incremental update")
+		quit(1)
+		return
 	service.set_configuration({"completion": {"constructors": false}})
 	constructor = service.completion_ex(uri, 11, 25, {"profile": "helpers"})
 	if constructor.disposition != "not_handled":

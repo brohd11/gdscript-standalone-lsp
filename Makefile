@@ -20,7 +20,7 @@ CORE_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP))
 TS_OBJ := $(BUILD_DIR)/vendor/tree_sitter.o $(BUILD_DIR)/vendor/gdscript_parser.o $(BUILD_DIR)/vendor/gdscript_scanner.o
 DEPFILES := $(CORE_OBJ:.o=.d) $(BUILD_DIR)/lsp/main.d $(BUILD_DIR)/tests/core_tests.d \
 	$(BUILD_DIR)/tests/caret_context_tests.d $(BUILD_DIR)/tests/completion_provider_tests.d \
-	$(BUILD_DIR)/tools/dump_tree.d
+	$(BUILD_DIR)/tests/incremental_update_tests.d $(BUILD_DIR)/tools/dump_tree.d
 
 -include $(DEPFILES)
 
@@ -42,17 +42,23 @@ $(BUILD_DIR)/caret-context-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/caret
 $(BUILD_DIR)/completion-provider-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/completion_provider_tests.o
 	$(CXX) $^ $(LDFLAGS) -o $@
 
-test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/completion-provider-tests $(BUILD_DIR)/gdscript-lsp
+$(BUILD_DIR)/incremental-update-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/incremental_update_tests.o
+	$(CXX) $^ $(LDFLAGS) -o $@
+
+test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/completion-provider-tests \
+		$(BUILD_DIR)/incremental-update-tests $(BUILD_DIR)/gdscript-lsp
 	$(BUILD_DIR)/core-tests
 	$(BUILD_DIR)/caret-context-tests
 	$(BUILD_DIR)/completion-provider-tests
+	$(BUILD_DIR)/incremental-update-tests
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
 
 benchmark-completion: $(BUILD_DIR)/gdscript-lsp
 	python3 tools/completion_benchmark.py $(BUILD_DIR)/gdscript-lsp \
 		--project "$(or $(BENCHMARK_PROJECT),tests/fixtures/completion_providers)" \
 		--api "tests/fixtures/basic/extension_api.json" \
-		--iterations "$(or $(BENCHMARK_ITERATIONS),100)"
+		--iterations "$(or $(BENCHMARK_ITERATIONS),100)" \
+		--semantic-iterations "$(or $(BENCHMARK_SEMANTIC_ITERATIONS),10)"
 
 test-conformance: $(BUILD_DIR)/gdscript-lsp
 	python3 tools/godot_diagnostic_oracle.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"

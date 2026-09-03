@@ -90,10 +90,30 @@ int main() {
 		expect(has_item(leading_completion, "class_obj"),
 			"scope completion terminates and retains locals when byte zero is a newline");
 
+		const std::string spaced_inference_source =
+			"extends RefCounted\n\nvar members_dict: = {}\n\nfunc inspect() -> void:\n"
+			"\tvar local_dict:\t= {}\n\tprint(local_dict)\n";
+		expect(leading_newline_workspace.update_document(leading_uri, spaced_inference_source, 42, &error),
+			"whitespace-separated inference overlay accepted");
+		expect(leading_newline_workspace.diagnostics(leading_uri).empty(),
+			"whitespace between inferred type tokens produces no diagnostics");
+		auto member_dictionary = leading_newline_workspace.resolve_type(leading_uri, {6, 2}, "members_dict");
+		auto local_dictionary = leading_newline_workspace.resolve_type(leading_uri, {6, 2}, "local_dict");
+		expect(member_dictionary.kind == TypeKind::Builtin && member_dictionary.name == "Dictionary" &&
+			local_dictionary.kind == TypeKind::Builtin && local_dictionary.name == "Dictionary",
+			"spaced inferred declarations retain member and local Dictionary types");
+		auto spaced_completion_source = spaced_inference_source;
+		auto print_at = spaced_completion_source.find("\tprint(local_dict)");
+		spaced_completion_source.replace(print_at, std::string("\tprint(local_dict)").size(), "\tlocal_dict.");
+		expect(leading_newline_workspace.update_document(leading_uri, spaced_completion_source, 43, &error),
+			"whitespace-separated inference completion overlay accepted");
+		expect(has_item(leading_newline_workspace.completion(leading_uri, {6, 12}), "keys"),
+			"spaced inferred Dictionary retains member completion");
+
 		const std::string missing_type_source =
 			"extends RefCounted\n\nfunc inspect() -> void:\n"
 			"\tvar test_var:\n\t# recovery must stop here\n\tvar n = Missing.Type.VALUE\n\tmissing_after\n";
-		expect(leading_newline_workspace.update_document(leading_uri, missing_type_source, 42, &error),
+		expect(leading_newline_workspace.update_document(leading_uri, missing_type_source, 44, &error),
 			"incomplete type overlay accepted");
 		auto missing_type_diagnostics = leading_newline_workspace.diagnostics(leading_uri);
 		expect(std::any_of(missing_type_diagnostics.begin(), missing_type_diagnostics.end(), [](const Diagnostic &item) {
@@ -109,8 +129,8 @@ int main() {
 		}), "semantic diagnostics continue after a malformed declaration");
 
 		const std::string missing_value_source =
-			"extends RefCounted\n\nfunc inspect() -> void:\n\tvar test_var =\n\tmissing_after\n";
-		expect(leading_newline_workspace.update_document(leading_uri, missing_value_source, 43, &error),
+			"extends RefCounted\n\nfunc inspect() -> void:\n\tvar test_var: =\n\tmissing_after\n";
+		expect(leading_newline_workspace.update_document(leading_uri, missing_value_source, 45, &error),
 			"incomplete initializer overlay accepted");
 		auto missing_value_diagnostics = leading_newline_workspace.diagnostics(leading_uri);
 		expect(std::any_of(missing_value_diagnostics.begin(), missing_value_diagnostics.end(), [](const Diagnostic &item) {
@@ -121,7 +141,7 @@ int main() {
 
 		const std::string multiline_value_source =
 			"extends RefCounted\n\nfunc inspect() -> void:\n\tvar values := [\n\t\t1,\n\t]\n";
-		expect(leading_newline_workspace.update_document(leading_uri, multiline_value_source, 44, &error),
+		expect(leading_newline_workspace.update_document(leading_uri, multiline_value_source, 46, &error),
 			"grouped multiline initializer overlay accepted");
 		expect(leading_newline_workspace.diagnostics(leading_uri).empty(),
 			"balanced multiline initializers remain valid declarations");

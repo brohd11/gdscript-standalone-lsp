@@ -1,6 +1,7 @@
 extends RefCounted
 
 var value: float = 1
+var spaced_dictionary: = {}
 
 class Nested:
 	var values = []
@@ -19,6 +20,8 @@ func dynamic_assignment() -> void:
 	var dynamic = "text"
 	dynamic = 1
 	print(dynamic)
+	var local_dictionary: = {}
+	local_dictionary.clear()
 
 func inline_lambda(flag: bool) -> void:
 	var callback := func(): if flag: print("inline")
