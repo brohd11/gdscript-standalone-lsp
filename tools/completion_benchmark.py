@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Informational warm-completion benchmark; intentionally has no pass/fail limit."""
+"""Informational outline/completion benchmark; intentionally has no pass/fail limit."""
 
 import argparse
 import json
@@ -147,9 +147,33 @@ def main():
         process.stdin.flush()
         return response_for(process, request_id)
 
+    def outline():
+        nonlocal request_id
+        request_id += 1
+        process.stdin.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "gdscript/documentSymbols",
+                    "params": {"textDocument": {"uri": synthetic_uri}},
+                }
+            )
+        )
+        process.stdin.flush()
+        return response_for(process, request_id)
+
     # Let the immediate didOpen diagnostic finish before measuring requests.
     # Otherwise one sample can include unrelated diagnostic CPU/output work.
     time.sleep(0.25)
+    started = time.perf_counter()
+    outline()
+    cold_outline_ms = (time.perf_counter() - started) * 1000.0
+    outline_samples = []
+    for _ in range(args.iterations):
+        started = time.perf_counter()
+        outline()
+        outline_samples.append((time.perf_counter() - started) * 1000.0)
     for _ in range(args.warmup):
         complete(current_source)
 
@@ -230,6 +254,8 @@ def main():
 
     print(f"project: {project}")
     print(f"initialize/index: {initialize_ms:.2f} ms")
+    print(f"cold rich outline: {cold_outline_ms:.2f} ms")
+    summary("cached rich outline", outline_samples)
     summary("warm completion", warm_samples)
     summary("body didChange + completion", edit_samples)
     summary("member-chain didChange + completion", chain_samples)

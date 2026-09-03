@@ -28,6 +28,12 @@ def read_packet(stream):
     return json.loads(stream.read(length))
 
 
+def flatten_symbols(symbols):
+    for symbol in symbols:
+        yield symbol
+        yield from flatten_symbols(symbol.get("children", []))
+
+
 binary = pathlib.Path(sys.argv[1]).resolve()
 root = pathlib.Path("tests/fixtures/basic").resolve()
 uri = (root / "consumer.gd").as_uri()
@@ -64,6 +70,24 @@ requests = [
             "expression": "local",
         },
     },
+    {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "textDocument/documentSymbol",
+        "params": {"textDocument": {"uri": uri}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "gdscript/documentSymbols",
+        "params": {"textDocument": {"uri": uri}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "textDocument/documentSymbol",
+        "params": {"textDocument": {"uri": (root / "alias_namespace.gd").as_uri()}},
+    },
 ]
 for request in requests:
     process.stdin.write(packet(request))
@@ -72,6 +96,9 @@ process.stdin.flush()
 initialize = read_packet(process.stdout)
 completion = read_packet(process.stdout)
 resolved = read_packet(process.stdout)
+standard_outline = read_packet(process.stdout)
+rich_outline = read_packet(process.stdout)
+namespace_outline = read_packet(process.stdout)
 assert initialize["result"]["capabilities"]["positionEncoding"] == "utf-16"
 completion_items = {item["filterText"]: item for item in completion["result"]["items"]}
 completion_order = [item["filterText"] for item in completion["result"]["items"]]
@@ -87,11 +114,23 @@ sort_ranks = [item["sortText"] for item in completion["result"]["items"]]
 assert sort_ranks == sorted(sort_ranks) and len(sort_ranks) == len(set(sort_ranks))
 assert resolved["result"]["kind"] == "script_class"
 assert resolved["result"]["name"] == "ChildThing"
+standard_items = list(flatten_symbols(standard_outline["result"]))
+standard_child = next(item for item in standard_items if item["name"] == "child")
+assert "ChildThing" in standard_child["detail"]
+rich_items = list(flatten_symbols(rich_outline["result"]["symbols"]))
+rich_child = next(item for item in rich_items if item["name"] == "child")
+assert rich_child["resolvedType"]["name"] == "ChildThing"
+assert rich_child["origin"]["name"] == "child"
+assert rich_child["flags"]["staticTyped"] is True
+assert rich_child["flags"]["inferred"] is True
+namespace_items = list(flatten_symbols(namespace_outline["result"]))
+assert sum(item["name"] == "PhysicalBase" for item in namespace_items) == 1
+assert all(child["kind"] != 5 for item in namespace_outline["result"] for child in item.get("children", []))
 process.stdin.write(
     packet(
         {
             "jsonrpc": "2.0",
-            "id": 4,
+            "id": 7,
             "method": "completionItem/resolve",
             "params": completion_items["label"],
         }
@@ -101,7 +140,7 @@ process.stdin.write(
     packet(
         {
             "jsonrpc": "2.0",
-            "id": 5,
+            "id": 8,
             "method": "gdscript/resolveExpression",
             "params": {
                 "textDocument": {"uri": uri},
@@ -111,7 +150,7 @@ process.stdin.write(
         }
     )
 )
-process.stdin.write(packet({"jsonrpc": "2.0", "id": 6, "method": "shutdown", "params": {}}))
+process.stdin.write(packet({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": {}}))
 process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 process.stdin.flush()
 completion_resolve = read_packet(process.stdout)

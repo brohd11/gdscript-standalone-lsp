@@ -59,6 +59,7 @@ public:
 	std::optional<HoverResult> hover(const std::string &uri, Position position) const;
 	std::vector<Location> definition(const std::string &uri, Position position) const;
 	std::vector<Symbol> document_symbols(const std::string &uri) const;
+	OutlineSnapshot document_outline(const std::string &uri) const;
 	ResolvedExpression resolve_expression(const std::string &uri, Position position,
 		std::string expression = {}) const;
 	ResolvedType resolve_type(const std::string &uri, Position position, std::string expression = {}) const;
@@ -96,6 +97,8 @@ private:
 	std::unordered_map<std::string, const Symbol *> symbols_;
 	mutable std::mutex access_path_cache_mutex_;
 	mutable std::unordered_map<std::string, std::vector<AccessPath>> access_path_cache_;
+	mutable std::mutex outline_cache_mutex_;
+	mutable std::unordered_map<std::string, OutlineSnapshot> outline_cache_;
 	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> document_dependencies_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> reverse_document_dependencies_;
@@ -105,6 +108,8 @@ private:
 	CompletionConfig completion_config_;
 
 	void rebuild_registry();
+	void clear_outline_cache();
+	void invalidate_outline(const std::string &uri);
 	void register_document(Document &document);
 	void unregister_document(const Document &document);
 	std::vector<std::string> document_topology(const Document &document) const;

@@ -26,6 +26,14 @@ func _initialize() -> void:
 
 func _on_ready() -> void:
 	var uri := "file://" + ProjectSettings.globalize_path("res://tests/fixtures/basic/consumer.gd")
+	var initial_outline: Array = service.document_symbols(uri)
+	var child_outline: Dictionary = _find_outline(initial_outline, "child")
+	if child_outline.is_empty() or child_outline.resolvedType.name != "ChildThing" \
+			or child_outline.origin == null or child_outline.origin.name != "child" \
+			or not child_outline.flags.staticTyped or not child_outline.flags.inferred:
+		push_error("unexpected rich document symbol: %s" % [child_outline])
+		quit(1)
+		return
 	var completion: Dictionary = service.completion(uri, 6, 7)
 	var labels: Array[String] = []
 	var completion_by_name: Dictionary = {}
@@ -79,6 +87,17 @@ func _on_ready() -> void:
 		+ "\tif true: pass\n"
 	)
 	service.update_document(uri, helper_source, 6)
+	var helper_outline: Array = service.document_symbols(uri)
+	if _count_outline(helper_outline, "Product") != 1:
+		push_error("inner class appeared more than once in outline: %s" % [helper_outline])
+		quit(1)
+		return
+	for root_symbol: Dictionary in helper_outline:
+		for child: Dictionary in root_symbol.get("children", []):
+			if child.kind == 5:
+				push_error("inner class leaked into an owner member list: %s" % [child])
+				quit(1)
+				return
 	var constructor: Dictionary = service.completion_ex(uri, 11, 25, {"profile": "helpers"})
 	if constructor.disposition != "augment" or constructor.provider != "constructors":
 		push_error("constructor helper did not augment: %s" % [constructor])
@@ -170,6 +189,23 @@ func _on_ready() -> void:
 
 func _on_diagnostics_updated(_paths: PackedStringArray) -> void:
 	diagnostics_signal_received = true
+
+func _find_outline(symbols: Array, name: String) -> Dictionary:
+	for symbol: Dictionary in symbols:
+		if symbol.name == name:
+			return symbol
+		var nested := _find_outline(symbol.get("children", []), name)
+		if not nested.is_empty():
+			return nested
+	return {}
+
+func _count_outline(symbols: Array, name: String) -> int:
+	var result := 0
+	for symbol: Dictionary in symbols:
+		if symbol.name == name:
+			result += 1
+		result += _count_outline(symbol.get("children", []), name)
+	return result
 
 func _on_error(message: String) -> void:
 	push_error(message)

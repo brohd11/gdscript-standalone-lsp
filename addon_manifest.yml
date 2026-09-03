@@ -51,3 +51,10 @@ ZyxPopupWrapper:
     tag: "main"
     url: https://github.com/brohd11/godot-zyx-popup-wrapper.git
     path: addons/zyx_popup_wrapper
+
+godot-script-dock:
+    kind: clone
+    path: addons/script_dock
+    version: "0.2.0"
+    tag: "main"
+    url: https://github.com/brohd11/godot-script-dock.git

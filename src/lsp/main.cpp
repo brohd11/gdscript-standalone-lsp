@@ -102,6 +102,29 @@ json expression_json(const ResolvedExpression &expression) {
 	return result;
 }
 
+json outline_symbol_json(const OutlineSymbol &symbol) {
+	json children = json::array();
+	for (const auto &child : symbol.children) children.push_back(outline_symbol_json(child));
+	json result = {
+		{"symbolId", symbol.symbol_id}, {"ownerId", symbol.owner_id},
+		{"name", symbol.name}, {"detail", symbol.detail},
+		{"kind", static_cast<int>(symbol.kind)}, {"range", range_json(symbol.range)},
+		{"selectionRange", range_json(symbol.selection_range)},
+		{"resolvedType", type_json(symbol.resolved_type)}, {"returnType", nullptr},
+		{"origin", nullptr},
+		{"flags", {
+			{"static", symbol.is_static}, {"staticTyped", symbol.static_typed},
+			{"inferred", symbol.inferred}, {"local", symbol.is_local},
+			{"parameter", symbol.is_parameter}, {"variadic", symbol.is_variadic},
+			{"malformed", symbol.malformed}
+		}}
+	};
+	if (symbol.return_type) result["returnType"] = type_json(*symbol.return_type);
+	if (symbol.origin) result["origin"] = origin_json(*symbol.origin);
+	if (!children.empty()) result["children"] = std::move(children);
+	return result;
+}
+
 json diagnostic_json(const Diagnostic &diagnostic) {
 	json related = json::array();
 	for (const auto &item : diagnostic.related_information) {
@@ -730,6 +753,12 @@ int main(int argc, char **argv) {
 			json output = json::array();
 			for (const auto &symbol : workspace.document_symbols(uri)) output.push_back(symbol_json(symbol));
 			respond(id, std::move(output));
+		} else if (method == "gdscript/documentSymbols") {
+			auto uri = params["textDocument"].value("uri", "");
+			auto outline = workspace.document_outline(uri);
+			json symbols = json::array();
+			for (const auto &symbol : outline.symbols) symbols.push_back(outline_symbol_json(symbol));
+			respond(id, {{"version", outline.version}, {"symbols", std::move(symbols)}});
 		} else if (method == "gdscript/resolveType") {
 			auto uri = params["textDocument"].value("uri", "");
 			auto type = workspace.resolve_type(uri, parse_position(params["position"]), params.value("expression", ""));

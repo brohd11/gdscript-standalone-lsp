@@ -137,6 +137,43 @@ struct Symbol {
 	std::vector<Symbol> children;
 };
 
+// A resolved, presentation-ready document symbol. The standard LSP projection
+// uses the common fields, while native and custom clients can consume the
+// declaration identity and semantic metadata without issuing one query per
+// outline item.
+struct OutlineSymbol {
+	std::string symbol_id;
+	std::string owner_id;
+	std::string name;
+	std::string qualified_name;
+	std::string uri;
+	std::string declared_type;
+	std::string initializer;
+	std::string detail;
+	std::string documentation;
+	SymbolKind kind = SymbolKind::Variable;
+	Range range;
+	Range selection_range;
+	ResolvedType resolved_type;
+	std::optional<ResolvedType> return_type;
+	std::optional<SymbolOrigin> origin;
+	bool is_static = false;
+	bool static_typed = false;
+	bool inferred = false;
+	bool is_local = false;
+	bool is_parameter = false;
+	bool is_variadic = false;
+	bool is_iteration_variable = false;
+	bool malformed = false;
+	bool body_recovered = false;
+	std::vector<OutlineSymbol> children;
+};
+
+struct OutlineSnapshot {
+	int64_t version = -1;
+	std::vector<OutlineSymbol> symbols;
+};
+
 // A compact, parser-independent view of the source tree. Byte offsets make it
 // cheap to recover text from Document::source(), while field retains the
 // grammar role ("left", "body", "arguments", and so on).

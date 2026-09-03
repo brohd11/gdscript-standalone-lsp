@@ -336,6 +336,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 	unsafe_call_argument_ = WarningLevel::Ignore;
 	native_api_ = {};
 	stats_ = {};
+	clear_outline_cache();
 
 	std::filesystem::path metadata;
 	if (!api_path.empty()) {
@@ -605,6 +606,7 @@ void Workspace::replace_document_dependencies(const std::string &uri, const Docu
 }
 
 void Workspace::rebuild_registry() {
+	clear_outline_cache();
 	classes_.clear();
 	global_classes_.clear();
 	global_name_counts_.clear();
@@ -779,11 +781,22 @@ bool Workspace::update_document(const std::string &uri, std::string text, int64_
 	}
 
 	replace_document_dependencies(uri, *replacement);
+	invalidate_outline(uri);
 	if (impact) {
 		impact->full_rebuild = false;
 		impact->affected_documents = {uri};
 	}
 	return true;
+}
+
+void Workspace::clear_outline_cache() {
+	std::lock_guard lock(outline_cache_mutex_);
+	outline_cache_.clear();
+}
+
+void Workspace::invalidate_outline(const std::string &uri) {
+	std::lock_guard lock(outline_cache_mutex_);
+	outline_cache_.erase(uri);
 }
 
 bool Workspace::close_document(const std::string &uri, std::string *error) {
@@ -2607,17 +2620,171 @@ std::vector<Location> Workspace::definition(const std::string &uri, Position pos
 }
 
 std::vector<Symbol> Workspace::document_symbols(const std::string &uri) const {
-	std::shared_lock lock(mutex_);
+	auto snapshot = document_outline(uri);
 	std::vector<Symbol> result;
-	auto *document = find_document(uri);
-	if (!document) return result;
-	for (const auto &record : document->classes()) {
-		Symbol symbol = record.symbol;
-		symbol.detail = "class " + symbol.name + " extends " + record.extends_text;
-		symbol.children = record.members;
-		result.push_back(std::move(symbol));
-	}
+	std::function<Symbol(const OutlineSymbol &)> project = [&](const OutlineSymbol &outline) {
+		Symbol symbol;
+		symbol.id = outline.symbol_id;
+		symbol.name = outline.name;
+		symbol.qualified_name = outline.qualified_name;
+		symbol.uri = outline.uri;
+		symbol.kind = outline.kind;
+		symbol.range = outline.range;
+		symbol.selection_range = outline.selection_range;
+		symbol.declared_type = outline.declared_type;
+		symbol.initializer = outline.initializer;
+		symbol.detail = outline.detail;
+		symbol.documentation = outline.documentation;
+		symbol.is_static = outline.is_static;
+		symbol.is_local = outline.is_local;
+		symbol.is_parameter = outline.is_parameter;
+		symbol.is_variadic = outline.is_variadic;
+		symbol.is_inferred = outline.inferred;
+		symbol.is_iteration_variable = outline.is_iteration_variable;
+		symbol.malformed = outline.malformed;
+		symbol.body_recovered = outline.body_recovered;
+		for (const auto &child : outline.children) symbol.children.push_back(project(child));
+		return symbol;
+	};
+	result.reserve(snapshot.symbols.size());
+	for (const auto &symbol : snapshot.symbols) result.push_back(project(symbol));
 	return result;
+}
+
+OutlineSnapshot Workspace::document_outline(const std::string &uri) const {
+	std::shared_lock workspace_lock(mutex_);
+	{
+		std::lock_guard cache_lock(outline_cache_mutex_);
+		if (auto cached = outline_cache_.find(uri); cached != outline_cache_.end()) return cached->second;
+	}
+
+	OutlineSnapshot snapshot;
+	auto *document = find_document(uri);
+	if (!document) return snapshot;
+	snapshot.version = document->version();
+
+	auto display_type = [](const ResolvedType &type) {
+		return type.known() && type.kind != TypeKind::Unknown ? type.display() : std::string("Variant");
+	};
+	auto owner_of = [&](const Symbol &symbol, std::string fallback) {
+		if (auto owner = symbol_owners_.find(symbol.id); owner != symbol_owners_.end()) return owner->second;
+		return fallback;
+	};
+	std::function<OutlineSymbol(const Symbol &, const std::string &)> resolve_symbol;
+	resolve_symbol = [&](const Symbol &symbol, const std::string &fallback_owner) {
+		OutlineSymbol outline;
+		outline.symbol_id = symbol.id;
+		outline.owner_id = owner_of(symbol, fallback_owner);
+		outline.name = symbol.name;
+		outline.qualified_name = symbol.qualified_name;
+		outline.uri = symbol.uri;
+		outline.declared_type = symbol.declared_type;
+		outline.initializer = symbol.initializer;
+		outline.documentation = symbol.documentation;
+		outline.kind = symbol.kind;
+		outline.range = symbol.range;
+		outline.selection_range = symbol.selection_range;
+		outline.is_static = symbol.is_static;
+		outline.is_local = symbol.is_local;
+		outline.is_parameter = symbol.is_parameter;
+		outline.is_variadic = symbol.is_variadic;
+		outline.is_iteration_variable = symbol.is_iteration_variable;
+		outline.malformed = symbol.malformed;
+		outline.body_recovered = symbol.body_recovered;
+
+		std::vector<std::string> stack;
+		outline.resolved_type = hinted_type_of_symbol(symbol, *document, symbol.range.start, stack);
+		if (symbol.kind == SymbolKind::Constructor) {
+			outline.return_type = ResolvedType{TypeKind::Void, "void"};
+		} else if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Function) {
+			stack.clear();
+			outline.return_type = callable_return_type(symbol, *document, stack);
+		}
+		outline.origin = symbol_origin(symbol.id);
+		outline.static_typed = !symbol.declared_type.empty() || symbol.is_inferred ||
+			symbol.kind == SymbolKind::Constant || symbol.kind == SymbolKind::Enum ||
+			symbol.kind == SymbolKind::Class || symbol.kind == SymbolKind::Event ||
+			symbol.kind == SymbolKind::Constructor;
+		auto semantic_type = outline.return_type ? *outline.return_type : outline.resolved_type;
+		outline.inferred = symbol.is_inferred || (!outline.static_typed && semantic_type.known() &&
+			semantic_type.kind != TypeKind::Unknown && semantic_type.kind != TypeKind::Variant);
+
+		for (const auto &child : symbol.children) {
+			if (child.kind == SymbolKind::Class) continue;
+			outline.children.push_back(resolve_symbol(child, symbol.id));
+		}
+
+		if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Function ||
+				symbol.kind == SymbolKind::Constructor) {
+			outline.detail = (symbol.is_static ? "static func " : "func ") + symbol.name + "(";
+			bool first = true;
+			for (const auto &child : outline.children) {
+				if (!child.is_parameter) continue;
+				if (!first) outline.detail += ", ";
+				first = false;
+				if (child.is_variadic) outline.detail += "...";
+				else outline.detail += child.name + ": " + display_type(child.resolved_type);
+			}
+			outline.detail += ") -> " + display_type(*outline.return_type);
+			if (outline.inferred) outline.detail += " (inferred)";
+		} else if (symbol.kind == SymbolKind::Event) {
+			outline.detail = "signal " + symbol.name + "(";
+			bool first = true;
+			for (const auto &child : outline.children) {
+				if (!child.is_parameter) continue;
+				if (!first) outline.detail += ", ";
+				first = false;
+				outline.detail += child.name + ": " + display_type(child.resolved_type);
+			}
+			outline.detail += ")";
+		} else if (symbol.kind == SymbolKind::Enum) {
+			outline.detail = "enum " + symbol.name;
+		} else if (symbol.kind == SymbolKind::Class) {
+			outline.detail = symbol.detail.empty() ? "class " + symbol.name : symbol.detail;
+		} else {
+			auto prefix = symbol.kind == SymbolKind::Constant ? std::string("const ") :
+				(symbol.is_parameter ? std::string("arg ") :
+				(symbol.is_iteration_variable ? std::string("for ") :
+				(symbol.is_static ? std::string("static var ") : std::string("var "))));
+			outline.detail = prefix + symbol.name + ": " + display_type(outline.resolved_type);
+			if (outline.inferred && !outline.static_typed) outline.detail += " (inferred)";
+		}
+		return outline;
+	};
+
+	for (const auto &record : document->classes()) {
+		OutlineSymbol class_symbol;
+		class_symbol.symbol_id = record.symbol.id;
+		class_symbol.owner_id = owner_of(record.symbol, {});
+		class_symbol.name = record.symbol.name;
+		class_symbol.qualified_name = record.symbol.qualified_name;
+		class_symbol.uri = record.symbol.uri;
+		class_symbol.declared_type = record.symbol.declared_type;
+		class_symbol.initializer = record.symbol.initializer;
+		class_symbol.documentation = record.symbol.documentation;
+		class_symbol.kind = SymbolKind::Class;
+		class_symbol.range = record.symbol.range;
+		class_symbol.selection_range = record.symbol.selection_range;
+		class_symbol.resolved_type = {TypeKind::ScriptClass, record.symbol.name, record.symbol.id, false};
+		class_symbol.origin = symbol_origin(record.symbol.id);
+		class_symbol.static_typed = true;
+		class_symbol.malformed = record.symbol.malformed;
+		class_symbol.body_recovered = record.symbol.body_recovered;
+		auto base = record.extends_text.empty() ? std::string("RefCounted") : record.extends_text;
+		class_symbol.detail = "class " + class_symbol.name + " extends " + base;
+		for (const auto &member : record.members) {
+			if (member.kind == SymbolKind::Class) continue;
+			class_symbol.children.push_back(resolve_symbol(member, record.symbol.id));
+		}
+		snapshot.symbols.push_back(std::move(class_symbol));
+	}
+
+	{
+		std::lock_guard cache_lock(outline_cache_mutex_);
+		auto [entry, inserted] = outline_cache_.emplace(uri, snapshot);
+		if (!inserted) entry->second = snapshot;
+	}
+	return snapshot;
 }
 
 std::vector<std::string> Workspace::document_uris() const {

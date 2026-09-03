@@ -41,19 +41,6 @@ Dictionary range_dict(Range value) {
 	return result;
 }
 
-Dictionary symbol_dict(const Symbol &symbol) {
-	Dictionary result;
-	result["name"] = to_godot(symbol.name);
-	result["detail"] = to_godot(symbol.detail);
-	result["kind"] = static_cast<int64_t>(symbol.kind);
-	result["range"] = range_dict(symbol.range);
-	result["selectionRange"] = range_dict(symbol.selection_range);
-	Array children;
-	for (const auto &child : symbol.children) children.push_back(symbol_dict(child));
-	if (!children.is_empty()) result["children"] = children;
-	return result;
-}
-
 Dictionary type_dict(const ResolvedType &type) {
 	Dictionary result;
 	result["kind"] = to_godot(type_kind_name(type.kind));
@@ -91,6 +78,33 @@ Dictionary expression_dict(const ResolvedExpression &expression) {
 		paths.push_back(value);
 	}
 	result["accessPaths"] = paths;
+	return result;
+}
+
+Dictionary outline_symbol_dict(const OutlineSymbol &symbol) {
+	Dictionary result;
+	result["symbolId"] = to_godot(symbol.symbol_id);
+	result["ownerId"] = to_godot(symbol.owner_id);
+	result["name"] = to_godot(symbol.name);
+	result["detail"] = to_godot(symbol.detail);
+	result["kind"] = static_cast<int64_t>(symbol.kind);
+	result["range"] = range_dict(symbol.range);
+	result["selectionRange"] = range_dict(symbol.selection_range);
+	result["resolvedType"] = type_dict(symbol.resolved_type);
+	result["returnType"] = symbol.return_type ? Variant(type_dict(*symbol.return_type)) : Variant();
+	result["origin"] = symbol.origin ? Variant(origin_dict(*symbol.origin)) : Variant();
+	Dictionary flags;
+	flags["static"] = symbol.is_static;
+	flags["staticTyped"] = symbol.static_typed;
+	flags["inferred"] = symbol.inferred;
+	flags["local"] = symbol.is_local;
+	flags["parameter"] = symbol.is_parameter;
+	flags["variadic"] = symbol.is_variadic;
+	flags["malformed"] = symbol.malformed;
+	result["flags"] = flags;
+	Array children;
+	for (const auto &child : symbol.children) children.push_back(outline_symbol_dict(child));
+	if (!children.is_empty()) result["children"] = children;
 	return result;
 }
 
@@ -360,7 +374,9 @@ Array GDScriptLanguageService::definition(const String &uri, int line, int utf16
 Array GDScriptLanguageService::document_symbols(const String &uri) const {
 	Array result;
 	if (!ready_) return result;
-	for (const auto &symbol : workspace_->document_symbols(service_uri(*workspace_, uri))) result.push_back(symbol_dict(symbol));
+	for (const auto &symbol : workspace_->document_outline(service_uri(*workspace_, uri)).symbols) {
+		result.push_back(outline_symbol_dict(symbol));
+	}
 	return result;
 }
 

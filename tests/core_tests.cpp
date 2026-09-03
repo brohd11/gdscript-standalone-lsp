@@ -66,6 +66,23 @@ const Diagnostic *find_diagnostic(const std::vector<Diagnostic> &items, const st
 	return found == items.end() ? nullptr : &*found;
 }
 
+const OutlineSymbol *find_outline(const std::vector<OutlineSymbol> &items, const std::string &name) {
+	for (const auto &item : items) {
+		if (item.name == name) return &item;
+		if (auto *found = find_outline(item.children, name)) return found;
+	}
+	return nullptr;
+}
+
+size_t outline_count(const std::vector<OutlineSymbol> &items, const std::string &name) {
+	size_t result = 0;
+	for (const auto &item : items) {
+		if (item.name == name) ++result;
+		result += outline_count(item.children, name);
+	}
+	return result;
+}
+
 } // namespace
 
 int main() {
@@ -277,6 +294,16 @@ int main() {
 	expect(definitions.size() == 1 && definitions.front().uri.ends_with("/child.gd"), "global class definition resolves");
 	auto symbols = workspace.document_symbols(consumer_uri);
 	expect(!symbols.empty() && symbols.front().children.size() == 3, "document symbols include members");
+	auto consumer_outline = workspace.document_outline(consumer_uri);
+	auto *child_outline = find_outline(consumer_outline.symbols, "child");
+	auto *local_outline = find_outline(consumer_outline.symbols, "local");
+	expect(child_outline && child_outline->resolved_type.display() == "ChildThing" &&
+		child_outline->static_typed && child_outline->inferred &&
+		child_outline->detail.find("ChildThing") != std::string::npos,
+		"rich document symbols expose true inferred member types");
+	expect(local_outline && local_outline->resolved_type.display() == "ChildThing" &&
+		local_outline->static_typed && local_outline->is_local,
+		"rich document symbols expose typed locals below their function");
 
 	auto alias_uri = workspace.uri_for_path(fixture / "alias_derived.gd");
 	expect(workspace.diagnostics(alias_uri).empty(),
@@ -287,6 +314,14 @@ int main() {
 	auto namespace_uri = workspace.uri_for_path(fixture / "alias_namespace.gd");
 	expect(workspace.diagnostics(namespace_uri).empty(),
 		"physical inner classes and inner classes extending an outer alias resolve");
+	auto namespace_outline = workspace.document_outline(namespace_uri);
+	expect(outline_count(namespace_outline.symbols, "PhysicalBase") == 1 &&
+		outline_count(namespace_outline.symbols, "LocalDerived") == 1 &&
+		std::all_of(namespace_outline.symbols.begin(), namespace_outline.symbols.end(),
+			[](const OutlineSymbol &symbol) {
+				return std::none_of(symbol.children.begin(), symbol.children.end(),
+					[](const OutlineSymbol &child) { return child.kind == SymbolKind::Class; });
+			}), "inner classes appear once as separate outline roots");
 	auto bridge_uri = workspace.uri_for_path(fixture / "alias_bridge.gd");
 	expect(workspace.update_document(bridge_uri, "const BaseAlias = preload(\"res://base.gd\")\n", 3, &error),
 		"script alias overlay accepted");
@@ -932,6 +967,59 @@ int main() {
 		expect(type.display() == test.expected,
 			std::string("inference corpus ") + test.name + " expected " + test.expected + " got " + type.display());
 	}
+	auto inference_outline = inference_workspace.document_outline(inference_uri);
+	auto *direct_terminal_outline = find_outline(inference_outline.symbols, "direct_terminal");
+	auto *seed_outline = find_outline(inference_outline.symbols, "seed_local");
+	auto *funk_outline = find_outline(inference_outline.symbols, "funk_test");
+	auto *typed_container_outline = find_outline(inference_outline.symbols, "typed_conns");
+	auto *signal_arg_outline = find_outline(inference_outline.symbols, "some_arg");
+	auto *map_key_outline = find_outline(inference_outline.symbols, "map_key");
+	auto *byte_outline = find_outline(inference_outline.symbols, "byte");
+	expect(direct_terminal_outline && direct_terminal_outline->resolved_type.display() == "Color" &&
+		!direct_terminal_outline->static_typed && direct_terminal_outline->inferred &&
+		direct_terminal_outline->origin && direct_terminal_outline->origin->name == "direct_terminal" &&
+		direct_terminal_outline->detail.find("(inferred)") != std::string::npos,
+		"rich outline labels best-known dynamic local types without claiming a static annotation");
+	expect(seed_outline && seed_outline->resolved_type.display() == "Color" && seed_outline->static_typed,
+		"rich outline distinguishes true inferred typing from dynamic initializer hints");
+	expect(funk_outline && funk_outline->return_type && funk_outline->return_type->display() == "Signal" &&
+		funk_outline->detail.find("Signal (inferred)") != std::string::npos,
+		"rich outline includes inferred callable return types");
+	expect(typed_container_outline && typed_container_outline->resolved_type.display() == "Array[String]" &&
+		typed_container_outline->static_typed && !typed_container_outline->inferred,
+		"rich outline preserves explicit typed-container details");
+	expect(signal_arg_outline && signal_arg_outline->resolved_type.display() == "int" &&
+		signal_arg_outline->is_parameter && signal_arg_outline->static_typed,
+		"rich outline resolves nested signal parameters");
+	expect(map_key_outline && map_key_outline->resolved_type.display() == "InferenceEnum" &&
+		!map_key_outline->static_typed && map_key_outline->inferred &&
+		map_key_outline->detail.starts_with("for map_key:"),
+		"rich outline exposes inferred typed-dictionary iteration variables");
+	expect(byte_outline && byte_outline->resolved_type.display() == "int" &&
+		!byte_outline->static_typed && byte_outline->inferred && byte_outline->detail.starts_with("for byte:"),
+		"rich outline exposes inferred packed-array iteration variables");
+	std::ifstream changed_inference_stream(inference_fixture / "scenario.gd", std::ios::binary);
+	std::string changed_inference_source{std::istreambuf_iterator<char>(changed_inference_stream),
+		std::istreambuf_iterator<char>()};
+	auto terminal_assignment = changed_inference_source.find("var direct_terminal = seed_local");
+	expect(terminal_assignment != std::string::npos, "outline cache invalidation fixture assignment exists");
+	if (terminal_assignment != std::string::npos) {
+		changed_inference_source.replace(terminal_assignment, std::string("var direct_terminal = seed_local").size(),
+			"var direct_terminal = 42");
+	}
+	UpdateImpact outline_impact;
+	expect(inference_workspace.update_document(inference_uri, changed_inference_source, 12, &error, &outline_impact),
+		"outline cache body edit updates");
+	auto changed_outline = inference_workspace.document_outline(inference_uri);
+	direct_terminal_outline = find_outline(changed_outline.symbols, "direct_terminal");
+	expect(!outline_impact.full_rebuild && direct_terminal_outline &&
+		direct_terminal_outline->resolved_type.display() == "int",
+		"body edits invalidate the cached outline and refresh inferred types");
+	expect(inference_workspace.close_document(inference_uri, &error), "outline inference overlay closes");
+	auto restored_outline = inference_workspace.document_outline(inference_uri);
+	direct_terminal_outline = find_outline(restored_outline.symbols, "direct_terminal");
+	expect(direct_terminal_outline && direct_terminal_outline->resolved_type.display() == "Color",
+		"closing an overlay invalidates the outline cache and restores disk types");
 	auto node_instance = inference_workspace.resolve_type(inference_uri, {55, 2}, "node_ins");
 	auto node_type_value = inference_workspace.resolve_type(inference_uri, {56, 2}, "node_static");
 	expect(node_instance.instance && !node_type_value.instance,
