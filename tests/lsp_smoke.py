@@ -905,6 +905,104 @@ assert "TF.MSEC" not in member_items
 assert any(item["code"] == "argument-type" for item in caret_responses[142]["items"])
 stop_server(server)
 
+# Each portable completion provider is serialized at least once through the
+# stdio transport. Exhaustive context behavior remains in the C++ provider
+# suite so this section stays a protocol smoke test rather than a duplicate.
+provider_root = pathlib.Path("tests/fixtures/completion_providers").resolve()
+provider_uri = (provider_root / "main.gd").as_uri()
+provider_source = (
+    "extends CompletionProviderBase\n\n"
+    "enum State { IDLE, READY }\n\n"
+    "class Product:\n"
+    "\tvar title: String\n"
+    "\tvar _private: int\n"
+    "\tfunc _init(required: int) -> void: pass\n"
+    "\tfunc build() -> void: pass\n\n"
+    "func inspect(target: Product) -> void:\n"
+    "\tvar state: State = \n"
+    "\tvar typed: \n"
+    "\tvar product: Product = \n"
+    "\ttarget.call(\"\")\n"
+    "\tprint(target.)\n"
+    "\tif true:\n"
+)
+
+
+def provider_position(needle):
+    offset = provider_source.index(needle) + len(needle)
+    before = provider_source[:offset]
+    return {"line": before.count("\n"), "character": len(before.rsplit("\n", 1)[-1])}
+
+
+server, response = initialize_server(
+    {"rootUri": provider_root.as_uri()}, args=("--api", root / "extension_api.json")
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": provider_uri,
+                    "languageId": "gdscript",
+                    "version": 1,
+                    "text": provider_source,
+                }
+            },
+        }
+    )
+)
+provider_needles = {
+    150: "var state: State = ",
+    151: "var typed: ",
+    152: "var product: Product = ",
+    153: 'target.call("',
+    154: "print(target.",
+    155: "if true:",
+}
+for request_id, needle in provider_needles.items():
+    server.stdin.write(
+        packet(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": {"uri": provider_uri},
+                    "position": provider_position(needle),
+                },
+            }
+        )
+    )
+server.stdin.flush()
+provider_responses = {}
+while len(provider_responses) < len(provider_needles):
+    message = read_packet(server.stdout)
+    if message.get("id") in provider_needles:
+        provider_responses[message["id"]] = message["result"]
+
+
+def items_by_filter(response):
+    return {item["filterText"]: item for item in response["items"]}
+
+
+enum_items = items_by_filter(provider_responses[150])
+type_items = items_by_filter(provider_responses[151])
+constructor_items = items_by_filter(provider_responses[152])
+string_items = items_by_filter(provider_responses[153])
+private_items = items_by_filter(provider_responses[154])
+assert enum_items["State.IDLE"]["data"]["gdscriptLsp"]["provider"] == "enums"
+assert type_items["Product"]["data"]["gdscriptLsp"]["provider"] == "extendedTypeHints"
+assert constructor_items["Product.new"]["data"]["gdscriptLsp"]["provider"] == "constructors"
+assert constructor_items["Product.new"]["insertText"] == "Product.new("
+assert string_items["build"]["data"]["gdscriptLsp"]["provider"] == "memberStrings"
+assert string_items["build"]["insertText"] == "build"
+assert "title" in private_items and "_private" not in private_items
+assert provider_responses[155]["items"] == []
+stop_server(server)
+
 
 # Older clients may only send rootPath, and clients with no root metadata may
 # rely on the server process working directory.

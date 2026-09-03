@@ -239,6 +239,7 @@ bool detect_type_hint(std::string_view source, const std::vector<bool> &code, si
 	auto statement = masked_text(source, code, begin, end);
 	auto clean = trim(statement);
 	if (clean.empty()) return false;
+	if (clean == "extends") return true;
 	if (clean.starts_with("extends ")) return type_tail(trim(std::string_view(clean).substr(7)));
 	auto extends = clean.rfind(" extends ");
 	if (extends != std::string::npos) {
@@ -469,9 +470,10 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	result.in_type_hint = result.lexical == CaretLexicalContext::Code &&
 		detect_type_hint(source, scan.code, result.statement_start, result.byte_offset);
 
-	if (auto equal = root_assignment(source, scan.code, result.statement_start, result.byte_offset)) {
-		result.assignment_left = trim(std::string_view(source).substr(result.statement_start, *equal - result.statement_start));
-		result.assignment_right = trim(std::string_view(source).substr(*equal + 1, result.byte_offset - *equal - 1));
+	auto assignment = root_assignment(source, scan.code, result.statement_start, result.byte_offset);
+	if (assignment) {
+		result.assignment_left = trim(std::string_view(source).substr(result.statement_start, *assignment - result.statement_start));
+		result.assignment_right = trim(std::string_view(source).substr(*assignment + 1, result.byte_offset - *assignment - 1));
 		result.suppressed_symbol = identifier_after_keyword(result.assignment_left, "var");
 		if (result.suppressed_symbol.empty()) result.suppressed_symbol = identifier_after_keyword(result.assignment_left, "const");
 		if (result.suppressed_symbol.empty() && !result.assignment_left.empty() &&
@@ -489,12 +491,13 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	}
 
 	size_t expression_scope = result.statement_start;
+	if (assignment) expression_scope = *assignment + 1;
 	auto root_colon = last_root_colon(source, scan.code, result.statement_start, result.byte_offset);
 	// A root colon ends a control-flow header or match pattern. Anything after
 	// it belongs to the suite, so comparisons in the header must not keep
 	// supplying expected values there. Colons inside dictionaries, subscripts,
 	// and parameter lists are nested and intentionally do not form a boundary.
-	if (root_colon) expression_scope = *root_colon + 1;
+	if (root_colon) expression_scope = std::max(expression_scope, *root_colon + 1);
 	if (!scan.stack.empty()) expression_scope = scan.stack.back().offset + 1;
 	result.operation = operation_at(source, scan.code, expression_scope, result.byte_offset);
 

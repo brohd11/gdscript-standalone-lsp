@@ -61,20 +61,64 @@ func _on_ready() -> void:
 		push_error("res:// URI did not resolve against the opened workspace")
 		quit(1)
 		return
-	var helper_source := "class_name HelperConsumer extends RefCounted\n\nfunc inspect() -> void:\n\tvar child: ChildThing = ChildThing.new()\n\tif true:\n"
+	var helper_source := (
+		"class_name HelperConsumer extends RefCounted\n\n"
+		+ "enum State { IDLE, READY }\n\n"
+		+ "class Product:\n"
+		+ "\tvar title: String\n"
+		+ "\tvar _private: int\n"
+		+ "\tfunc _init(required: int) -> void: pass\n"
+		+ "\tfunc build() -> void: pass\n\n"
+		+ "func inspect(target: Product) -> void:\n"
+		+ "\tvar child: ChildThing = ChildThing.new()\n"
+		+ "\tvar state: State = State.IDLE\n"
+		+ "\tvar typed: Product\n"
+		+ "\tvar product: Product = Product.new(1)\n"
+		+ "\ttarget.call(\"build\")\n"
+		+ "\tprint(target.title)\n"
+		+ "\tif true: pass\n"
+	)
 	service.update_document(uri, helper_source, 6)
-	var constructor: Dictionary = service.completion_ex(uri, 3, 25, {"profile": "helpers"})
+	var constructor: Dictionary = service.completion_ex(uri, 11, 25, {"profile": "helpers"})
 	if constructor.disposition != "augment" or constructor.provider != "constructors":
 		push_error("constructor helper did not augment: %s" % [constructor])
 		quit(1)
 		return
-	var suppressed: Dictionary = service.completion_ex(uri, 4, 9, {"profile": "helpers"})
+	var enum_completion: Dictionary = service.completion_ex(uri, 12, 20, {"profile": "helpers"})
+	if enum_completion.disposition != "replace" or enum_completion.provider != "enums":
+		push_error("enum helper did not replace: %s" % [enum_completion])
+		quit(1)
+		return
+	var type_completion: Dictionary = service.completion_ex(uri, 13, 12, {"profile": "helpers"})
+	if type_completion.disposition != "augment" or type_completion.provider != "extendedTypeHints":
+		push_error("extended type helper did not augment: %s" % [type_completion])
+		quit(1)
+		return
+	var script_constructor: Dictionary = service.completion_ex(uri, 14, 24, {"profile": "helpers"})
+	if script_constructor.disposition != "augment" or script_constructor.provider != "constructors":
+		push_error("script constructor helper did not augment: %s" % [script_constructor])
+		quit(1)
+		return
+	var member_string: Dictionary = service.completion_ex(uri, 15, 14, {"profile": "helpers"})
+	if member_string.disposition != "replace" or member_string.provider != "memberStrings":
+		push_error("member-string helper did not replace: %s" % [member_string])
+		quit(1)
+		return
+	var private_completion: Dictionary = service.completion_ex(uri, 16, 14, {"profile": "full"})
+	var private_names := []
+	for item: Dictionary in private_completion.items:
+		private_names.append(item.filterText)
+	if not private_names.has("title") or private_names.has("_private"):
+		push_error("private member filtering was not preserved: %s" % [private_completion])
+		quit(1)
+		return
+	var suppressed: Dictionary = service.completion_ex(uri, 17, 9, {"profile": "helpers"})
 	if suppressed.disposition != "replace" or suppressed.provider != "context" or not suppressed.items.is_empty():
 		push_error("structural colon completion was not suppressed: %s" % [suppressed])
 		quit(1)
 		return
 	service.set_configuration({"completion": {"constructors": false}})
-	constructor = service.completion_ex(uri, 3, 25, {"profile": "helpers"})
+	constructor = service.completion_ex(uri, 11, 25, {"profile": "helpers"})
 	if constructor.disposition != "not_handled":
 		push_error("disabled constructor helper still handled: %s" % [constructor])
 		quit(1)

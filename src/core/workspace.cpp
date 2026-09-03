@@ -2202,8 +2202,14 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		}
 	}
 	if (site.lexical != CaretLexicalContext::Code) {
-		output.disposition = CompletionDisposition::Replace;
-		output.provider = "semantic";
+		// The full standalone server owns lexical contexts and must not offer
+		// ordinary identifiers inside them. The helpers-only editor bridge,
+		// however, must fall through when no specialized string provider handled
+		// the request so Godot and other completion plugins remain available.
+		if (profile == CompletionProfile::Full) {
+			output.disposition = CompletionDisposition::Replace;
+			output.provider = "semantic";
+		}
 		return output;
 	}
 
