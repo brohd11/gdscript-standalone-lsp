@@ -63,6 +63,12 @@ json completion_json(const CompletionItem &item) {
 		{"sortText", item.sort_text}
 	};
 	if (!item.documentation.empty()) result["documentation"] = {{"kind", "markdown"}, {"value", item.documentation}};
+	if (!item.symbol_id.empty() || !item.origin_id.empty() || !item.provider.empty() || !item.access_kind.empty()) {
+		result["data"] = {{"gdscriptLsp", {
+			{"symbolId", item.symbol_id}, {"originId", item.origin_id},
+			{"provider", item.provider}, {"accessKind", item.access_kind}
+		}}};
+	}
 	return result;
 }
 
@@ -77,6 +83,23 @@ json type_json(const ResolvedType &type) {
 		{"instance", type.instance},
 		{"arguments", std::move(arguments)}
 	};
+}
+
+json origin_json(const SymbolOrigin &origin) {
+	return {
+		{"symbolId", origin.symbol_id}, {"uri", origin.uri}, {"ownerId", origin.owner_id},
+		{"name", origin.name}, {"kind", static_cast<int>(origin.kind)}, {"range", range_json(origin.range)}
+	};
+}
+
+json expression_json(const ResolvedExpression &expression) {
+	json paths = json::array();
+	for (const auto &path : expression.access_paths) paths.push_back({
+		{"text", path.text}, {"kind", access_path_kind_name(path.kind)}, {"preferred", path.preferred}
+	});
+	json result = {{"type", type_json(expression.type)}, {"origin", nullptr}, {"accessPaths", std::move(paths)}};
+	if (expression.origin) result["origin"] = origin_json(*expression.origin);
+	return result;
 }
 
 json diagnostic_json(const Diagnostic &diagnostic) {
@@ -499,7 +522,7 @@ json initialize_result() {
 			{"positionEncoding", "utf-16"},
 			{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
 			{"completionProvider", {{"triggerCharacters", json::array({".", "(", ",", ":", "=", "\"", "'"})},
-				{"resolveProvider", false}}},
+				{"resolveProvider", true}}},
 			{"hoverProvider", true},
 			{"definitionProvider", true},
 			{"documentSymbolProvider", true},
@@ -678,6 +701,21 @@ int main(int argc, char **argv) {
 			json output = json::array();
 			for (const auto &item : completion.items) output.push_back(completion_json(item));
 			respond(id, {{"isIncomplete", completion.is_incomplete}, {"items", std::move(output)}});
+		} else if (method == "completionItem/resolve") {
+			auto item = params;
+			std::string symbol_id;
+			if (auto data = item.find("data"); data != item.end() && data->is_object()) {
+				if (auto extension = data->find("gdscriptLsp"); extension != data->end() && extension->is_object()) {
+					symbol_id = extension->value("symbolId", "");
+				}
+			}
+			if (auto resolved = workspace.resolve_completion_item(symbol_id)) {
+				auto enriched = completion_json(*resolved);
+				for (auto key : {"detail", "documentation"}) {
+					if (enriched.contains(key)) item[key] = enriched[key];
+				}
+			}
+			respond(id, std::move(item));
 		} else if (method == "textDocument/hover") {
 			auto uri = params["textDocument"].value("uri", "");
 			auto hover = workspace.hover(uri, parse_position(params["position"]));
@@ -698,6 +736,11 @@ int main(int argc, char **argv) {
 			auto uri = params["textDocument"].value("uri", "");
 			auto type = workspace.resolve_type(uri, parse_position(params["position"]), params.value("expression", ""));
 			respond(id, type_json(type));
+		} else if (method == "gdscript/resolveExpression") {
+			auto uri = params["textDocument"].value("uri", "");
+			auto expression = workspace.resolve_expression(uri, parse_position(params["position"]),
+				params.value("expression", ""));
+			respond(id, expression_json(expression));
 		} else if (method == "textDocument/diagnostic" || method == "gdscript/diagnostics") {
 			auto uri = params["textDocument"].value("uri", "");
 			json items = json::array();

@@ -156,6 +156,13 @@ int main() {
 	auto inferred_type = workspace.resolve_type(inferred_uri, {8, 2}, "item");
 	expect(inferred_type.kind == TypeKind::ScriptClass && inferred_type.name == "Product" && inferred_type.instance,
 		"ordinary variable receives a non-binding hint from a qualified script call return type");
+	auto namespace_product = workspace.resolve_expression(inferred_uri, {7, 2}, "Namespace.Product");
+	expect(namespace_product.type.kind == TypeKind::ScriptClass && namespace_product.origin &&
+		namespace_product.origin->name == "Product",
+		"rich resolution exposes the declaration of a recursively resolved inner class");
+	expect(!namespace_product.access_paths.empty() && namespace_product.access_paths.front().text == "Namespace.Product" &&
+		namespace_product.access_paths.front().kind == AccessPathKind::ScriptAlias,
+		"preload access paths rank ahead of other valid spellings");
 	auto inferred_completion = workspace.completion(inferred_uri, {7, 6});
 	expect(has_item(inferred_completion, "product_member"),
 		"qualified script call return hint drives member completion");
@@ -232,6 +239,58 @@ int main() {
 		"changing an alias overlay rebuilds dependent inheritance");
 	expect(workspace.close_document(bridge_uri, &error), "script alias overlay closes");
 
+	// Compact native counterparts of the asserted access/inference cases in
+	// tests_plugin/brohd/gdscript_parser. These exercise inheritance, preload
+	// aliases, deep inner classes, name collisions, and declaring-script origin.
+	Workspace provenance_workspace;
+	auto provenance_fixture = std::filesystem::weakly_canonical("tests/fixtures/provenance");
+	expect(provenance_workspace.open(provenance_fixture, fixture / "extension_api.json", &error),
+		"provenance fixture opens: " + error);
+	auto provenance_uri = provenance_workspace.uri_for_path(provenance_fixture / "main.gd");
+	std::ifstream provenance_stream(provenance_fixture / "main.gd");
+	std::string provenance_source{std::istreambuf_iterator<char>(provenance_stream), std::istreambuf_iterator<char>()};
+	auto provenance_position = [&](std::string_view marker) {
+		auto found = provenance_source.find(marker);
+		expect(found != std::string::npos, "provenance marker exists: " + std::string(marker));
+		return byte_to_position(provenance_source, found + marker.size());
+	};
+	auto inherited_enum_completion = provenance_workspace.completion_result(provenance_uri,
+		provenance_position("if state == "), CompletionProfile::Helpers);
+	expect(inherited_enum_completion.disposition == CompletionDisposition::Replace &&
+		has_item(inherited_enum_completion.items, "Derived.State.IDLE") &&
+		has_item(inherited_enum_completion.items, "ProvenanceBase.State.IDLE") &&
+		has_item(inherited_enum_completion.items, "ProvenanceDerived.State.IDLE"),
+		"inherited enum completion exposes preload and global access paths");
+	expect(!inherited_enum_completion.items.empty() &&
+		inherited_enum_completion.items.front().filter_text == "Derived.State.IDLE" &&
+		inherited_enum_completion.items.front().access_kind == "scriptAlias",
+		"preload alias enum paths are preferred and retain their access kind");
+	auto deep_argument_completion = provenance_workspace.completion_result(provenance_uri,
+		provenance_position("object.use_tag("), CompletionProfile::Helpers);
+	expect(has_item(deep_argument_completion.items, "Derived.Bundle.Layer.Tag.ONE") &&
+		has_item(deep_argument_completion.items, "ProvenanceBase.Bundle.Layer.Tag.ONE"),
+		"deep inherited function arguments preserve all usable enum paths");
+	auto collision_completion = provenance_workspace.completion_result(provenance_uri,
+		provenance_position("inherited_inner.use_mode("), CompletionProfile::Helpers);
+	expect(has_item(collision_completion.items, "Derived.Inner.Mode.A") &&
+		!has_item(collision_completion.items, "Inner.Mode.A"),
+		"access validation rejects a same-named local inner-class decoy");
+	auto payload = provenance_workspace.resolve_expression(provenance_uri,
+		provenance_position("payload = "), "payload");
+	expect(payload.type.kind == TypeKind::ScriptClass && payload.type.name == "Payload" &&
+		!payload.access_paths.empty() && payload.access_paths.front().text == "Anonymous.Payload",
+		"anonymous-script inner classes are reachable through the caller's preload alias");
+	auto deep = provenance_workspace.resolve_expression(provenance_uri,
+		provenance_position("deep = "), "deep");
+	expect(deep.type.kind == TypeKind::ScriptClass &&
+		!deep.access_paths.empty() && deep.access_paths.front().text == "Anonymous.Outer.Deep",
+		"deep anonymous inner classes retain their complete access path");
+	auto inherited_origin = provenance_workspace.resolve_expression(provenance_uri,
+		provenance_position("object.use_tag"), "object.use_tag");
+	expect(inherited_origin.origin && inherited_origin.origin->name == "use_tag" &&
+		inherited_origin.origin->uri.ends_with("/base.gd"),
+		"an inherited callable points to the script that declares it, not the receiver script");
+
 	auto unicode = std::string("a😀b\nvalue");
 	auto byte = position_to_byte(unicode, {0, 3});
 	expect(byte == 5, "UTF-16 position converts surrogate pair");
@@ -286,6 +345,11 @@ int main() {
 		"\ttarget.call(\"build\")\n"
 		"\ttarget.set(\"title\", \"value\")\n"
 		"\tvar typed: Product\n"
+		"\t# comment_probe\n"
+		"\tvar string_probe = \"inside\"\n"
+		"\tif state == State.IDLE: pass\n"
+		"\tvar inferred = State.IDLE\n"
+		"\tinferred = State.READY\n"
 		"\tprint(target.title)\n"
 		"\tvar ordinary = 1\n";
 	expect(diagnostic_workspace.update_document(diagnostic_uri, helper_source, 100, &error),
@@ -323,6 +387,35 @@ int main() {
 	expect(type_hint_result.disposition == CompletionDisposition::Augment && has_item(type_hint_result.items, "Product") &&
 		has_item(type_hint_result.items, "State") && has_item(type_hint_result.items, "RefCounted"),
 		"extended type-hint helper includes local, enum, and native types");
+	auto parameter_type_hint = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("func accepts(state: "), CompletionProfile::Helpers);
+	expect(parameter_type_hint.disposition == CompletionDisposition::Augment &&
+		has_item(parameter_type_hint.items, "State"),
+		"function parameter annotations are recognized as type contexts");
+	auto comparison_enum = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("if state == "), CompletionProfile::Helpers);
+	expect(comparison_enum.disposition == CompletionDisposition::Replace &&
+		has_item(comparison_enum.items, "State.IDLE"),
+		"control-flow comparisons retain the left expression's enum type");
+	auto inferred_enum = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("\tinferred = "), CompletionProfile::Helpers);
+	expect(inferred_enum.disposition == CompletionDisposition::Replace &&
+		has_item(inferred_enum.items, "State.READY"),
+		"an enum-valued initializer carries enum identity into later assignments");
+	auto comment_completion = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("comment_probe"), CompletionProfile::Full);
+	expect(comment_completion.items.empty(), "ordinary completion is suppressed inside comments");
+	auto string_completion = diagnostic_workspace.completion_result(diagnostic_uri,
+		helper_position("inside"), CompletionProfile::Full);
+	expect(string_completion.items.empty(), "ordinary completion is suppressed inside strings");
+	auto resolved_state = diagnostic_workspace.resolve_expression(diagnostic_uri,
+		helper_position("if state"), "state");
+	expect(resolved_state.type.kind == TypeKind::Enum && resolved_state.origin &&
+		resolved_state.origin->name == "state" && resolved_state.origin->symbol_id.find('@') != std::string::npos,
+		"rich expression resolution separates an enum type from its unique local declaration origin");
+	expect(!resolved_state.access_paths.empty() && resolved_state.access_paths.front().text == "State" &&
+		resolved_state.access_paths.front().preferred,
+		"rich expression resolution returns a preferred usable access path");
 	auto member_result = diagnostic_workspace.completion_result(diagnostic_uri,
 		helper_position("print(target."), CompletionProfile::Full);
 	expect(has_item(member_result.items, "title") && !has_item(member_result.items, "_private"),
@@ -340,6 +433,35 @@ int main() {
 		"completion provider configuration applies without reindexing");
 	helper_config.enums = true;
 	diagnostic_workspace.set_completion_config(helper_config);
+	const std::string invalid_type_source =
+		"extends RefCounted\n\n"
+		"const TEXT = \"\"\n"
+		"class Holder:\n\tconst VALUE = \"\"\n"
+		"var bad: TEXT\n"
+		"var nested: Holder.VALUE\n";
+	expect(diagnostic_workspace.update_document(diagnostic_uri, invalid_type_source, 101, &error),
+		"invalid metatype overlay accepted");
+	auto invalid_position = [&](std::string_view marker) {
+		auto found = invalid_type_source.find(marker);
+		expect(found != std::string::npos, "invalid-type marker exists");
+		return byte_to_position(invalid_type_source, found + marker.size());
+	};
+	auto invalid_type_completion = diagnostic_workspace.completion_result(diagnostic_uri,
+		invalid_position("var nested: Holder."), CompletionProfile::Helpers);
+	expect(!has_item(invalid_type_completion.items, "VALUE"),
+		"qualified value constants are excluded from type-hint completion");
+	auto invalid_types = diagnostic_workspace.diagnostics(diagnostic_uri);
+	expect(diagnostic_count(invalid_types, "invalid-type") == 2,
+		"ordinary local and qualified constants are diagnosed as invalid types");
+	auto local_invalid = std::find_if(invalid_types.begin(), invalid_types.end(), [](const Diagnostic &item) {
+		return item.code == "invalid-type" && item.message == "\"TEXT\" is a constant but does not contain a type.";
+	});
+	auto member_invalid = std::find_if(invalid_types.begin(), invalid_types.end(), [](const Diagnostic &item) {
+		return item.code == "invalid-type" &&
+			item.message == "Member \"VALUE\" under base \"Holder\" is not a valid type.";
+	});
+	expect(local_invalid != invalid_types.end() && member_invalid != invalid_types.end(),
+		"invalid type diagnostics use Godot-compatible messages");
 	expect(diagnostic_workspace.close_document(diagnostic_uri, &error), "completion helper overlay closes");
 	auto diagnostics = diagnostic_workspace.diagnostics(diagnostic_uri);
 	if (diagnostic_count(diagnostics, "type-mismatch") != 2) {
@@ -425,12 +547,20 @@ int main() {
 	auto script_completion = diagnostic_workspace.completion(semantic_valid_uri, {28, 1});
 	auto *zero_argument_script = find_item(script_completion, "nullable_return");
 	expect(zero_argument_script && zero_argument_script->label == "nullable_return()" &&
-		zero_argument_script->insert_text == "nullable_return()" && zero_argument_script->detail.empty(),
+		zero_argument_script->insert_text == "nullable_return()" && zero_argument_script->detail == "func",
 		"zero-argument script completion uses Godot's compact display and complete call insertion");
+	expect(zero_argument_script && !zero_argument_script->symbol_id.empty() &&
+		zero_argument_script->origin_id == zero_argument_script->symbol_id &&
+		zero_argument_script->provider == "semantic",
+		"completion items retain declaration provenance and provider metadata");
+	auto resolved_completion = zero_argument_script ?
+		diagnostic_workspace.resolve_completion_item(zero_argument_script->symbol_id) : std::nullopt;
+	expect(resolved_completion && resolved_completion->detail == "func",
+		"completion declarations can be resolved after the initial response");
 	auto *argument_script = find_item(script_completion, "accepts_base");
 	expect(argument_script && argument_script->label == "accepts_base(\xe2\x80\xa6)" &&
 		argument_script->insert_text == "accepts_base(" && argument_script->filter_text == "accepts_base" &&
-		argument_script->detail.empty(),
+		argument_script->detail == "func",
 		"parameterized script completion displays an ellipsis and inserts a trailing opener");
 	auto *variadic_script = find_item(script_completion, "variadic");
 	expect(variadic_script && variadic_script->label == "variadic(\xe2\x80\xa6)" &&
@@ -642,8 +772,8 @@ int main() {
 	auto popup_uri = repository_workspace.uri_for_path(
 		std::filesystem::weakly_canonical("addons/addon_lib/brohd/popup_wrapper/popup_wrapper.gd"));
 	auto position_type = repository_workspace.resolve_type(popup_uri, {413, 30}, "ItemParams.Position.TOP");
-	expect(position_type.kind == TypeKind::Builtin && position_type.name == "int",
-		"qualified nested enum values resolve as integers");
+	expect(position_type.kind == TypeKind::Enum && position_type.name == "Position",
+		"qualified nested enum values retain their enum identity");
 	auto enum_completion = repository_workspace.completion(popup_uri, {413, 39});
 	expect(has_item(enum_completion, "TOP") && has_item(enum_completion, "BOTTOM") && has_item(enum_completion, "keys"),
 		"qualified enum completion includes values and Dictionary methods");

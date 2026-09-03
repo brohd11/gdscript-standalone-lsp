@@ -184,6 +184,45 @@ struct CompletionContext {
 	std::string member_prefix;
 };
 
+enum class LexicalContext { Code, Comment, String };
+
+LexicalContext lexical_context_at(std::string_view source, size_t offset) {
+	offset = std::min(offset, source.size());
+	char quote = 0;
+	bool triple = false;
+	bool escaped = false;
+	bool comment = false;
+	for (size_t index = 0; index < offset; ++index) {
+		auto character = source[index];
+		if (comment) {
+			if (character == '\n') comment = false;
+			continue;
+		}
+		if (quote) {
+			if (triple && character == quote && index + 2 < offset && source[index + 1] == quote &&
+					source[index + 2] == quote) {
+				index += 2;
+				quote = 0;
+				triple = false;
+			} else if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (!triple && character == quote) quote = 0;
+			continue;
+		}
+		if (character == '#') comment = true;
+		else if (character == '\'' || character == '"') {
+			quote = character;
+			if (index + 2 < offset && source[index + 1] == quote && source[index + 2] == quote) {
+				triple = true;
+				index += 2;
+			}
+		}
+	}
+	if (comment) return LexicalContext::Comment;
+	if (quote) return LexicalContext::String;
+	return LexicalContext::Code;
+}
+
 CompletionContext completion_context(std::string_view source, size_t offset) {
 	offset = std::min(offset, source.size());
 	auto before_cursor = source.substr(0, offset);
@@ -429,14 +468,17 @@ bool callable_kind(SymbolKind kind) {
 }
 
 CompletionItem completion_item(std::string name, std::string detail, std::string documentation,
-		SymbolKind kind, bool has_arguments = false) {
+		SymbolKind kind, bool has_arguments = false, std::string symbol_id = {}) {
 	CompletionItem result;
 	result.filter_text = name;
 	result.documentation = std::move(documentation);
 	result.kind = kind;
+	result.symbol_id = std::move(symbol_id);
+	result.origin_id = result.symbol_id;
 	if (callable_kind(kind)) {
 		result.label = name + (has_arguments ? "(\xe2\x80\xa6)" : "()");
 		result.insert_text = name + (has_arguments ? "(" : "()");
+		result.detail = std::move(detail);
 	} else {
 		result.label = name;
 		result.detail = std::move(detail);
@@ -448,13 +490,36 @@ CompletionItem completion_item(std::string name, std::string detail, std::string
 CompletionItem completion_item(const Symbol &symbol) {
 	auto has_arguments = std::any_of(symbol.children.begin(), symbol.children.end(),
 		[](const Symbol &child) { return child.is_parameter; });
-	return completion_item(symbol.name, symbol.detail, symbol.documentation, symbol.kind, has_arguments);
+	std::string detail;
+	switch (symbol.kind) {
+		case SymbolKind::Method:
+		case SymbolKind::Function:
+		case SymbolKind::Constructor: detail = symbol.is_static ? "static func" : "func"; break;
+		case SymbolKind::Constant: detail = "const"; break;
+		case SymbolKind::Variable:
+		case SymbolKind::Field:
+		case SymbolKind::Property: detail = symbol.is_static ? "static var" : "var"; break;
+		case SymbolKind::Event: detail = "signal"; break;
+		case SymbolKind::Enum: detail = "enum"; break;
+		case SymbolKind::Class: detail = "class"; break;
+		default: detail = symbol.detail; break;
+	}
+	if (!symbol.declared_type.empty() && !callable_kind(symbol.kind) && symbol.kind != SymbolKind::Enum &&
+			symbol.kind != SymbolKind::Class) detail += ": " + symbol.declared_type;
+	return completion_item(symbol.name, std::move(detail), symbol.documentation, symbol.kind, has_arguments, symbol.id);
 }
 
 CompletionItem completion_item(const NativeMember &member) {
 	auto has_arguments = member.signature &&
 		(!member.signature->arguments.empty() || member.signature->is_vararg);
-	return completion_item(member.name, member.detail, member.documentation, member.kind, has_arguments);
+	std::string detail;
+	if (member.signature) detail = member.is_static ? "static func" : "func";
+	else if (member.kind == SymbolKind::Enum) detail = "enum";
+	else if (member.kind == SymbolKind::Constant) detail = "const";
+	else detail = member.is_static ? "static var" : "var";
+	if (!member.type.empty() && !member.signature && member.kind != SymbolKind::Enum) detail += ": " + member.type;
+	return completion_item(member.name, std::move(detail), member.documentation, member.kind, has_arguments,
+		"native:" + member.owner + "::" + member.name);
 }
 
 std::string normalize_api_type(std::string value) {
@@ -668,6 +733,11 @@ void Workspace::rebuild_registry() {
 	global_classes_.clear();
 	global_name_counts_.clear();
 	symbol_owners_.clear();
+	symbols_.clear();
+	{
+		std::lock_guard cache_lock(access_path_cache_mutex_);
+		access_path_cache_.clear();
+	}
 	static_symbol_types_.clear();
 	document_dependencies_.clear();
 	reverse_document_dependencies_.clear();
@@ -675,8 +745,15 @@ void Workspace::rebuild_registry() {
 		(void)uri;
 		for (auto &record : document->classes()) {
 			classes_[record.symbol.id] = &record;
+			symbols_[record.symbol.id] = &record.symbol;
 			if (!record.global_name.empty()) ++global_name_counts_[record.global_name];
-			for (const auto &member : record.members) symbol_owners_[member.id] = record.symbol.id;
+			std::function<void(const Symbol &, const std::string &)> register_symbol =
+					[&](const Symbol &symbol, const std::string &owner) {
+				symbols_[symbol.id] = &symbol;
+				symbol_owners_[symbol.id] = owner;
+				for (const auto &child : symbol.children) register_symbol(child, symbol.id);
+			};
+			for (const auto &member : record.members) register_symbol(member, record.symbol.id);
 		}
 	}
 	for (auto &[id, record] : classes_) {
@@ -925,6 +1002,7 @@ ResolvedType Workspace::resolve_static_symbol(const Symbol &symbol, std::unorder
 		}
 	}
 	stack.erase(symbol.id);
+	if (result.known()) result.declaration_id = symbol.id;
 	return result;
 }
 
@@ -1010,19 +1088,22 @@ ResolvedType Workspace::resolve_static_reference(std::string expression, const C
 			if (!member) return ResolvedType::unknown(expression);
 			current = resolve_static_symbol(*member, stack);
 		} else if (current.kind == TypeKind::Enum) {
-			bool found = false;
+			const Symbol *found = nullptr;
 			for (const auto &[id, record] : classes_) {
 				(void)id;
 				for (const auto &member : record->members) {
 					if (member.id != current.symbol_id) continue;
-					found = std::any_of(member.children.begin(), member.children.end(),
-						[&](const Symbol &value) { return value.name == part; });
+					auto value = std::find_if(member.children.begin(), member.children.end(),
+						[&](const Symbol &entry) { return entry.name == part; });
+					if (value != member.children.end()) found = &*value;
 					break;
 				}
 				if (found) break;
 			}
 			if (!found) return ResolvedType::unknown(expression);
-			current = {TypeKind::Builtin, "int"};
+			// GDScript enum values retain the enum datatype. This is what lets an
+			// inferred local continue to drive enum-aware completion.
+			current.declaration_id = found->id;
 		} else {
 			return ResolvedType::unknown(expression);
 		}
@@ -1129,8 +1210,13 @@ ResolvedType Workspace::type_from_name(std::string name, const ClassRecord *cont
 	if (context) {
 		std::unordered_set<std::string> stack;
 		auto resolved = resolve_static_reference(name, context, stack);
-		if (resolved.known()) {
-			if (resolved.kind == TypeKind::ScriptClass || resolved.kind == TypeKind::NativeClass) resolved.instance = true;
+		// A type annotation accepts metatype constants (preloaded scripts, class
+		// aliases, builtin/native aliases) and enums. Ordinary value constants are
+		// deliberately not types, even though their value type is known.
+		if (resolved.known() && (resolved.kind == TypeKind::Enum ||
+				(!resolved.instance && (resolved.kind == TypeKind::ScriptClass ||
+				 resolved.kind == TypeKind::NativeClass || resolved.kind == TypeKind::Builtin)))) {
+			if (resolved.kind != TypeKind::Enum) resolved.instance = true;
 			return resolved;
 		}
 	}
@@ -1149,6 +1235,26 @@ ResolvedType Workspace::type_from_name(std::string name, const ClassRecord *cont
 	if (native_api_.is_builtin_class(name)) return {TypeKind::Builtin, name};
 	if (native_api_.has_class(name)) return {TypeKind::NativeClass, name, "native:" + name, true};
 	return ResolvedType::unknown(name);
+}
+
+std::optional<std::string> Workspace::invalid_type_message(std::string_view name,
+		const ClassRecord *context) const {
+	if (!context || name.empty()) return std::nullopt;
+	std::unordered_set<std::string> stack;
+	auto resolved = resolve_static_reference(std::string(name), context, stack);
+	if (!resolved.known()) return std::nullopt;
+	if (resolved.kind == TypeKind::Enum || (!resolved.instance &&
+			(resolved.kind == TypeKind::ScriptClass || resolved.kind == TypeKind::NativeClass ||
+			 resolved.kind == TypeKind::Builtin))) return std::nullopt;
+	auto dot = name.rfind('.');
+	if (dot != std::string_view::npos) {
+		return "Member \"" + std::string(name.substr(dot + 1)) + "\" under base \"" +
+			std::string(name.substr(0, dot)) + "\" is not a valid type.";
+	}
+	if (auto *symbol = find_member(*context, name); symbol && symbol->kind == SymbolKind::Constant) {
+		return "\"" + std::string(name) + "\" is a constant but does not contain a type.";
+	}
+	return "\"" + std::string(name) + "\" is not a valid type.";
 }
 
 ResolvedType Workspace::type_for_resource_path(std::string resource, const ClassRecord *context) const {
@@ -1208,6 +1314,7 @@ ResolvedType Workspace::type_of_symbol(const Symbol &symbol, const Document &doc
 	}
 	else result = {TypeKind::Variant, "Variant"};
 	stack.pop_back();
+	if (result.known()) result.declaration_id = symbol.id;
 	return result;
 }
 
@@ -1298,6 +1405,7 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 	if (!receiver.instance && member_name == "new" && (receiver.kind == TypeKind::ScriptClass ||
 			receiver.kind == TypeKind::NativeClass || receiver.kind == TypeKind::Builtin)) {
 		auto result = ResolvedType{TypeKind::Callable, "Callable", receiver.symbol_id + "::new"};
+		result.declaration_id = result.symbol_id;
 		auto instance = receiver;
 		instance.instance = true;
 		result.callable_return = std::make_shared<ResolvedType>(std::move(instance));
@@ -1314,16 +1422,22 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 							member->kind == SymbolKind::Class) {
 						std::unordered_set<std::string> static_stack;
 						auto resolved = resolve_static_symbol(*member, static_stack);
-						if (resolved.known()) return resolved;
+						if (resolved.known()) {
+							resolved.declaration_id = member->id;
+							return resolved;
+						}
 					}
 				}
 				if (member->kind == SymbolKind::Method || member->kind == SymbolKind::Function ||
 						member->kind == SymbolKind::Constructor) {
 					auto result = ResolvedType{TypeKind::Callable, "Callable", member->id};
+					result.declaration_id = member->id;
 					result.callable_return = std::make_shared<ResolvedType>(callable_return_type(*member, document, stack));
 					return result;
 				}
-				return hinted_type_of_symbol(*member, document, position, stack);
+				auto result = hinted_type_of_symbol(*member, document, position, stack);
+				result.declaration_id = member->id;
+				return result;
 			}
 			auto native = receiver.instance ? native_base(*record) :
 				(native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
@@ -1331,6 +1445,7 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 				if (auto *member = native_api_.find_member(native, member_name)) {
 					if (member->kind == SymbolKind::Event) {
 						ResolvedType result{TypeKind::Signal, "Signal", "native:" + member->owner + "::" + member->name};
+						result.declaration_id = result.symbol_id;
 						if (member->signature) for (const auto &argument : member->signature->arguments) {
 							auto type = type_from_name(argument.type, record);
 							result.signal_arguments.push_back(type.known() ? type : ResolvedType{TypeKind::Variant, "Variant"});
@@ -1339,11 +1454,13 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 					}
 					if (member->signature) {
 						ResolvedType result{TypeKind::Callable, "Callable", "native:" + member->owner + "::" + member->name};
+						result.declaration_id = result.symbol_id;
 						auto returned = type_from_name(member->signature->return_type, record);
 						result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
 						return result;
 					}
 					auto result = type_from_name(member->type, record);
+					result.declaration_id = "native:" + member->owner + "::" + member->name;
 					return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
 				}
 			}
@@ -1354,10 +1471,14 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 				member_name == "unbind")) return receiver;
 		if (auto *member = native_api_.find_member(receiver.name, member_name)) {
 			if (member->kind == SymbolKind::Enum) {
-				return {TypeKind::Enum, member->name, "nativeenum:" + member->owner + "." + member->name, false};
+				auto result = ResolvedType{TypeKind::Enum, member->name,
+					"nativeenum:" + member->owner + "." + member->name, false};
+				result.declaration_id = "native:" + member->owner + "::" + member->name;
+				return result;
 			}
 			if (member->kind == SymbolKind::Event) {
 				ResolvedType result{TypeKind::Signal, "Signal", "native:" + member->owner + "::" + member->name};
+				result.declaration_id = result.symbol_id;
 				if (member->signature) for (const auto &argument : member->signature->arguments) {
 					auto type = type_from_name(argument.type, nullptr);
 					result.signal_arguments.push_back(type.known() ? type : ResolvedType{TypeKind::Variant, "Variant"});
@@ -1366,15 +1487,27 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 			}
 			if (member->signature) {
 				ResolvedType result{TypeKind::Callable, "Callable", "native:" + member->owner + "::" + member->name};
+				result.declaration_id = result.symbol_id;
 				auto returned = type_from_name(member->signature->return_type, nullptr);
 				result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
 				return result;
 			}
 			auto result = type_from_name(member->type, nullptr);
+			result.declaration_id = "native:" + member->owner + "::" + member->name;
 			return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
 		}
 	} else if (receiver.kind == TypeKind::Enum) {
-		return {TypeKind::Builtin, "int"};
+		auto result = receiver;
+		if (receiver.symbol_id.starts_with("nativeenum:")) {
+			auto qualified = receiver.symbol_id.substr(11);
+			auto separator = qualified.rfind('.');
+			result.declaration_id = "native:" + qualified.substr(0, separator) + "::" + std::string(member_name);
+		} else if (receiver.symbol_id.starts_with("global:")) {
+			result.declaration_id = receiver.symbol_id + "::" + std::string(member_name);
+		} else {
+			result.declaration_id = receiver.symbol_id + "." + std::string(member_name);
+		}
+		return result;
 	}
 	return ResolvedType::unknown(std::string(member_name));
 }
@@ -1439,11 +1572,13 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 				if (member_name == "keys") {
 					ResolvedType result{TypeKind::Builtin, "Array"};
 					if (!receiver.arguments.empty()) result.arguments.push_back(receiver.arguments.front());
+					result.declaration_id = "native:Dictionary::keys";
 					return result;
 				}
 				if (member_name == "values") {
 					ResolvedType result{TypeKind::Builtin, "Array"};
 					if (receiver.arguments.size() > 1) result.arguments.push_back(receiver.arguments[1]);
+					result.declaration_id = "native:Dictionary::values";
 					return result;
 				}
 				if (member_name == "get" && receiver.arguments.size() > 1) return receiver.arguments[1];
@@ -1461,7 +1596,11 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 				}
 			}
 			auto callable = member_value_type(receiver, member_name, document, position, stack);
-			if (callable.kind == TypeKind::Callable && callable.callable_return) return *callable.callable_return;
+			if (callable.kind == TypeKind::Callable && callable.callable_return) {
+				auto returned = *callable.callable_return;
+				returned.declaration_id = callable.declaration_id.empty() ? callable.symbol_id : callable.declaration_id;
+				return returned;
+			}
 			return callable.kind == TypeKind::Callable ? ResolvedType{TypeKind::Variant, "Variant"} :
 				ResolvedType::unknown(member_name);
 		} else {
@@ -1470,15 +1609,20 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 			}
 			if (auto *signature = native_api_.find_utility_function(callee->callee)) {
 				auto result = type_from_name(signature->return_type, context);
+				result.declaration_id = "utility:" + callee->callee;
 				return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
 			}
 			if (auto *function = find_gdscript_builtin_function(callee->callee)) {
 				auto result = type_from_name(function->signature.return_type, context);
+				result.declaration_id = "builtin:" + callee->callee;
 				return result.known() ? result : ResolvedType{TypeKind::Variant, "Variant"};
 			}
 			auto callable = infer_expression(callee->callee, document, context, position, stack);
 			if (callable.kind == TypeKind::Callable) {
-				return callable.callable_return ? *callable.callable_return : ResolvedType{TypeKind::Variant, "Variant"};
+				if (!callable.callable_return) return {TypeKind::Variant, "Variant"};
+				auto returned = *callable.callable_return;
+				returned.declaration_id = callable.declaration_id.empty() ? callable.symbol_id : callable.declaration_id;
+				return returned;
 			}
 			auto constructed = type_from_name(callee->callee, context);
 			if (constructed.kind == TypeKind::Builtin || constructed.kind == TypeKind::NativeClass ||
@@ -1528,16 +1672,20 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 			return result;
 		}
 		if (auto *symbol = resolve_identifier(document, context, expression, position)) {
-			return hinted_type_of_symbol(*symbol, document, position, stack);
+			auto result = hinted_type_of_symbol(*symbol, document, position, stack);
+			result.declaration_id = symbol->id;
+			return result;
 		}
 		if (auto *signature = native_api_.find_utility_function(expression)) {
 			ResolvedType result{TypeKind::Callable, "Callable", "utility:" + expression};
+			result.declaration_id = result.symbol_id;
 			auto returned = type_from_name(signature->return_type, context);
 			result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
 			return result;
 		}
 		if (auto *function = find_gdscript_builtin_function(expression)) {
 			ResolvedType result{TypeKind::Callable, "Callable", "builtin:" + expression};
+			result.declaration_id = result.symbol_id;
 			auto returned = type_from_name(function->signature.return_type, context);
 			result.callable_return = std::make_shared<ResolvedType>(returned.known() ? returned : ResolvedType{TypeKind::Variant, "Variant"});
 			return result;
@@ -1558,12 +1706,174 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 }
 
 ResolvedType Workspace::resolve_type(const std::string &uri, Position position, std::string expression) const {
+	return resolve_expression(uri, position, std::move(expression)).type;
+}
+
+std::optional<SymbolOrigin> Workspace::symbol_origin(std::string_view id) const {
+	if (id.empty()) return std::nullopt;
+	if (id.starts_with("native:")) {
+		auto separator = id.rfind("::");
+		if (separator == std::string_view::npos) {
+			auto name = std::string(id.substr(7));
+			return SymbolOrigin{std::string(id), {}, "native", name, SymbolKind::Class, {}, true};
+		}
+		auto owner = std::string(id.substr(7, separator - 7));
+		auto name = std::string(id.substr(separator + 2));
+		if (auto *member = native_api_.find_member(owner, name)) {
+			return SymbolOrigin{std::string(id), {}, "native:" + member->owner, member->name,
+				member->kind, {}, true};
+		}
+		return SymbolOrigin{std::string(id), {}, "native:" + owner, name, SymbolKind::Method, {}, true};
+	}
+	if (id.starts_with("utility:") || id.starts_with("builtin:")) {
+		auto separator = id.find(':');
+		return SymbolOrigin{std::string(id), {}, std::string(id.substr(0, separator)),
+			std::string(id.substr(separator + 1)), SymbolKind::Function, {}, true};
+	}
+	if (auto found = symbols_.find(std::string(id)); found != symbols_.end()) {
+		auto *symbol = found->second;
+		auto owner = symbol_owners_.find(symbol->id);
+		return SymbolOrigin{symbol->id, symbol->uri,
+			owner == symbol_owners_.end() ? std::string{} : owner->second,
+			symbol->name, symbol->kind, symbol->selection_range, true};
+	}
+	return std::nullopt;
+}
+
+std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &type,
+		const ClassRecord *context) const {
+	auto cache_key = (context ? context->symbol.id : std::string{}) + "\n" +
+		std::to_string(static_cast<int>(type.kind)) + "\n" + type.name + "\n" + type.symbol_id;
+	{
+		std::lock_guard cache_lock(access_path_cache_mutex_);
+		if (auto found = access_path_cache_.find(cache_key); found != access_path_cache_.end()) return found->second;
+	}
+	std::vector<AccessPath> paths;
+	std::set<std::string> seen;
+	auto same_type = [&](const ResolvedType &candidate) {
+		return candidate.kind == type.kind && candidate.symbol_id == type.symbol_id &&
+			(!candidate.symbol_id.empty() || candidate.name == type.name);
+	};
+	auto add = [&](std::string text, AccessPathKind kind, bool verify = true) {
+		if (text.empty() || !seen.insert(text).second) return;
+		if (verify && context && !same_type(type_from_name(text, context))) {
+			seen.erase(text);
+			return;
+		}
+		paths.push_back({std::move(text), kind, false});
+	};
+	if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
+		add(type.name, AccessPathKind::Native, false);
+	} else if (type.kind == TypeKind::NativeClass) {
+		add(type.name, AccessPathKind::Native, false);
+	} else if (type.kind == TypeKind::Enum && type.symbol_id.starts_with("nativeenum:")) {
+		auto qualified = type.symbol_id.substr(11);
+		auto separator = qualified.rfind('.');
+		add(separator == std::string::npos ? qualified : qualified.substr(0, separator),
+			AccessPathKind::Native, false);
+	} else if (type.kind == TypeKind::Enum && type.symbol_id.starts_with("global:")) {
+		add(type.symbol_id.substr(7), AccessPathKind::Global, false);
+	} else if ((type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum) && context) {
+		std::string owner = type.kind == TypeKind::Enum ? type.symbol_id.substr(0, type.symbol_id.rfind("::")) : type.symbol_id;
+		std::string terminal = type.kind == TypeKind::Enum ? type.symbol_id.substr(type.symbol_id.rfind("::") + 2) : std::string{};
+		auto suffix_from = [&](std::string_view prefix) -> std::string {
+			if (owner == prefix) return terminal;
+			if (owner.starts_with(std::string(prefix) + ".")) {
+				auto suffix = owner.substr(prefix.size() + 1);
+				return terminal.empty() ? suffix : suffix + "." + terminal;
+			}
+			return {};
+		};
+		auto suffix_from_reachable_class = [&](std::string class_id) -> std::string {
+			std::unordered_set<std::string> visited;
+			while (!class_id.empty() && !class_id.starts_with("native:") && visited.insert(class_id).second) {
+				auto suffix = suffix_from(class_id);
+				if (!suffix.empty() || owner == class_id) return suffix;
+				auto *record = find_class(class_id);
+				class_id = record ? record->base_class_id : std::string{};
+			}
+			return {};
+		};
+
+		// Constants/classes visible from this scope are the most useful spelling:
+		// preload aliases first, then ordinary local/inherited names.
+		std::vector<const Symbol *> visible = all_members(*context, MemberAccess::Type);
+		for (auto *scope = enclosing_class(*context); scope; scope = enclosing_class(*scope)) {
+			for (const auto &member : scope->members) if (member.kind == SymbolKind::Constant ||
+					member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class || member.is_static) {
+				visible.push_back(&member);
+			}
+		}
+		auto add_visible = [&](bool aliases) {
+			for (auto *member : visible) {
+				std::unordered_set<std::string> stack;
+				auto reached = resolve_static_symbol(*member, stack);
+				bool alias = member->kind == SymbolKind::Constant && reached.known() &&
+					(reached.kind == TypeKind::Enum || !reached.instance);
+				if (alias != aliases) continue;
+				if (same_type(reached)) add(member->name, aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
+				if (reached.kind == TypeKind::ScriptClass) {
+					auto suffix = suffix_from_reachable_class(reached.symbol_id);
+					if (!suffix.empty()) add(member->name + "." + suffix,
+						aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
+				}
+			}
+		};
+		add_visible(true);
+		add_visible(false);
+
+		// Relative spelling inside the declaring script/class.
+		auto script_end = owner.find(".gd");
+		if (script_end != std::string::npos) {
+			auto root = owner.substr(0, script_end + 3);
+			auto relative = suffix_from(root);
+			if (!relative.empty()) add(relative, AccessPathKind::Local);
+		}
+		if (!terminal.empty()) add(terminal, AccessPathKind::Local);
+
+		for (const auto &[global, class_id] : global_classes_) {
+			auto suffix = suffix_from_reachable_class(class_id);
+			if (owner == class_id && terminal.empty()) add(global, AccessPathKind::Global);
+			else if (!suffix.empty()) add(global + "." + suffix, AccessPathKind::Global);
+		}
+	}
+	if (!paths.empty()) paths.front().preferred = true;
+	{
+		std::lock_guard cache_lock(access_path_cache_mutex_);
+		access_path_cache_[std::move(cache_key)] = paths;
+	}
+	return paths;
+}
+
+ResolvedExpression Workspace::resolve_expression(const std::string &uri, Position position,
+		std::string expression) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);
-	if (!document) return ResolvedType::unknown("document not indexed");
+	if (!document) return {ResolvedType::unknown("document not indexed"), std::nullopt, {}};
 	if (expression.empty()) expression = identifier_at(document->source(), position);
 	std::vector<std::string> stack;
-	return infer_expression(std::move(expression), *document, document->class_at(position), position, stack);
+	auto *context = document->class_at(position);
+	auto type = infer_expression(std::move(expression), *document, context, position, stack);
+	auto origin_id = type.declaration_id;
+	if (origin_id.empty() && (type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum ||
+			type.kind == TypeKind::NativeClass)) origin_id = type.symbol_id;
+	return {type, symbol_origin(origin_id), access_paths_for_type(type, context)};
+}
+
+std::optional<CompletionItem> Workspace::resolve_completion_item(std::string_view symbol_id) const {
+	std::shared_lock lock(mutex_);
+	if (symbol_id.starts_with("native:")) {
+		auto separator = symbol_id.rfind("::");
+		if (separator != std::string_view::npos) {
+			auto owner = symbol_id.substr(7, separator - 7);
+			auto name = symbol_id.substr(separator + 2);
+			if (auto *member = native_api_.find_member(owner, name)) return completion_item(*member);
+		}
+	}
+	if (auto found = symbols_.find(std::string(symbol_id)); found != symbols_.end()) {
+		return completion_item(*found->second);
+	}
+	return std::nullopt;
 }
 
 bool Workspace::is_assignable(const ResolvedType &expected, const ResolvedType &actual) const {
@@ -1719,16 +2029,26 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 		}
 		std::sort(global_names.begin(), global_names.end());
 		for (const auto &name : global_names) {
-			if (names.insert(name).second) result.push_back(completion_item(name, "class " + name, {}, SymbolKind::Class));
+			if (names.insert(name).second) {
+				auto item = completion_item(name, "class", {}, SymbolKind::Class);
+				item.symbol_id = global_classes_.at(name);
+				item.origin_id = item.symbol_id;
+				result.push_back(std::move(item));
+			}
 		}
 		std::vector<std::pair<std::string, std::string>> autoload_names(autoloads_.begin(), autoloads_.end());
 		std::sort(autoload_names.begin(), autoload_names.end());
 		for (const auto &[name, path] : autoload_names) {
-			if (names.insert(name).second) result.push_back(completion_item(name, "autoload " + path, {}, SymbolKind::Variable));
+			if (names.insert(name).second) {
+				auto item = completion_item(name, "autoload " + path, {}, SymbolKind::Variable);
+				item.symbol_id = "autoload:" + name;
+				result.push_back(std::move(item));
+			}
 		}
 		for (const auto &function : gdscript_builtin_functions()) if (names.insert(std::string(function.name)).second) {
-			result.push_back(completion_item(std::string(function.name), std::string(function.detail), {}, SymbolKind::Method,
-				!function.signature.arguments.empty() || function.signature.is_vararg));
+			auto item = completion_item(std::string(function.name), "func", {}, SymbolKind::Method,
+				!function.signature.arguments.empty() || function.signature.is_vararg, "builtin:" + std::string(function.name));
+			result.push_back(std::move(item));
 		}
 	}
 	for (size_t index = 0; index < result.size(); ++index) {
@@ -1749,17 +2069,15 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	auto offset = position_to_byte(document->source(), position);
 	auto site = completion_context(document->source(), offset);
 	auto *context = document->class_at(position);
+	auto in_type_hint = type_hint_context(document->source(), offset);
 
 	auto infer = [&](std::string expression) {
 		std::vector<std::string> stack;
 		return infer_expression(std::move(expression), *document, context, position, stack);
 	};
 	auto symbol_by_id = [&](std::string_view id) -> const Symbol * {
-		for (const auto &[class_id, record] : classes_) {
-			(void)class_id;
-			for (const auto &member : record->members) if (member.id == id) return &member;
-		}
-		return nullptr;
+		auto found = symbols_.find(std::string(id));
+		return found == symbols_.end() ? nullptr : found->second;
 	};
 	auto call = active_call(document->source(), offset);
 	auto callable_argument = [&](const ActiveCall &active) -> std::optional<ExpectedValue> {
@@ -1789,6 +2107,12 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 					declared = child.declared_type;
 					break;
 				}
+			}
+			if (!declared.empty()) {
+				auto owner = symbol_owners_.find(symbol->id);
+				auto *declaration_context = owner == symbol_owners_.end() ? context : find_class(owner->second);
+				auto type = type_from_name(declared, declaration_context);
+				return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), declared}) : std::nullopt;
 			}
 		}
 		if (declared.empty()) return std::nullopt;
@@ -1820,7 +2144,13 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			if (found != std::string_view::npos && (separator == std::string_view::npos || found > separator)) separator = found;
 		}
 		if (separator == std::string_view::npos) return std::nullopt;
-		auto type = infer(trim(line.substr(0, separator)));
+		auto left = trim(line.substr(0, separator));
+		for (auto prefix : {std::string_view("if "), std::string_view("elif "), std::string_view("while "),
+				std::string_view("assert ")}) if (left.starts_with(prefix)) {
+			left = trim(std::string_view(left).substr(prefix.size()));
+			break;
+		}
+		auto type = infer(left);
 		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
 	};
 	auto match_expected = [&]() -> std::optional<ExpectedValue> {
@@ -1846,15 +2176,16 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		}
 		return std::nullopt;
 	};
-	auto expected = call ? callable_argument(*call) : std::nullopt;
+	auto expected = !in_type_hint && call ? callable_argument(*call) : std::nullopt;
 	if (!expected) expected = assignment_expected();
 	if (!expected) expected = comparison_expected();
 	if (!expected) expected = match_expected();
 
-	auto rank = [](std::vector<CompletionItem> &items) {
+	auto rank = [](std::vector<CompletionItem> &items, std::string_view provider) {
 		for (size_t index = 0; index < items.size(); ++index) {
 			auto value = std::to_string(index);
 			items[index].sort_text = std::string(10 - std::min<size_t>(value.size(), 10), '0') + value;
+			if (items[index].provider.empty()) items[index].provider = provider;
 		}
 	};
 	auto merge_front = [](std::vector<CompletionItem> additions, std::vector<CompletionItem> baseline) {
@@ -1960,50 +2291,79 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 				if (!output.items.empty()) {
 					output.disposition = CompletionDisposition::Replace;
 					output.provider = "memberStrings";
-					rank(output.items);
-					return output;
+				rank(output.items, output.provider);
+				return output;
 				}
 			}
 		}
 	}
+	if (lexical_context_at(document->source(), offset) != LexicalContext::Code) {
+		output.disposition = CompletionDisposition::Replace;
+		output.provider = "semantic";
+		return output;
+	}
 
 	if (completion_config_.enums && expected && expected->type.kind == TypeKind::Enum) {
 		std::vector<std::string> values;
-		std::string access = expected->access;
+		std::vector<AccessPath> accesses = access_paths_for_type(expected->type, context);
 		if (expected->type.symbol_id.starts_with("global:")) {
 			values = native_api_.global_enum_values(expected->type.symbol_id.substr(7));
-			access.clear();
+			accesses = {{"", AccessPathKind::Global, true}};
 		} else if (expected->type.symbol_id.starts_with("nativeenum:")) {
 			auto path = expected->type.symbol_id.substr(11);
 			auto separator = path.rfind('.');
 			if (separator != std::string::npos) {
 				values = native_api_.enum_values(path.substr(0, separator), path.substr(separator + 1));
-				access = path.substr(0, separator);
+				if (accesses.empty()) accesses = {{path.substr(0, separator), AccessPathKind::Native, true}};
 			}
 		} else if (auto *symbol = symbol_by_id(expected->type.symbol_id)) {
 			for (const auto &child : symbol->children) values.push_back(child.name);
 		}
-		for (const auto &name : values) {
-			auto inserted = access.empty() ? name : access + "." + name;
-			output.items.push_back(completion_item(inserted, {}, {}, SymbolKind::Enum));
+		if (accesses.empty() && !expected->access.empty()) accesses.push_back({expected->access, AccessPathKind::Local, true});
+		std::set<std::string> inserted_values;
+		for (const auto &access : accesses) for (const auto &name : values) {
+			auto inserted = access.text.empty() ? name : access.text + "." + name;
+			if (!inserted_values.insert(inserted).second) continue;
+			auto item = completion_item(inserted,
+				access.preferred ? "enum" : "enum (alternate " + std::string(access_path_kind_name(access.kind)) + ")",
+				{}, SymbolKind::Enum);
+			if (expected->type.symbol_id.starts_with("nativeenum:")) {
+				auto qualified = expected->type.symbol_id.substr(11);
+				auto separator = qualified.rfind('.');
+				item.symbol_id = "native:" + qualified.substr(0, separator) + "::" + name;
+			} else if (expected->type.symbol_id.starts_with("global:")) {
+				item.symbol_id = expected->type.symbol_id + "::" + name;
+			} else {
+				item.symbol_id = expected->type.symbol_id + "." + name;
+			}
+			item.origin_id = item.symbol_id;
+			item.access_kind = std::string(access_path_kind_name(access.kind));
+			output.items.push_back(std::move(item));
 		}
 		if (!output.items.empty()) {
 			output.disposition = CompletionDisposition::Replace;
 			output.provider = "enums";
-			rank(output.items);
+			rank(output.items, output.provider);
 			return output;
 		}
 	}
 
 	std::vector<CompletionItem> additions;
 	std::string augment_provider;
-	if (completion_config_.extended_type_hints && type_hint_context(document->source(), offset)) {
+	if (completion_config_.extended_type_hints && in_type_hint) {
 		auto add_type = [&](std::string name, SymbolKind kind = SymbolKind::Class) {
-			additions.push_back(completion_item(std::move(name), {}, {}, kind));
+			additions.push_back(completion_item(std::move(name),
+				kind == SymbolKind::Enum ? "enum" : "class", {}, kind));
 		};
 		if (site.member_access && site.receiver) {
 			for (auto &item : semantic_completion_locked(*document, position)) {
 				if (item.kind == SymbolKind::Class || item.kind == SymbolKind::Enum || item.kind == SymbolKind::Constant) {
+					if (item.kind == SymbolKind::Constant) {
+						std::unordered_set<std::string> stack;
+						auto type = resolve_static_reference(*site.receiver + "." + item.filter_text, context, stack);
+						if (!(type.kind == TypeKind::Enum || (!type.instance && (type.kind == TypeKind::ScriptClass ||
+								type.kind == TypeKind::NativeClass || type.kind == TypeKind::Builtin)))) continue;
+					}
 					additions.push_back(std::move(item));
 				}
 			}
@@ -2035,8 +2395,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	}
 
 	if (completion_config_.constructors && expected && expected->type.instance &&
-			(expected->type.kind == TypeKind::ScriptClass || expected->type.kind == TypeKind::NativeClass ||
-			 expected->type.kind == TypeKind::Builtin)) {
+			(expected->type.kind == TypeKind::ScriptClass || expected->type.kind == TypeKind::NativeClass)) {
 		bool has_arguments = false;
 		if (expected->type.kind == TypeKind::ScriptClass) {
 			if (auto *record = find_class(expected->type.symbol_id)) if (auto *init = find_member(*record, "_init")) {
@@ -2047,12 +2406,18 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 				return !signature.arguments.empty() || signature.is_vararg;
 			});
 		}
-		auto access = expected->access.empty() ? expected->type.name : expected->access;
+		auto paths = access_paths_for_type(expected->type, context);
+		auto access = !paths.empty() ? paths.front().text :
+			(expected->access.empty() ? expected->type.name : expected->access);
 		CompletionItem item;
 		item.filter_text = access + ".new";
-		item.label = item.filter_text + (has_arguments ? "(â¦)" : "()");
+		item.label = item.filter_text + (has_arguments ? "(\xe2\x80\xa6)" : "()");
 		item.insert_text = item.filter_text + (has_arguments ? "(" : "()");
 		item.kind = SymbolKind::Constructor;
+		item.detail = "constructor";
+		item.symbol_id = expected->type.symbol_id + "::new";
+		item.origin_id = item.symbol_id;
+		item.access_kind = paths.empty() ? "local" : std::string(access_path_kind_name(paths.front().kind));
 		additions.insert(additions.begin(), std::move(item));
 		if (augment_provider.empty()) augment_provider = "constructors";
 	}
@@ -2062,7 +2427,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		if (!output.items.empty()) {
 			output.disposition = CompletionDisposition::Augment;
 			output.provider = std::move(augment_provider);
-			rank(output.items);
+			rank(output.items, output.provider);
 		}
 		return output;
 	}
@@ -2073,7 +2438,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	}
 	output.disposition = CompletionDisposition::Replace;
 	output.provider = augment_provider.empty() ? "semantic" : std::move(augment_provider);
-	rank(output.items);
+	rank(output.items, output.provider);
 	return output;
 }
 
@@ -2224,8 +2589,12 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 			}
 			auto inspect_symbol = [&](const Symbol &symbol) {
 				if (!symbol.declared_type.empty() && !type_from_name(symbol.declared_type, &record).known()) {
-					add("unknown-type", "Could not find type \"" + symbol.declared_type + "\" in the current scope.",
-						symbol.selection_range);
+					if (auto message = invalid_type_message(symbol.declared_type, &record)) {
+						add("invalid-type", *message, symbol.selection_range);
+					} else {
+						add("unknown-type", "Could not find type \"" + symbol.declared_type + "\" in the current scope.",
+							symbol.selection_range);
+					}
 					return;
 				}
 			};

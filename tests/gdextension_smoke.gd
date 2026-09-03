@@ -81,6 +81,15 @@ func _on_ready() -> void:
 		push_error("unexpected resolved type: %s" % resolved)
 		quit(1)
 		return
+	var rich: Dictionary = service.resolve_expression(uri, 6, 4, "local")
+	if rich.type.name != "ChildThing" or rich.origin == null or rich.origin.name != "local":
+		push_error("unexpected rich expression: %s" % [rich])
+		quit(1)
+		return
+	if rich.accessPaths.is_empty() or not rich.accessPaths[0].preferred:
+		push_error("rich expression did not expose a preferred access path: %s" % [rich])
+		quit(1)
+		return
 	service.update_document(uri, "extends RefCounted\n\nvar wrong: int = \"text\"\n", 8)
 	var diagnostics: Array = service.diagnostics(uri)
 	if diagnostics.size() != 1 or diagnostics[0].code != "type-mismatch":

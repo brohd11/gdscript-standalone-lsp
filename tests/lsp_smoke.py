@@ -64,8 +64,6 @@ requests = [
             "expression": "local",
         },
     },
-    {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
-    {"jsonrpc": "2.0", "method": "exit", "params": {}},
 ]
 for request in requests:
     process.stdin.write(packet(request))
@@ -74,20 +72,57 @@ process.stdin.flush()
 initialize = read_packet(process.stdout)
 completion = read_packet(process.stdout)
 resolved = read_packet(process.stdout)
-shutdown = read_packet(process.stdout)
 assert initialize["result"]["capabilities"]["positionEncoding"] == "utf-16"
 completion_items = {item["filterText"]: item for item in completion["result"]["items"]}
 completion_order = [item["filterText"] for item in completion["result"]["items"]]
 assert {"own", "count", "label", "reference_method"} <= completion_items.keys()
 assert completion_items["label"]["label"] == "label()"
 assert completion_items["label"]["insertText"] == "label()"
-assert completion_items["label"]["detail"] == ""
+assert completion_items["label"]["detail"] == "func"
+assert completion_items["label"]["data"]["gdscriptLsp"]["symbolId"].endswith("::label")
+assert completion_items["label"]["data"]["gdscriptLsp"]["provider"] == "semantic"
 assert completion_order.index("own") < completion_order.index("CHILD_CONSTANT") < completion_order.index("count")
 assert completion_order.index("count") < completion_order.index("BASE_CONSTANT") < completion_order.index("reference_method")
 sort_ranks = [item["sortText"] for item in completion["result"]["items"]]
 assert sort_ranks == sorted(sort_ranks) and len(sort_ranks) == len(set(sort_ranks))
 assert resolved["result"]["kind"] == "script_class"
 assert resolved["result"]["name"] == "ChildThing"
+process.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "completionItem/resolve",
+            "params": completion_items["label"],
+        }
+    )
+)
+process.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "gdscript/resolveExpression",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 6, "character": 4},
+                "expression": "local",
+            },
+        }
+    )
+)
+process.stdin.write(packet({"jsonrpc": "2.0", "id": 6, "method": "shutdown", "params": {}}))
+process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+process.stdin.flush()
+completion_resolve = read_packet(process.stdout)
+rich_resolved = read_packet(process.stdout)
+shutdown = read_packet(process.stdout)
+assert completion_resolve["result"]["detail"] == "func"
+assert rich_resolved["result"]["type"]["name"] == "ChildThing"
+assert rich_resolved["result"]["origin"]["name"] == "local"
+assert rich_resolved["result"]["origin"]["symbolId"].split("@", 1)[0].endswith("::local")
+assert rich_resolved["result"]["accessPaths"][0]["preferred"] is True
+assert initialize["result"]["capabilities"]["completionProvider"]["resolveProvider"] is True
 assert shutdown["result"] is None
 assert process.wait(timeout=5) == 0
 

@@ -34,6 +34,8 @@ public:
 	godot::Array diagnostics(const godot::String &uri) const;
 	godot::Dictionary resolve_type(const godot::String &uri, int line, int utf16_column,
 		const godot::String &expression = {}) const;
+	godot::Dictionary resolve_expression(const godot::String &uri, int line, int utf16_column,
+		const godot::String &expression = {}) const;
 
 	void _finish_open(const godot::String &error);
 

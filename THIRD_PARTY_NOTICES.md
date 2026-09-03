@@ -9,6 +9,10 @@ table is a clean C++ adaptation of `Variant::can_convert_strict` from
 `core/variant/variant.cpp`, as used by `modules/gdscript/gdscript_analyzer.cpp`.
 The reserved identifier table and context-specific declaration errors follow
 Godot 4.6's `GDScriptLanguage::get_reserved_words()` and GDScript parser.
+The `invalid-type` distinction and compatible message forms for value constants
+and qualified non-type members follow Godot 4.6.3's
+`modules/gdscript/gdscript_analyzer.cpp`; the implementation here is an
+independent adaptation over this project's symbol model.
 No Godot parser or analyzer source file is compiled into this project.
 
 Godot Engine is available under the MIT license:

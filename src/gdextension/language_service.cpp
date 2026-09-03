@@ -67,6 +67,33 @@ Dictionary type_dict(const ResolvedType &type) {
 	return result;
 }
 
+Dictionary origin_dict(const SymbolOrigin &origin) {
+	Dictionary result;
+	result["symbolId"] = to_godot(origin.symbol_id);
+	result["uri"] = to_godot(origin.uri);
+	result["ownerId"] = to_godot(origin.owner_id);
+	result["name"] = to_godot(origin.name);
+	result["kind"] = static_cast<int64_t>(origin.kind);
+	result["range"] = range_dict(origin.range);
+	return result;
+}
+
+Dictionary expression_dict(const ResolvedExpression &expression) {
+	Dictionary result;
+	result["type"] = type_dict(expression.type);
+	result["origin"] = expression.origin ? Variant(origin_dict(*expression.origin)) : Variant();
+	Array paths;
+	for (const auto &path : expression.access_paths) {
+		Dictionary value;
+		value["text"] = to_godot(path.text);
+		value["kind"] = to_godot(access_path_kind_name(path.kind));
+		value["preferred"] = path.preferred;
+		paths.push_back(value);
+	}
+	result["accessPaths"] = paths;
+	return result;
+}
+
 Dictionary diagnostic_dict(const Diagnostic &diagnostic) {
 	Dictionary result;
 	result["code"] = to_godot(diagnostic.code);
@@ -125,6 +152,14 @@ Dictionary completion_dict(const CompletionResult &completion) {
 		value["insertText"] = to_godot(item.insert_text);
 		value["filterText"] = to_godot(item.filter_text);
 		value["sortText"] = to_godot(item.sort_text);
+		Dictionary extension;
+		extension["symbolId"] = to_godot(item.symbol_id);
+		extension["originId"] = to_godot(item.origin_id);
+		extension["provider"] = to_godot(item.provider);
+		extension["accessKind"] = to_godot(item.access_kind);
+		Dictionary data;
+		data["gdscriptLsp"] = extension;
+		value["data"] = data;
 		items.push_back(value);
 	}
 	result["isIncomplete"] = completion.is_incomplete;
@@ -167,6 +202,8 @@ void GDScriptLanguageService::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("diagnostics", "uri"), &GDScriptLanguageService::diagnostics);
 	ClassDB::bind_method(D_METHOD("resolve_type", "uri", "line", "utf16_column", "expression"),
 		&GDScriptLanguageService::resolve_type, DEFVAL(String()));
+	ClassDB::bind_method(D_METHOD("resolve_expression", "uri", "line", "utf16_column", "expression"),
+		&GDScriptLanguageService::resolve_expression, DEFVAL(String()));
 	ClassDB::bind_method(D_METHOD("_finish_open", "error"), &GDScriptLanguageService::_finish_open);
 	ADD_SIGNAL(MethodInfo("workspace_ready"));
 	ADD_SIGNAL(MethodInfo("workspace_error", PropertyInfo(Variant::STRING, "message")));
@@ -339,6 +376,13 @@ Dictionary GDScriptLanguageService::resolve_type(const String &uri, int line, in
 		const String &expression) const {
 	if (!ready_) return type_dict(ResolvedType::unknown("indexing"));
 	return type_dict(workspace_->resolve_type(service_uri(*workspace_, uri),
+		{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)}, to_std(expression)));
+}
+
+Dictionary GDScriptLanguageService::resolve_expression(const String &uri, int line, int utf16_column,
+		const String &expression) const {
+	if (!ready_) return expression_dict({ResolvedType::unknown("indexing"), std::nullopt, {}});
+	return expression_dict(workspace_->resolve_expression(service_uri(*workspace_, uri),
 		{static_cast<uint32_t>(line), static_cast<uint32_t>(utf16_column)}, to_std(expression)));
 }
 

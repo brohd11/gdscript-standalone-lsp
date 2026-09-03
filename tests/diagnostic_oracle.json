@@ -12,6 +12,16 @@
       "lsp_code": "unknown-type"
     },
     {
+      "script": "oracle/invalid_constant_type.gd",
+      "godot_pattern": "TextValue.* is a constant but does not contain a type",
+      "lsp_code": "invalid-type"
+    },
+    {
+      "script": "oracle/invalid_member_type.gd",
+      "godot_pattern": "Member .*TextValue.* under base .*Values.* is not a valid type",
+      "lsp_code": "invalid-type"
+    },
+    {
       "script": "oracle/type_mismatch.gd",
       "godot_pattern": "Cannot assign a value of type .*int",
       "lsp_code": "type-mismatch"

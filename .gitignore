@@ -17,3 +17,4 @@ __pycache__/
 /addons/zyx_popup_wrapper/
 
 /tests_plugin/
+/test.gd

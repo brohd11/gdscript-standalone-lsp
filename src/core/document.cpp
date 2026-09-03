@@ -125,6 +125,10 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	auto name_node = field(node, "name");
 	symbol.name = trim(node_text(name_node, source));
 	symbol.id = owner_id + "::" + symbol.name;
+	if (local) {
+		auto start = syntax_position(source, ts_node_start_byte(name_node), ts_node_start_point(name_node));
+		symbol.id += "@" + std::to_string(start.line) + ":" + std::to_string(start.character);
+	}
 	symbol.qualified_name = symbol.id;
 	symbol.uri = uri;
 	symbol.kind = node_type(node) == "const_statement" ? SymbolKind::Constant : SymbolKind::Variable;
@@ -151,7 +155,9 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 			auto left = field(child, "left");
 			Symbol local;
 			local.name = trim(node_text(left, source));
-			local.id = function.id + "::" + local.name;
+			auto start = syntax_position(source, ts_node_start_byte(left), ts_node_start_point(left));
+			local.id = function.id + "::" + local.name + "@" + std::to_string(start.line) + ":" +
+				std::to_string(start.character);
 			local.qualified_name = local.id;
 			local.uri = function.uri;
 			local.kind = SymbolKind::Variable;
@@ -176,7 +182,9 @@ Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view so
 	auto identifier = first_descendant(node, "identifier");
 	if (ts_node_is_null(identifier)) identifier = first_descendant(node, "name");
 	result.name = trim(node_text(identifier, source));
-	result.id = function.id + "::" + result.name;
+	auto start = syntax_position(source, ts_node_start_byte(identifier), ts_node_start_point(identifier));
+	result.id = function.id + "::" + result.name + "@" + std::to_string(start.line) + ":" +
+		std::to_string(start.character);
 	result.qualified_name = result.id;
 	result.uri = function.uri;
 	result.kind = SymbolKind::Variable;

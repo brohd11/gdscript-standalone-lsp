@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -50,7 +51,10 @@ public:
 	std::optional<HoverResult> hover(const std::string &uri, Position position) const;
 	std::vector<Location> definition(const std::string &uri, Position position) const;
 	std::vector<Symbol> document_symbols(const std::string &uri) const;
+	ResolvedExpression resolve_expression(const std::string &uri, Position position,
+		std::string expression = {}) const;
 	ResolvedType resolve_type(const std::string &uri, Position position, std::string expression = {}) const;
+	std::optional<CompletionItem> resolve_completion_item(std::string_view symbol_id) const;
 	std::vector<Diagnostic> diagnostics(const std::string &uri) const;
 	std::vector<std::string> document_uris() const;
 	// Returns the changed documents and every document whose semantic view can
@@ -80,6 +84,9 @@ private:
 	std::unordered_map<std::string, std::string> uid_paths_;
 	std::unordered_map<std::string, size_t> global_name_counts_;
 	std::unordered_map<std::string, std::string> symbol_owners_;
+	std::unordered_map<std::string, const Symbol *> symbols_;
+	mutable std::mutex access_path_cache_mutex_;
+	mutable std::unordered_map<std::string, std::vector<AccessPath>> access_path_cache_;
 	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> document_dependencies_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> reverse_document_dependencies_;
@@ -103,6 +110,9 @@ private:
 	ResolvedType resolve_static_symbol(const Symbol &symbol, std::unordered_set<std::string> &stack) const;
 	std::string native_base(const ClassRecord &record) const;
 	ResolvedType type_from_name(std::string name, const ClassRecord *context) const;
+	std::optional<std::string> invalid_type_message(std::string_view name, const ClassRecord *context) const;
+	std::optional<SymbolOrigin> symbol_origin(std::string_view id) const;
+	std::vector<AccessPath> access_paths_for_type(const ResolvedType &type, const ClassRecord *context) const;
 	ResolvedType type_for_resource_path(std::string resource_path, const ClassRecord *context) const;
 	ResolvedType type_of_symbol(const Symbol &symbol, const Document &document, Position position,
 		std::vector<std::string> &stack) const;

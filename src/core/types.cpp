@@ -47,4 +47,14 @@ std::string_view type_kind_name(TypeKind kind) {
 	return "unknown";
 }
 
+std::string_view access_path_kind_name(AccessPathKind kind) {
+	switch (kind) {
+		case AccessPathKind::ScriptAlias: return "scriptAlias";
+		case AccessPathKind::Local: return "local";
+		case AccessPathKind::Global: return "global";
+		case AccessPathKind::Native: return "native";
+	}
+	return "local";
+}
+
 } // namespace gdscript_lsp

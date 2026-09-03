@@ -55,6 +55,11 @@ struct ResolvedType {
 	TypeKind kind = TypeKind::Unknown;
 	std::string name;
 	std::string symbol_id;
+	// The declaration which produced this value. This is intentionally separate
+	// from symbol_id: symbol_id identifies the value's type (or an enum/callable
+	// identity), while declaration_id identifies the member/local/native API item
+	// rich completion providers should inspect.
+	std::string declaration_id;
 	bool instance = true;
 	std::vector<ResolvedType> arguments;
 	// Semantic metadata used while evaluating expressions. It is deliberately
@@ -70,6 +75,35 @@ struct ResolvedType {
 	bool known() const { return kind != TypeKind::Unknown; }
 	std::string display() const;
 	static ResolvedType unknown(std::string reason = {});
+};
+
+struct SymbolOrigin {
+	std::string symbol_id;
+	std::string uri;
+	std::string owner_id;
+	std::string name;
+	SymbolKind kind = SymbolKind::Variable;
+	Range range;
+	bool valid = false;
+};
+
+enum class AccessPathKind : uint8_t {
+	ScriptAlias,
+	Local,
+	Global,
+	Native,
+};
+
+struct AccessPath {
+	std::string text;
+	AccessPathKind kind = AccessPathKind::Local;
+	bool preferred = false;
+};
+
+struct ResolvedExpression {
+	ResolvedType type;
+	std::optional<SymbolOrigin> origin;
+	std::vector<AccessPath> access_paths;
 };
 
 struct Symbol {
@@ -113,6 +147,10 @@ struct CompletionItem {
 	std::string insert_text;
 	std::string filter_text;
 	std::string sort_text;
+	std::string symbol_id;
+	std::string origin_id;
+	std::string provider;
+	std::string access_kind;
 };
 
 enum class CompletionDisposition : uint8_t {
@@ -178,5 +216,6 @@ struct ParseIssue {
 };
 
 std::string_view type_kind_name(TypeKind kind);
+std::string_view access_path_kind_name(AccessPathKind kind);
 
 } // namespace gdscript_lsp

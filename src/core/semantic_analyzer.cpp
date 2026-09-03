@@ -300,20 +300,25 @@ private:
 		} else if (receiver.type.kind == TypeKind::Enum) {
 			if (receiver.type.symbol_id.starts_with("global:") && workspace.native_api_.global_enum_has_value(
 					receiver.type.symbol_id.substr(7), name)) {
-				return {{TypeKind::Builtin, "int"}, {}, true, false};
+				return {receiver.type, {}, true, false};
 			}
 			if (receiver.type.symbol_id.starts_with("nativeenum:")) {
 				auto qualified = receiver.type.symbol_id.substr(11);
 				auto separator = qualified.rfind('.');
 				if (separator != std::string::npos && workspace.native_api_.enum_has_value(
 						qualified.substr(0, separator), qualified.substr(separator + 1), name)) {
-					return {{TypeKind::Builtin, "int"}, {}, true, false};
+					return {receiver.type, {}, true, false};
 				}
 			}
 			for (const auto &[id, record] : workspace.classes_) {
 				(void)id;
 				for (const auto &member : record->members) if (member.id == receiver.type.symbol_id) {
-					for (const auto &value : member.children) if (value.name == name) return symbol_value(value, range.start);
+					for (const auto &value : member.children) if (value.name == name) {
+						auto result = symbol_value(value, range.start);
+						result.type = receiver.type;
+						result.type.declaration_id = value.id;
+						return result;
+					}
 				}
 			}
 			if (auto *member = workspace.native_api_.find_member("Dictionary", name)) return native_member_value(*member);
@@ -620,8 +625,13 @@ private:
 			} else if (auto *type_node = field(parameter, "type"); type_node && !inferred_annotation(text(document, *type_node))) {
 				type = workspace.type_from_name(text(document, *type_node), current_class);
 				if (!type.known()) {
-					add("unknown-type", "Could not find type \"" + text(document, *type_node) + "\" in the current scope.",
-						type_node->range);
+					auto declared = text(document, *type_node);
+					if (auto message = workspace.invalid_type_message(declared, current_class)) {
+						add("invalid-type", *message, type_node->range);
+					} else {
+						add("unknown-type", "Could not find type \"" + declared + "\" in the current scope.",
+							type_node->range);
+					}
 					type = {TypeKind::Variant, "Variant"};
 				}
 			}
