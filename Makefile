@@ -18,7 +18,8 @@ LDFLAGS += -pthread
 CORE_CPP := $(wildcard src/core/*.cpp)
 CORE_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP))
 TS_OBJ := $(BUILD_DIR)/vendor/tree_sitter.o $(BUILD_DIR)/vendor/gdscript_parser.o $(BUILD_DIR)/vendor/gdscript_scanner.o
-DEPFILES := $(CORE_OBJ:.o=.d) $(BUILD_DIR)/lsp/main.d $(BUILD_DIR)/tests/core_tests.d \
+LSP_OBJ := $(BUILD_DIR)/lsp/main.o $(BUILD_DIR)/lsp/tcp_adapter.o
+DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 	$(BUILD_DIR)/tests/caret_context_tests.d $(BUILD_DIR)/tests/completion_provider_tests.d \
 	$(BUILD_DIR)/tests/incremental_update_tests.d $(BUILD_DIR)/tools/dump_tree.d
 
@@ -30,7 +31,7 @@ all: $(BUILD_DIR)/gdscript-lsp
 deps:
 	@tools/fetch_dependencies.sh "$(DEPS_DIR)"
 
-$(BUILD_DIR)/gdscript-lsp: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/lsp/main.o
+$(BUILD_DIR)/gdscript-lsp: $(CORE_OBJ) $(TS_OBJ) $(LSP_OBJ)
 	$(CXX) $^ $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/core-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/core_tests.o

@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1108,5 +1109,143 @@ with tempfile.TemporaryDirectory() as empty_root:
     server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
     server.stdin.flush()
     assert server.wait(timeout=5) == 1
+
+
+def connect_tcp(port):
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=0.2)
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
+def read_response(stream, request_id):
+    while True:
+        message = read_packet(stream)
+        if message.get("id") == request_id:
+            return message
+
+
+def stop_tcp_session(stream, request_id):
+    stream.write(packet({"jsonrpc": "2.0", "id": request_id, "method": "shutdown", "params": {}}))
+    stream.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
+    stream.flush()
+    response = read_response(stream, request_id)
+    assert response["result"] is None
+
+
+# The optional TCP supervisor bridges Godot Tools' socket transport to an
+# otherwise unchanged stdio session and remains available for reconnects.
+with socket.socket() as port_probe:
+    port_probe.bind(("127.0.0.1", 0))
+    tcp_port = port_probe.getsockname()[1]
+
+tcp_server = subprocess.Popen(
+    [str(binary), "--tcp", str(tcp_port), "--api", str(root / "extension_api.json")],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+try:
+    with connect_tcp(tcp_port) as client:
+        stream = client.makefile("rwb", buffering=0)
+        stream.write(
+            packet({"jsonrpc": "2.0", "id": 201, "method": "initialize", "params": {"rootUri": root.as_uri()}})
+        )
+        assert read_response(stream, 201)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+        source = (root / "consumer.gd").read_text()
+        stream.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "gdscript",
+                            "version": 1,
+                            "text": source,
+                        }
+                    },
+                }
+            )
+        )
+        stream.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": {"uri": uri, "version": 2},
+                        "contentChanges": [{"text": source + "\n"}],
+                    },
+                }
+            )
+        )
+        stream.write(
+            packet(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 202,
+                    "method": "textDocument/completion",
+                    "params": {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 7}},
+                }
+            )
+        )
+        stream.flush()
+        tcp_completion = read_response(stream, 202)
+        assert "own" in {item["filterText"] for item in tcp_completion["result"]["items"]}
+        stop_tcp_session(stream, 203)
+        stream.close()
+
+    assert tcp_server.poll() is None
+    with connect_tcp(tcp_port) as client:
+        stream = client.makefile("rwb", buffering=0)
+        stream.write(
+            packet({"jsonrpc": "2.0", "id": 204, "method": "initialize", "params": {"rootUri": root.as_uri()}})
+        )
+        assert read_response(stream, 204)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+        stop_tcp_session(stream, 205)
+        stream.close()
+
+    # Stopping the supervisor also stops a currently connected session.
+    with connect_tcp(tcp_port) as client:
+        stream = client.makefile("rwb", buffering=0)
+        stream.write(
+            packet({"jsonrpc": "2.0", "id": 206, "method": "initialize", "params": {"rootUri": root.as_uri()}})
+        )
+        assert read_response(stream, 206)["result"]["serverInfo"]["name"] == "gdscript-lsp"
+        tcp_server.terminate()
+        assert tcp_server.wait(timeout=5) == 0
+        client.settimeout(5)
+        assert client.recv(1) == b""
+        stream.close()
+finally:
+    if tcp_server.poll() is None:
+        tcp_server.terminate()
+        assert tcp_server.wait(timeout=5) == 0
+
+for invalid_port in ("0", "65536", "not-a-port"):
+    invalid = subprocess.run(
+        [str(binary), "--tcp", invalid_port], capture_output=True, timeout=5, check=False
+    )
+    assert invalid.returncode == 2
+    assert b"invalid TCP port" in invalid.stderr
+
+missing_port = subprocess.run([str(binary), "--tcp"], capture_output=True, timeout=5, check=False)
+assert missing_port.returncode == 2
+assert b"--tcp requires one port" in missing_port.stderr
+
+with socket.socket() as occupied:
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen()
+    occupied_port = occupied.getsockname()[1]
+    conflict = subprocess.run(
+        [str(binary), "--tcp", str(occupied_port)], capture_output=True, timeout=5, check=False
+    )
+    assert conflict.returncode == 1
+    assert b"could not bind" in conflict.stderr
 
 print("lsp smoke test passed")

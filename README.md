@@ -10,6 +10,28 @@ build/gdscript-lsp
 
 The server communicates over standard input/output using LSP 3.17. An editor should launch it without project arguments; the server selects and indexes the Godot project from `workspaceFolders` or `rootUri` during the standard `initialize` request. `--project /path/to/project` remains available for fixed-root integrations. One server process serves one Godot project.
 
+### VS Code Godot Tools TCP adapter
+
+The Godot Tools extension for VS Code expects the language server to listen on a TCP port. On Linux, the optional TCP adapter exposes the same standalone server on the IPv4 loopback interface:
+
+```sh
+build/gdscript-lsp --tcp 6010
+```
+
+The adapter stays running and starts a fresh, isolated LSP session for each connection. Standard input/output remains the default transport. Port `6010` is recommended to avoid Godot's usual editor, LSP, DAP, debugger, and legacy Godot Tools ports; another available port can be used if needed.
+
+Disable Godot Tools' headless LSP mode and point it at the adapter in VS Code's `settings.json`:
+
+```json
+{
+  "godotTools.lsp.headless": false,
+  "godotTools.lsp.serverHost": "127.0.0.1",
+  "godotTools.lsp.serverPort": 6010
+}
+```
+
+Start the adapter before opening VS Code, or use the extension's retry action after starting it. A Godot editor can still run separately for debugging and other editor-backed features; leave its own LSP server on a different port. The adapter only exposes the capabilities advertised by this standalone server. `--project` and `--api` may be combined with `--tcp` as usual.
+
 It implements incremental document synchronization, completion, completion-item resolve, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType`, `gdscript/resolveExpression`, and `gdscript/documentSymbols` requests.
 
 Standard document symbols include best-known types in `detail` and expose each physical inner class exactly once as a separate outline root. `gdscript/documentSymbols` accepts standard document-symbol parameters and returns `{ version, symbols }`; its cached symbol tree adds declaration IDs, owners, resolved types, return types, origins, and semantic flags. The GDExtension `document_symbols()` method exposes the same rich fields.
@@ -94,7 +116,7 @@ The bridge indexes asynchronously and falls through while it is not ready. It sy
 ## Architecture
 
 - `src/core`: engine-neutral C++20 parser, symbol graph, inheritance resolver, type inference, and query API.
-- `src/lsp`: LSP 3.17 JSON-RPC transport over stdin/stdout.
+- `src/lsp`: LSP 3.17 JSON-RPC over stdin/stdout, with an optional Linux loopback TCP adapter.
 - `src/gdextension`: thin godot-cpp wrapper over the same `Workspace` API.
 - `addons/gdscript_lsp/data`: reduced Godot 4.6 native class baseline.
 

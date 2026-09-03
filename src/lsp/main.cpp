@@ -1,11 +1,13 @@
 #include "core/text.hpp"
 #include "core/uri.hpp"
 #include "core/workspace.hpp"
+#include "lsp/tcp_adapter.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
@@ -606,15 +608,31 @@ void apply_configuration(Workspace &workspace, DiagnosticPublisher &publisher, c
 int main(int argc, char **argv) {
 	std::filesystem::path project;
 	std::filesystem::path configured_api;
+	std::optional<uint16_t> tcp_port;
 	for (int index = 1; index < argc; ++index) {
 		std::string argument = argv[index];
 		if (argument == "--project" && index + 1 < argc) project = argv[++index];
 		else if (argument == "--api" && index + 1 < argc) configured_api = argv[++index];
+		else if (argument == "--tcp") {
+			if (tcp_port || index + 1 >= argc) {
+				std::cerr << "gdscript-lsp: --tcp requires one port\n";
+				return 2;
+			}
+			std::string_view value = argv[++index];
+			uint32_t parsed = 0;
+			auto [end, error_code] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+			if (error_code != std::errc() || end != value.data() + value.size() || parsed == 0 || parsed > 65535) {
+				std::cerr << "gdscript-lsp: invalid TCP port: " << value << '\n';
+				return 2;
+			}
+			tcp_port = static_cast<uint16_t>(parsed);
+		}
 		else if (argument == "--version") {
 			std::cout << "gdscript-lsp 0.1.0 (Godot 4.6)\n";
 			return 0;
 		}
 	}
+	if (tcp_port) return run_tcp_adapter(*tcp_port, argc, argv);
 	Workspace workspace;
 	DiagnosticPublisher diagnostics(workspace);
 	std::string error;
