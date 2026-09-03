@@ -182,6 +182,7 @@ ResolvedType iterable_value_type(const ResolvedType &type) {
 struct ExpectedValue {
 	ResolvedType type;
 	std::string access;
+	AccessProvenance provenance;
 };
 
 bool callable_kind(SymbolKind kind) {
@@ -1467,27 +1468,127 @@ std::optional<SymbolOrigin> Workspace::symbol_origin(std::string_view id) const 
 	return std::nullopt;
 }
 
+std::string Workspace::expression_type_access(std::string expression, const ResolvedType &type,
+		const Document &document, const ClassRecord *context, Position position, size_t depth) const {
+	if (depth >= 8) return {};
+	expression = trim(expression);
+	if (expression.empty()) return {};
+	auto same_type = [&](const ResolvedType &candidate) {
+		return candidate.kind == type.kind && candidate.symbol_id == type.symbol_id &&
+			(!candidate.symbol_id.empty() || candidate.name == type.name);
+	};
+	// Static enum values resolve to their enum type too. Prefer the enclosing
+	// enum access (`State`) over the value expression (`State.IDLE`).
+	if (type.kind == TypeKind::Enum) {
+		auto candidate = expression;
+		for (size_t attempts = 0; attempts < 16; ++attempts) {
+			auto separator = candidate.rfind('.');
+			if (separator == std::string::npos) break;
+			candidate = trim(candidate.substr(0, separator));
+			if (same_type(type_from_name(candidate, context))) return candidate;
+		}
+	}
+	if (same_type(type_from_name(expression, context))) return expression;
+
+	auto identifier = expression.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") ==
+		std::string::npos;
+	if (identifier) {
+		if (auto *symbol = resolve_identifier(document, context, expression, position)) {
+			auto owner = symbol_owners_.find(symbol->id);
+			auto *declaration_context = owner == symbol_owners_.end() ? context : find_class(owner->second);
+			if (!symbol->declared_type.empty() && same_type(type_from_name(symbol->declared_type, declaration_context))) {
+				return symbol->declared_type;
+			}
+			if (!symbol->initializer.empty()) {
+				return expression_type_access(symbol->initializer, type, document, context, position, depth + 1);
+			}
+		}
+	}
+
+	// Constructors spell the instance type immediately before `.new`. Enum
+	// values similarly spell their enum type before the final member.
+	if (auto new_at = expression.find(".new("); new_at != std::string::npos) {
+		auto candidate = trim(expression.substr(0, new_at));
+		if (same_type(type_from_name(candidate, context))) return candidate;
+	}
+	auto candidate = expression;
+	for (size_t attempts = 0; attempts < 16; ++attempts) {
+		auto separator = candidate.rfind('.');
+		if (separator == std::string::npos) break;
+		candidate = trim(candidate.substr(0, separator));
+		if (same_type(type_from_name(candidate, context))) return candidate;
+	}
+	return {};
+}
+
+AccessProvenance Workspace::access_provenance(std::string expression, const ResolvedType &type,
+		const Document &document, const ClassRecord *context, Position position, size_t depth) const {
+	AccessProvenance result;
+	if (depth >= 8 || !type.known()) return result;
+	expression = trim(expression);
+	auto identifier = expression.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") ==
+		std::string::npos;
+	const Symbol *source_symbol = identifier ? resolve_identifier(document, context, expression, position) : nullptr;
+	if (source_symbol) {
+		auto owner = symbol_owners_.find(source_symbol->id);
+		result.declaration_context_id = owner == symbol_owners_.end() ? std::string{} : owner->second;
+		if (!source_symbol->declared_type.empty()) result.declaration_access = source_symbol->declared_type;
+		if (result.declaration_access.empty() && !source_symbol->initializer.empty()) {
+			result.declaration_access = expression_type_access(source_symbol->initializer, type,
+				document, context, position, depth + 1);
+			expression = source_symbol->initializer;
+		}
+	} else {
+		result.declaration_access = expression_type_access(expression, type, document, context, position, depth + 1);
+	}
+
+	// If the value came from a call, retain the callable's declaration spelling
+	// and translate it through the receiver spelling available to this caller.
+	auto call_open = expression.rfind('(');
+	if (call_open != std::string::npos) {
+		auto callee_text = trim(expression.substr(0, call_open));
+		std::vector<std::string> stack;
+		auto callable = infer_expression(callee_text, document, context, position, stack);
+		if (auto found = symbols_.find(callable.symbol_id); found != symbols_.end() &&
+				callable_kind(found->second->kind) && !found->second->declared_type.empty()) {
+			auto owner = symbol_owners_.find(found->second->id);
+			result.declaration_context_id = owner == symbol_owners_.end() ? std::string{} : owner->second;
+			result.declaration_access = found->second->declared_type;
+			if (auto member = trailing_member(callee_text)) {
+				std::vector<std::string> receiver_stack;
+				auto receiver_type = infer_expression(member->first, document, context, position, receiver_stack);
+				result.receiver_access = expression_type_access(member->first, receiver_type,
+					document, context, position, depth + 1);
+			}
+		}
+	}
+	return result;
+}
+
 std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &type,
-		const ClassRecord *context) const {
+		const ClassRecord *context, const AccessProvenance &provenance) const {
 	auto cache_key = (context ? context->symbol.id : std::string{}) + "\n" +
-		std::to_string(static_cast<int>(type.kind)) + "\n" + type.name + "\n" + type.symbol_id;
+		std::to_string(static_cast<int>(type.kind)) + "\n" + type.name + "\n" + type.symbol_id + "\n" +
+		provenance.declaration_access + "\n" + provenance.declaration_context_id + "\n" + provenance.receiver_access;
 	{
 		std::lock_guard cache_lock(access_path_cache_mutex_);
 		if (auto found = access_path_cache_.find(cache_key); found != access_path_cache_.end()) return found->second;
 	}
 	std::vector<AccessPath> paths;
 	std::set<std::string> seen;
+	std::set<AccessPathKind> filled_kinds;
 	auto same_type = [&](const ResolvedType &candidate) {
 		return candidate.kind == type.kind && candidate.symbol_id == type.symbol_id &&
 			(!candidate.symbol_id.empty() || candidate.name == type.name);
 	};
 	auto add = [&](std::string text, AccessPathKind kind, bool verify = true) {
-		if (text.empty() || !seen.insert(text).second) return;
+		if (text.empty() || filled_kinds.contains(kind) || !seen.insert(text).second) return;
 		if (verify && context && !same_type(type_from_name(text, context))) {
 			seen.erase(text);
 			return;
 		}
 		paths.push_back({std::move(text), kind, false});
+		filled_kinds.insert(kind);
 	};
 	if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
 		add(type.name, AccessPathKind::Native, false);
@@ -1501,8 +1602,11 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 	} else if (type.kind == TypeKind::Enum && type.symbol_id.starts_with("global:")) {
 		add(type.symbol_id.substr(7), AccessPathKind::Global, false);
 	} else if ((type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum) && context) {
-		std::string owner = type.kind == TypeKind::Enum ? type.symbol_id.substr(0, type.symbol_id.rfind("::")) : type.symbol_id;
-		std::string terminal = type.kind == TypeKind::Enum ? type.symbol_id.substr(type.symbol_id.rfind("::") + 2) : std::string{};
+		auto enum_separator = type.symbol_id.rfind("::");
+		std::string owner = type.kind == TypeKind::Enum && enum_separator != std::string::npos ?
+			type.symbol_id.substr(0, enum_separator) : type.symbol_id;
+		std::string terminal = type.kind == TypeKind::Enum && enum_separator != std::string::npos ?
+			type.symbol_id.substr(enum_separator + 2) : std::string{};
 		auto suffix_from = [&](std::string_view prefix) -> std::string {
 			if (owner == prefix) return terminal;
 			if (owner.starts_with(std::string(prefix) + ".")) {
@@ -1521,49 +1625,8 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 			}
 			return {};
 		};
-		// Namespace scripts frequently expose another preloaded namespace through
-		// constants, so the target is not necessarily a lexical inner class of the
-		// visible root. Memoize target-specific suffixes to avoid revisiting a shared
-		// namespace graph once for every possible path into it.
-		std::unordered_map<std::string, std::vector<std::string>> graph_suffix_cache;
-		std::function<std::vector<std::string>(const ResolvedType &,
-			std::unordered_set<std::string> &, size_t)> graph_suffixes;
-		graph_suffixes = [&](const ResolvedType &reached, std::unordered_set<std::string> &visiting,
-				size_t depth) -> std::vector<std::string> {
-			if (same_type(reached)) return {""};
-			if (depth >= 16 || reached.kind != TypeKind::ScriptClass || reached.symbol_id.empty()) return {};
-			if (auto cached = graph_suffix_cache.find(reached.symbol_id); cached != graph_suffix_cache.end()) {
-				return cached->second;
-			}
-			if (!visiting.insert(reached.symbol_id).second) return {};
-			std::vector<std::string> result;
-			if (auto *record = find_class(reached.symbol_id)) {
-				for (const auto &member : record->members) {
-					if (result.size() >= 32) break;
-					if (!(member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum ||
-							member.kind == SymbolKind::Class || member.is_static)) continue;
-					std::unordered_set<std::string> stack;
-					auto next = resolve_static_symbol(member, stack);
-					if (!next.known()) continue;
-					for (auto &suffix : graph_suffixes(next, visiting, depth + 1)) {
-						result.push_back(member.name + (suffix.empty() ? std::string{} : "." + suffix));
-						if (result.size() >= 32) break;
-					}
-				}
-			}
-			visiting.erase(reached.symbol_id);
-			graph_suffix_cache[reached.symbol_id] = result;
-			return result;
-		};
-		auto add_graph_paths = [&](const ResolvedType &reached, const std::string &prefix, AccessPathKind kind) {
-			std::unordered_set<std::string> visiting;
-			for (const auto &suffix : graph_suffixes(reached, visiting, 0)) {
-				add(prefix + (suffix.empty() ? std::string{} : "." + suffix), kind);
-			}
-		};
-
 		// Constants/classes visible from this scope are the most useful spelling:
-		// preload aliases first, then ordinary local/inherited names.
+		// retain one preload alias and one ordinary local spelling at most.
 		std::vector<const Symbol *> visible = all_members(*context, MemberAccess::Type);
 		for (auto *scope = enclosing_class(*context); scope; scope = enclosing_class(*scope)) {
 			for (const auto &member : scope->members) if (member.kind == SymbolKind::Constant ||
@@ -1584,11 +1647,25 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 					if (!suffix.empty()) add(member->name + "." + suffix,
 						aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
 				}
-				add_graph_paths(reached, member->name,
-					aliases ? AccessPathKind::ScriptAlias : AccessPathKind::Local);
 			}
 		};
 		add_visible(true);
+
+		// The spelling at the declaration site is authoritative. Translate a
+		// relative spelling through the receiver used by the caller, then verify the
+		// complete candidate resolves back to this exact symbol.
+		auto candidate_kind = [&](std::string_view candidate) {
+			auto separator = candidate.find('.');
+			auto root = std::string(candidate.substr(0, separator));
+			return global_classes_.contains(root) ? AccessPathKind::Global : AccessPathKind::Local;
+		};
+		if (!provenance.declaration_access.empty()) {
+			add(provenance.declaration_access, candidate_kind(provenance.declaration_access));
+			if (!provenance.receiver_access.empty()) {
+				add(provenance.receiver_access + "." + provenance.declaration_access,
+					candidate_kind(provenance.receiver_access));
+			}
+		}
 		add_visible(false);
 
 		// Relative spelling inside the declaring script/class.
@@ -1600,11 +1677,17 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 		}
 		if (!terminal.empty()) add(terminal, AccessPathKind::Local);
 
-		for (const auto &[global, class_id] : global_classes_) {
-			auto suffix = suffix_from_reachable_class(class_id);
-			if (owner == class_id && terminal.empty()) add(global, AccessPathKind::Global);
-			else if (!suffix.empty()) add(global + "." + suffix, AccessPathKind::Global);
-			add_graph_paths({TypeKind::ScriptClass, global, class_id, false}, global, AccessPathKind::Global);
+		// A canonical global exists only when the target is lexically declared in
+		// that global class's script. Do not manufacture aliases through every
+		// global subclass or namespace graph.
+		auto canonical_script_end = owner.find(".gd");
+		if (canonical_script_end != std::string::npos) {
+			auto root_id = owner.substr(0, canonical_script_end + 3);
+			if (auto *root_record = find_class(root_id); root_record && !root_record->global_name.empty()) {
+				auto suffix = suffix_from(root_id);
+				if (owner == root_id && terminal.empty()) add(root_record->global_name, AccessPathKind::Global);
+				else if (!suffix.empty()) add(root_record->global_name + "." + suffix, AccessPathKind::Global);
+			}
 		}
 	}
 	if (!paths.empty()) paths.front().preferred = true;
@@ -1621,13 +1704,15 @@ ResolvedExpression Workspace::resolve_expression(const std::string &uri, Positio
 	auto *document = find_document(uri);
 	if (!document) return {ResolvedType::unknown("document not indexed"), std::nullopt, {}};
 	if (expression.empty()) expression = identifier_at(document->source(), position);
+	auto source_expression = expression;
 	std::vector<std::string> stack;
 	auto *context = document->class_at(position);
 	auto type = infer_expression(std::move(expression), *document, context, position, stack);
 	auto origin_id = type.declaration_id;
 	if (origin_id.empty() && (type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum ||
 			type.kind == TypeKind::NativeClass)) origin_id = type.symbol_id;
-	return {type, symbol_origin(origin_id), access_paths_for_type(type, context)};
+	auto provenance = access_provenance(source_expression, type, *document, context, position);
+	return {type, symbol_origin(origin_id), access_paths_for_type(type, context, provenance)};
 }
 
 std::optional<CompletionItem> Workspace::resolve_completion_item(std::string_view symbol_id) const {
@@ -1851,6 +1936,18 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	auto callable_argument = [&](const CaretCallContext &active) -> std::optional<ExpectedValue> {
 		auto callable = infer(active.callee);
 		std::string declared;
+		auto expected_from_declaration = [&](ResolvedType type, const ClassRecord *declaration_context,
+				std::string access) -> std::optional<ExpectedValue> {
+			if (!type.known()) return std::nullopt;
+			AccessProvenance provenance{access,
+				declaration_context ? declaration_context->symbol.id : std::string{}, {}};
+			if (auto member = trailing_member(active.callee)) {
+				auto receiver_type = infer(member->first);
+				provenance.receiver_access = expression_type_access(member->first, receiver_type,
+					*document, context, position);
+			}
+			return ExpectedValue{std::move(type), std::move(access), std::move(provenance)};
+		};
 		if (callable.symbol_id.ends_with("::new")) {
 			auto owner_id = callable.symbol_id.substr(0, callable.symbol_id.size() - 5);
 			if (owner_id.starts_with("native:")) {
@@ -1873,7 +1970,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 					}
 					if (!declared.empty()) {
 						auto type = type_from_name(declared, record);
-						return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), declared}) : std::nullopt;
+						return expected_from_declaration(std::move(type), record, declared);
 					}
 				}
 			}
@@ -1906,12 +2003,12 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 				auto owner = symbol_owners_.find(symbol->id);
 				auto *declaration_context = owner == symbol_owners_.end() ? context : find_class(owner->second);
 				auto type = type_from_name(declared, declaration_context);
-				return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), declared}) : std::nullopt;
+				return expected_from_declaration(std::move(type), declaration_context, declared);
 			}
 		}
 		if (declared.empty()) return std::nullopt;
 		auto type = type_from_name(declared, context);
-		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{std::move(type), normalize_api_type(declared)}) : std::nullopt;
+		return expected_from_declaration(std::move(type), context, normalize_api_type(declared));
 	};
 	auto assignment_expected = [&]() -> std::optional<ExpectedValue> {
 		if (site.assignment_left.empty()) return std::nullopt;
@@ -1920,11 +2017,13 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			if (!site.declared_type.empty()) {
 				auto declared = site.declared_type;
 				auto type = type_from_name(declared, context);
-				if (type.known()) return ExpectedValue{std::move(type), std::move(declared)};
+				if (type.known()) return ExpectedValue{type, declared,
+					AccessProvenance{declared, context ? context->symbol.id : std::string{}, {}}};
 			}
 		}
 		auto type = infer(lhs);
-		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name,
+			access_provenance(lhs, type, *document, context, position)}) : std::nullopt;
 	};
 	auto comparison_expected = [&]() -> std::optional<ExpectedValue> {
 		if (!site.operation) return std::nullopt;
@@ -1932,12 +2031,14 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		if (operation != "==" && operation != "!=" && operation != "<" && operation != "<=" &&
 				operation != ">" && operation != ">=") return std::nullopt;
 		auto type = infer(site.operation->left_expression);
-		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name,
+			access_provenance(site.operation->left_expression, type, *document, context, position)}) : std::nullopt;
 	};
 	auto match_expected = [&]() -> std::optional<ExpectedValue> {
 		if (site.match_expression.empty()) return std::nullopt;
 		auto type = infer(site.match_expression);
-		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name}) : std::nullopt;
+		return type.known() ? std::optional<ExpectedValue>(ExpectedValue{type, type.name,
+			access_provenance(site.match_expression, type, *document, context, position)}) : std::nullopt;
 	};
 	auto expected = !in_type_hint && call ? callable_argument(*call) : std::nullopt;
 	if (!expected) expected = assignment_expected();
@@ -1956,7 +2057,8 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 				 (current_type.symbol_id.empty() || sibling_type.symbol_id.empty() ||
 				  current_type.symbol_id == sibling_type.symbol_id));
 			if (aligned && sibling_type.known() && sibling_type.kind != TypeKind::Variant) {
-				expected = ExpectedValue{sibling_type, sibling_type.name};
+				expected = ExpectedValue{sibling_type, sibling_type.name,
+					access_provenance(sibling, sibling_type, *document, context, position)};
 			}
 		}
 	}
@@ -2085,7 +2187,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 
 	if (completion_config_.enums && expected && expected->type.kind == TypeKind::Enum) {
 		std::vector<std::string> values;
-		std::vector<AccessPath> accesses = access_paths_for_type(expected->type, context);
+		std::vector<AccessPath> accesses = access_paths_for_type(expected->type, context, expected->provenance);
 		if (expected->type.symbol_id.starts_with("global:")) {
 			values = native_api_.global_enum_values(expected->type.symbol_id.substr(7));
 			accesses = {{"", AccessPathKind::Global, true}};
@@ -2186,7 +2288,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 				return !signature.arguments.empty() || signature.is_vararg;
 			});
 		}
-		auto paths = access_paths_for_type(expected->type, context);
+		auto paths = access_paths_for_type(expected->type, context, expected->provenance);
 		auto access = !paths.empty() ? paths.front().text :
 			(expected->access.empty() ? expected->type.name : expected->access);
 		CompletionItem item;
@@ -2395,14 +2497,12 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 					return;
 				}
 			};
-			inspect_symbol(member);
-			for (const auto &local : member.children) inspect_symbol(local);
+			if (!member.malformed) inspect_symbol(member);
+			for (const auto &local : member.children) if (!local.malformed) inspect_symbol(local);
 		}
 	}
-	if (document->syntax_errors().empty()) {
-		auto semantic = SemanticAnalyzer::run(*this, *document);
-		result.insert(result.end(), std::make_move_iterator(semantic.begin()), std::make_move_iterator(semantic.end()));
-	}
+	auto semantic = SemanticAnalyzer::run(*this, *document);
+	result.insert(result.end(), std::make_move_iterator(semantic.begin()), std::make_move_iterator(semantic.end()));
 	std::sort(result.begin(), result.end(), [](const Diagnostic &a, const Diagnostic &b) {
 		if (a.range.start != b.range.start) return a.range.start < b.range.start;
 		return a.code < b.code;

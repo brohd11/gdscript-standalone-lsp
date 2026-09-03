@@ -754,6 +754,7 @@ private:
 	void analyze_statement(const SyntaxNode &node, const ResolvedType &expected_return) {
 		if (node.kind == "variable_statement" || node.kind == "const_statement" ||
 			node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
+			if (node.has_error) return;
 			Value initializer;
 			if (auto *value = field(node, "value")) initializer = evaluate(*value);
 			check_declared_assignment(node, initializer);
@@ -761,10 +762,12 @@ private:
 			return;
 		}
 		if (node.kind == "expression_statement") {
+			if (node.has_error) return;
 			for (const auto &child : node.children) evaluate(child);
 			return;
 		}
 		if (node.kind == "return_statement") {
+			if (node.has_error) return;
 			const SyntaxNode *value_node = node.children.empty() ? nullptr : &node.children.front();
 			if (!expected_return.known()) { if (value_node) evaluate(*value_node); return; }
 			if (expected_return.kind == TypeKind::Void && value_node) {
@@ -871,6 +874,7 @@ private:
 				if (auto *body = field(node, "body")) analyze_class_container(*body);
 			} else if (node.kind == "variable_statement" || node.kind == "const_statement" ||
 				node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
+				if (node.has_error) continue;
 				auto *saved = current_class;
 				current_class = document.class_at(node.range.start);
 				Value initializer;

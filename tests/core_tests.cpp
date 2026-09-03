@@ -89,6 +89,42 @@ int main() {
 		auto leading_completion = leading_newline_workspace.completion(leading_uri, {5, 2});
 		expect(has_item(leading_completion, "class_obj"),
 			"scope completion terminates and retains locals when byte zero is a newline");
+
+		const std::string missing_type_source =
+			"extends RefCounted\n\nfunc inspect() -> void:\n"
+			"\tvar test_var:\n\t# recovery must stop here\n\tvar n = Missing.Type.VALUE\n\tmissing_after\n";
+		expect(leading_newline_workspace.update_document(leading_uri, missing_type_source, 42, &error),
+			"incomplete type overlay accepted");
+		auto missing_type_diagnostics = leading_newline_workspace.diagnostics(leading_uri);
+		expect(std::any_of(missing_type_diagnostics.begin(), missing_type_diagnostics.end(), [](const Diagnostic &item) {
+			return item.code == "syntax-error" && item.message == R"(Expected type after ":".)";
+		}), "an incomplete type is diagnosed at its declaration boundary");
+		expect(diagnostic_count(missing_type_diagnostics, "syntax-error") == 1,
+			"an incomplete type produces one quarantined parser diagnostic");
+		expect(std::none_of(missing_type_diagnostics.begin(), missing_type_diagnostics.end(), [](const Diagnostic &item) {
+			return item.code == "unknown-type" && item.message.find("recovery must stop here") != std::string::npos;
+		}), "a recovered type cannot absorb following comments or declarations");
+		expect(std::any_of(missing_type_diagnostics.begin(), missing_type_diagnostics.end(), [](const Diagnostic &item) {
+			return item.code == "undefined-identifier" && item.message.find("missing_after") != std::string::npos;
+		}), "semantic diagnostics continue after a malformed declaration");
+
+		const std::string missing_value_source =
+			"extends RefCounted\n\nfunc inspect() -> void:\n\tvar test_var =\n\tmissing_after\n";
+		expect(leading_newline_workspace.update_document(leading_uri, missing_value_source, 43, &error),
+			"incomplete initializer overlay accepted");
+		auto missing_value_diagnostics = leading_newline_workspace.diagnostics(leading_uri);
+		expect(std::any_of(missing_value_diagnostics.begin(), missing_value_diagnostics.end(), [](const Diagnostic &item) {
+			return item.code == "syntax-error" && item.message == R"(Expected expression after "=".)";
+		}), "an incomplete initializer is diagnosed without borrowing the next line");
+		expect(diagnostic_count(missing_value_diagnostics, "syntax-error") == 1,
+			"an incomplete initializer produces one quarantined parser diagnostic");
+
+		const std::string multiline_value_source =
+			"extends RefCounted\n\nfunc inspect() -> void:\n\tvar values := [\n\t\t1,\n\t]\n";
+		expect(leading_newline_workspace.update_document(leading_uri, multiline_value_source, 44, &error),
+			"grouped multiline initializer overlay accepted");
+		expect(leading_newline_workspace.diagnostics(leading_uri).empty(),
+			"balanced multiline initializers remain valid declarations");
 	}
 	auto completion = workspace.completion(consumer_uri, {6, 7});
 	expect(has_item(completion, "own"), "completion includes direct script member");
@@ -259,8 +295,8 @@ int main() {
 	expect(inherited_enum_completion.disposition == CompletionDisposition::Replace &&
 		has_item(inherited_enum_completion.items, "Derived.State.IDLE") &&
 		has_item(inherited_enum_completion.items, "ProvenanceBase.State.IDLE") &&
-		has_item(inherited_enum_completion.items, "ProvenanceDerived.State.IDLE"),
-		"inherited enum completion exposes preload and global access paths");
+		!has_item(inherited_enum_completion.items, "ProvenanceDerived.State.IDLE"),
+		"inherited enum completion exposes the preload alias and declaring global without guessed subclass globals");
 	expect(!inherited_enum_completion.items.empty() &&
 		inherited_enum_completion.items.front().filter_text == "Derived.State.IDLE" &&
 		inherited_enum_completion.items.front().access_kind == "scriptAlias",
@@ -349,8 +385,9 @@ int main() {
 	auto constructor_enum = probe(
 		"\tContextRoot.Utils.Profile.TimeFunction.new(\"\", TF.USEC)\n", "new(\"\", ");
 	expect(has_item(constructor_enum.items, "TF.MSEC") &&
-		has_item(constructor_enum.items, "ContextRoot.Utils.Profile.TimeFunction.TimeScale.MSEC"),
-		"constructor arguments retain declaring-script type context and all caller access paths");
+		has_item(constructor_enum.items, "ContextRoot.Utils.Profile.TimeFunction.TimeScale.MSEC") &&
+		!has_item(constructor_enum.items, "ContextDecoy.Utils.Profile.TimeFunction.TimeScale.MSEC"),
+		"constructor arguments retain declared caller paths without graph-derived global aliases");
 	auto constructor_callable = caret_workspace.resolve_expression(caret_uri, {12, 2},
 		"ContextRoot.Utils.Profile.TimeFunction.new");
 	expect(constructor_callable.origin && constructor_callable.origin->name == "_init" &&
@@ -360,7 +397,9 @@ int main() {
 	expect(!resolved_tf.access_paths.empty() && resolved_tf.access_paths.front().text == "TF" &&
 		std::any_of(resolved_tf.access_paths.begin(), resolved_tf.access_paths.end(), [](const AccessPath &path) {
 			return path.text == "ContextRoot.Utils.Profile.TimeFunction.TimeScale";
-		}), "rich type resolution returns alias and nested global namespace paths");
+		}) && std::none_of(resolved_tf.access_paths.begin(), resolved_tf.access_paths.end(), [](const AccessPath &path) {
+			return path.text.starts_with("ContextDecoy.");
+		}), "rich type resolution returns declared aliases without unrelated global namespace paths");
 	auto invalid_constructor_source = caret_prelude +
 		"\tContextRoot.Utils.Profile.TimeFunction.new(\"\", \"not a scale\")\n";
 	expect(caret_workspace.update_document(caret_uri, invalid_constructor_source, ++caret_version, &error),

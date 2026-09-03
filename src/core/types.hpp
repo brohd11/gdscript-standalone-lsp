@@ -100,6 +100,12 @@ struct AccessPath {
 	bool preferred = false;
 };
 
+struct AccessProvenance {
+	std::string declaration_access;
+	std::string declaration_context_id;
+	std::string receiver_access;
+};
+
 struct ResolvedExpression {
 	ResolvedType type;
 	std::optional<SymbolOrigin> origin;
@@ -124,6 +130,7 @@ struct Symbol {
 	bool is_variadic = false;
 	bool is_inferred = false;
 	bool is_iteration_variable = false;
+	bool malformed = false;
 	std::vector<Symbol> children;
 };
 
@@ -136,6 +143,7 @@ struct SyntaxNode {
 	Range range;
 	uint32_t start_byte = 0;
 	uint32_t end_byte = 0;
+	bool has_error = false;
 	std::vector<SyntaxNode> children;
 };
 

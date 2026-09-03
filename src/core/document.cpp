@@ -76,6 +76,7 @@ SyntaxNode syntax_node(TSNode node, std::string_view source, std::string_view fi
 	result.range = syntax_range(node, source);
 	result.start_byte = ts_node_start_byte(node);
 	result.end_byte = ts_node_end_byte(node);
+	result.has_error = ts_node_has_error(node);
 	for (uint32_t index = 0; index < ts_node_child_count(node); ++index) {
 		auto child = ts_node_child(node, index);
 		if (!ts_node_is_named(child)) continue;
@@ -119,6 +120,144 @@ std::string extends_text(TSNode node, std::string_view source) {
 	return raw;
 }
 
+struct DeclarationScan {
+	size_t end = 0;
+	size_t code_end = 0;
+	std::optional<size_t> colon;
+	std::optional<size_t> assignment;
+	bool missing_type = false;
+	bool missing_value = false;
+	bool recovered_type = false;
+	bool recovered_value = false;
+
+	bool malformed() const {
+		return missing_type || missing_value || recovered_type || recovered_value;
+	}
+};
+
+// Tree-sitter intentionally recovers an incomplete declaration by borrowing a
+// node from a later line. Symbols and diagnostics must not accept that recovered
+// extent as part of the declaration. A newline is a hard boundary unless it is
+// inside a string/group or explicitly continued.
+DeclarationScan scan_declaration(TSNode node, std::string_view source) {
+	DeclarationScan result;
+	auto start = std::min(static_cast<size_t>(ts_node_start_byte(node)), source.size());
+	auto limit = std::min(source.size(), start + 64 * 1024);
+	result.end = limit;
+	result.code_end = limit;
+	int grouping = 0;
+	char quote = 0;
+	bool triple = false;
+	bool escaped = false;
+	bool comment = false;
+	size_t last_non_space = start;
+	for (size_t index = start; index < limit; ++index) {
+		auto character = source[index];
+		if (comment) {
+			if (character != '\n') continue;
+			comment = false;
+			if (grouping == 0) {
+				result.end = index;
+				break;
+			}
+			continue;
+		}
+		if (quote) {
+			if (triple) {
+				if (character == quote && index + 2 < limit && source[index + 1] == quote &&
+						source[index + 2] == quote) {
+					quote = 0;
+					triple = false;
+					index += 2;
+				}
+				continue;
+			}
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') {
+			quote = character;
+			triple = index + 2 < limit && source[index + 1] == character && source[index + 2] == character;
+			if (triple) index += 2;
+			last_non_space = index;
+			continue;
+		}
+		if (character == '#') {
+			comment = true;
+			if (grouping == 0) result.code_end = std::min(result.code_end, index);
+			continue;
+		}
+		if (character == '(' || character == '[' || character == '{') ++grouping;
+		else if ((character == ')' || character == ']' || character == '}') && grouping > 0) --grouping;
+		if (character == '\n' || character == '\r') {
+			if (grouping == 0 && (last_non_space >= source.size() || source[last_non_space] != '\\')) {
+				result.end = index;
+				result.code_end = std::min(result.code_end, index);
+				break;
+			}
+			continue;
+		}
+		if (!std::isspace(static_cast<unsigned char>(character))) last_non_space = index;
+	}
+	result.code_end = std::min(result.code_end, result.end);
+
+	auto name = field(node, "name");
+	auto cursor = ts_node_is_null(name) ? start : static_cast<size_t>(ts_node_end_byte(name));
+	int depth = 0;
+	quote = 0;
+	escaped = false;
+	for (size_t index = cursor; index < result.code_end; ++index) {
+		auto character = source[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character == '\\') escaped = true;
+			else if (character == quote) quote = 0;
+			continue;
+		}
+		if (character == '\'' || character == '"') { quote = character; continue; }
+		if (character == '(' || character == '[' || character == '{') { ++depth; continue; }
+		if ((character == ')' || character == ']' || character == '}') && depth > 0) { --depth; continue; }
+		if (depth != 0) continue;
+		if (character == ':' && !result.colon && !result.assignment) {
+			result.colon = index;
+			if (index + 1 < result.code_end && source[index + 1] == '=') {
+				result.assignment = index + 1;
+				++index;
+			}
+		} else if (character == '=' && !result.assignment) {
+			result.assignment = index;
+			break;
+		}
+	}
+	auto has_non_space = [&](size_t begin, size_t end) {
+		for (auto index = begin; index < end; ++index) {
+			if (!std::isspace(static_cast<unsigned char>(source[index]))) return true;
+		}
+		return false;
+	};
+	if (result.colon && (!result.assignment || *result.assignment != *result.colon + 1)) {
+		auto type_end = result.assignment.value_or(result.code_end);
+		result.missing_type = !has_non_space(*result.colon + 1, type_end);
+		// An untyped property may use the colon solely to introduce get/set.
+		if (result.missing_type && !ts_node_is_null(field(node, "setget"))) result.missing_type = false;
+	}
+	if (result.assignment) result.missing_value = !has_non_space(*result.assignment + 1, result.code_end);
+	auto type_node = field(node, "type");
+	if (result.colon && (!result.assignment || *result.assignment != *result.colon + 1) && !ts_node_is_null(type_node)) {
+		result.recovered_type = ts_node_start_byte(type_node) >= result.end || ts_node_end_byte(type_node) > result.end;
+	}
+	auto value_node = field(node, "value");
+	if (result.assignment && !ts_node_is_null(value_node)) {
+		// Lambdas have a multiline body even though their value starts on the
+		// declaration line. Recovery is only suspect when the value itself starts
+		// beyond the lexical declaration boundary.
+		result.recovered_value = ts_node_start_byte(value_node) >= result.end;
+	}
+	return result;
+}
+
 Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &owner_id,
 		std::string_view source, bool local) {
 	Symbol symbol;
@@ -132,14 +271,17 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.qualified_name = symbol.id;
 	symbol.uri = uri;
 	symbol.kind = node_type(node) == "const_statement" ? SymbolKind::Constant : SymbolKind::Variable;
-	symbol.range = node_range(node, source);
+	auto declaration = scan_declaration(node, source);
+	symbol.range = declaration.malformed() ?
+		Range{node_range(node, source).start, byte_to_position(source, declaration.end)} : node_range(node, source);
 	symbol.selection_range = node_range(name_node, source);
-	symbol.declared_type = trim(node_text(field(node, "type"), source));
+	symbol.declared_type = declaration.recovered_type ? std::string{} : trim(node_text(field(node, "type"), source));
 	symbol.is_inferred = is_inferred_type(symbol.declared_type);
 	if (symbol.is_inferred) symbol.declared_type.clear();
-	symbol.initializer = trim(node_text(field(node, "value"), source));
+	symbol.initializer = declaration.recovered_value ? std::string{} : trim(node_text(field(node, "value"), source));
 	symbol.is_static = !ts_node_is_null(field(node, "static")) || has_named_child(node, "static_keyword");
 	symbol.is_local = local;
+	symbol.malformed = declaration.malformed() || ts_node_has_error(node);
 	symbol.detail = (symbol.kind == SymbolKind::Constant ? "const " : "var ") + symbol.name;
 	if (!symbol.declared_type.empty()) symbol.detail += ": " + symbol.declared_type;
 	return symbol;
@@ -150,7 +292,10 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source) {
 		auto child = ts_node_named_child(node, i);
 		auto type = node_type(child);
 		if (type == "variable_statement" || type == "const_statement") {
-			function.children.push_back(variable_symbol(child, function.uri, function.id, source, true));
+			auto local = variable_symbol(child, function.uri, function.id, source, true);
+			auto malformed = local.malformed;
+			function.children.push_back(std::move(local));
+			if (malformed) continue;
 		} else if (type == "for_statement") {
 			auto left = field(child, "left");
 			Symbol local;
@@ -248,6 +393,22 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 	}
 
 	auto type = node_type(node);
+	bool malformed_declaration = false;
+	if (type == "variable_statement" || type == "export_variable_statement" ||
+			type == "onready_variable_statement" || type == "const_statement") {
+		auto declaration = scan_declaration(node, source);
+		malformed_declaration = declaration.malformed();
+		if (declaration.missing_type || declaration.recovered_type) {
+			auto byte = declaration.colon.value_or(declaration.end);
+			add_parse_issue(errors, {byte_to_position(source, byte),
+				byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected type after ":".)");
+		}
+		if (declaration.missing_value || declaration.recovered_value) {
+			auto byte = declaration.assignment.value_or(declaration.end);
+			add_parse_issue(errors, {byte_to_position(source, byte),
+				byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected expression after "=".)");
+		}
+	}
 	TSNode name{};
 	std::string message;
 	if (type == "variable_statement" || type == "export_variable_statement" || type == "onready_variable_statement") {
@@ -292,6 +453,7 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 			add_parse_issue(errors, node_range(name, source), std::move(message));
 		}
 	}
+	if (malformed_declaration) return;
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		collect_errors(ts_node_named_child(node, i), source, errors);
 	}

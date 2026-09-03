@@ -113,7 +113,12 @@ private:
 	ResolvedType type_from_name(std::string name, const ClassRecord *context) const;
 	std::optional<std::string> invalid_type_message(std::string_view name, const ClassRecord *context) const;
 	std::optional<SymbolOrigin> symbol_origin(std::string_view id) const;
-	std::vector<AccessPath> access_paths_for_type(const ResolvedType &type, const ClassRecord *context) const;
+	std::vector<AccessPath> access_paths_for_type(const ResolvedType &type, const ClassRecord *context,
+		const AccessProvenance &provenance = {}) const;
+	AccessProvenance access_provenance(std::string expression, const ResolvedType &type,
+		const Document &document, const ClassRecord *context, Position position, size_t depth = 0) const;
+	std::string expression_type_access(std::string expression, const ResolvedType &type,
+		const Document &document, const ClassRecord *context, Position position, size_t depth = 0) const;
 	ResolvedType type_for_resource_path(std::string resource_path, const ClassRecord *context) const;
 	ResolvedType type_of_symbol(const Symbol &symbol, const Document &document, Position position,
 		std::vector<std::string> &stack) const;

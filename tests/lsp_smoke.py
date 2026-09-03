@@ -540,9 +540,94 @@ server.stdin.flush()
 member_completion = leading_message(lambda message: message.get("id") == 131)
 assert member_completion["result"]["isIncomplete"] is False
 
-server.stdin.write(packet({"jsonrpc": "2.0", "id": 132, "method": "shutdown", "params": {}}))
+recovered_type_source = (
+    "extends RefCounted\n\nfunc inspect() -> void:\n"
+    "\tvar class_obj: Dictionary = {}\n"
+    "\tvar test_var:\n\t# do not absorb this comment\n"
+    "\tvar n = Missing.Type.VALUE\n\tmissing_after\n"
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 5},
+                "contentChanges": [{"text": recovered_type_source}],
+            },
+        }
+    )
+)
 server.stdin.flush()
-shutdown = leading_message(lambda message: message.get("id") == 132)
+recovered_type_diagnostic = leading_message(
+    lambda message: message.get("method") == "textDocument/publishDiagnostics"
+    and message["params"]["uri"] == leading_uri
+    and message["params"].get("version") == 5
+)
+recovered_items = recovered_type_diagnostic["params"]["diagnostics"]
+assert any(item["code"] == "syntax-error" and item["message"] == 'Expected type after ":".' for item in recovered_items)
+assert not any(item["code"] == "unknown-type" and "do not absorb" in item["message"] for item in recovered_items)
+assert any(item["code"] == "undefined-identifier" and "missing_after" in item["message"] for item in recovered_items)
+
+recovered_value_source = (
+    "extends RefCounted\n\nfunc inspect() -> void:\n"
+    "\tvar class_obj: Dictionary = {}\n\tvar test_var =\n\tmissing_after\n"
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 6},
+                "contentChanges": [{"text": recovered_value_source}],
+            },
+        }
+    )
+)
+server.stdin.flush()
+recovered_value_diagnostic = leading_message(
+    lambda message: message.get("method") == "textDocument/publishDiagnostics"
+    and message["params"]["uri"] == leading_uri
+    and message["params"].get("version") == 6
+)
+assert any(
+    item["code"] == "syntax-error" and item["message"] == 'Expected expression after "=".'
+    for item in recovered_value_diagnostic["params"]["diagnostics"]
+)
+
+post_recovery_source = recovered_value_source.replace("\tvar test_var =\n", "\tvar test_var = {}\n").replace(
+    "\tmissing_after\n", "\tclass_obj.k\n"
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": leading_uri, "version": 7},
+                "contentChanges": [{"text": post_recovery_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 132,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": leading_uri}, "position": {"line": 5, "character": 12}},
+        }
+    )
+)
+server.stdin.flush()
+post_recovery_completion = leading_message(lambda message: message.get("id") == 132)
+assert "keys" in {item["filterText"] for item in post_recovery_completion["result"]["items"]}, post_recovery_completion
+
+server.stdin.write(packet({"jsonrpc": "2.0", "id": 133, "method": "shutdown", "params": {}}))
+server.stdin.flush()
+shutdown = leading_message(lambda message: message.get("id") == 133)
 assert shutdown["result"] is None
 server.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 server.stdin.flush()
