@@ -1129,7 +1129,9 @@ def connect_tcp(port):
     deadline = time.monotonic() + 5
     while True:
         try:
-            return socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            client = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            client.settimeout(5)
+            return client
         except OSError:
             if time.monotonic() >= deadline:
                 raise
@@ -1251,6 +1253,19 @@ try:
         tcp_initialize = read_response(stream, 201)["result"]
         assert tcp_initialize["serverInfo"]["name"] == "gdscript-lsp"
         assert " " in tcp_initialize["capabilities"]["completionProvider"]["triggerCharacters"]
+        # Exercise replies while the relay waits for the next request. Windows
+        # sockets without WSA_FLAG_OVERLAPPED stalled here for hundreds of ms
+        # per round trip (occasionally seconds), despite fast stdio handling.
+        started = time.perf_counter()
+        for request_id in range(300, 330):
+            stream.write(packet({
+                "jsonrpc": "2.0", "id": request_id,
+                "method": "textDocument/documentSymbol",
+                "params": {"textDocument": {"uri": uri}},
+            }))
+            assert "result" in read_response(stream, request_id)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 3.0, f"30 local TCP round trips took {elapsed:.2f}s"
         source = (root / "consumer.gd").read_text()
         stream.write(
             packet(
@@ -1335,7 +1350,10 @@ try:
         tcp_server.terminate()
         assert tcp_server.wait(timeout=5) == (1 if os.name == "nt" else 0)
         client.settimeout(5)
-        assert client.recv(1) == b""
+        try:
+            assert client.recv(1) == b""
+        except ConnectionResetError:
+            assert os.name == "nt"
         stream.close()
 finally:
     if tcp_server.poll() is None:

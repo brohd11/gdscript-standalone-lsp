@@ -149,9 +149,10 @@ bool write_pipe(HANDLE pipe, const char *data, DWORD size) {
 	return true;
 }
 
-bool send_socket(SOCKET socket, const char *data, int size) {
+bool send_socket(SOCKET socket, std::mutex &socket_mutex, const char *data, int size) {
 	int offset = 0;
 	while (offset < size) {
+		std::lock_guard lock(socket_mutex);
 		const auto sent = send(socket, data + offset, size - offset, 0);
 		if (sent == SOCKET_ERROR || sent == 0) return false;
 		offset += sent;
@@ -240,10 +241,34 @@ void run_session(SOCKET client, HANDLE job, const std::wstring &image, const std
 	close_handle(child_stdout_write);
 	close_handle(child_stderr);
 
-	std::thread input([client, pipe = parent_stdin_write] {
+	std::mutex socket_mutex;
+	std::thread output([client, pipe = parent_stdout_read, &socket_mutex] {
 		std::array<char, 16 * 1024> buffer {};
 		while (true) {
-			const auto received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
+			DWORD read = 0;
+			if (!ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) || read == 0) break;
+			if (!send_socket(client, socket_mutex, buffer.data(), static_cast<int>(read))) break;
+		}
+		CloseHandle(pipe);
+		shutdown(client, SD_BOTH);
+	});
+	parent_stdout_read = nullptr;
+
+	std::thread input([client, pipe = parent_stdin_write, &socket_mutex] {
+		std::array<char, 16 * 1024> buffer {};
+		while (true) {
+			fd_set read_set;
+			FD_ZERO(&read_set);
+			FD_SET(client, &read_set);
+			timeval timeout {0, 100000};
+			const auto ready = select(0, &read_set, nullptr, nullptr, &timeout);
+			if (ready == SOCKET_ERROR) break;
+			if (ready == 0) continue;
+			int received = 0;
+			{
+				std::lock_guard lock(socket_mutex);
+				received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
+			}
 			if (received <= 0 || !write_pipe(pipe, buffer.data(), static_cast<DWORD>(received))) break;
 		}
 		CloseHandle(pipe);
@@ -251,22 +276,10 @@ void run_session(SOCKET client, HANDLE job, const std::wstring &image, const std
 	});
 	parent_stdin_write = nullptr;
 
-	std::thread output([client, pipe = parent_stdout_read] {
-		std::array<char, 16 * 1024> buffer {};
-		while (true) {
-			DWORD read = 0;
-			if (!ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) || read == 0) break;
-			if (!send_socket(client, buffer.data(), static_cast<int>(read))) break;
-		}
-		CloseHandle(pipe);
-		shutdown(client, SD_BOTH);
-	});
-	parent_stdout_read = nullptr;
-
 	WaitForSingleObject(process.hProcess, INFINITE);
-	shutdown(client, SD_BOTH);
-	input.join();
+	shutdown(client, SD_RECEIVE);
 	output.join();
+	input.join();
 	finish();
 }
 
@@ -323,7 +336,10 @@ int run_tcp_adapter_windows(uint16_t port, int argc, char **argv) {
 		return 1;
 	}
 
-	const auto listener = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+	// Accepted sockets inherit this attribute. Without it, Windows serializes
+	// socket I/O and the input worker's wait can delay the output worker's send.
+	const auto listener = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+			WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
 	if (listener == INVALID_SOCKET) {
 		report_socket_error("could not create TCP listener");
 		SetConsoleCtrlHandler(handle_console_event, FALSE);
