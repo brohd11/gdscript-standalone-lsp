@@ -179,6 +179,12 @@ int main() {
 	auto unqualified_completion = workspace.completion(consumer_uri, {6, 6});
 	expect(item_index(unqualified_completion, "local") < item_index(unqualified_completion, "child"),
 		"visible locals rank ahead of current-class members");
+	auto *native_class_item = find_item(unqualified_completion, "RefCounted");
+	expect(native_class_item && native_class_item->kind == SymbolKind::Class &&
+		native_class_item->label == "RefCounted" && native_class_item->insert_text == "RefCounted" &&
+		native_class_item->symbol_id == "native:RefCounted" &&
+		native_class_item->origin_id == "native:RefCounted",
+		"global completion exposes native API classes with stable identities");
 	expect(static_cast<size_t>(std::count_if(completion.begin(), completion.end(), [](const CompletionItem &item) {
 		return item.filter_text == "shared_name";
 	})) == 1, "derived completion member suppresses the inherited member with the same name");

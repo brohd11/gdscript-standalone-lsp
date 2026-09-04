@@ -2090,6 +2090,19 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 				result.push_back(std::move(item));
 			}
 		}
+		std::vector<std::string> native_names;
+		native_names.reserve(native_api_.classes().size());
+		for (const auto &[name, record] : native_api_.classes()) {
+			(void)record;
+			native_names.push_back(name);
+		}
+		std::sort(native_names.begin(), native_names.end());
+		for (const auto &name : native_names) {
+			if (names.insert(name).second) {
+				result.push_back(completion_item(name, "class", {}, SymbolKind::Class,
+					false, "native:" + name));
+			}
+		}
 		for (const auto &function : gdscript_builtin_functions()) if (names.insert(std::string(function.name)).second) {
 			auto item = completion_item(std::string(function.name), "func", {}, SymbolKind::Method,
 				!function.signature.arguments.empty() || function.signature.is_vararg, "builtin:" + std::string(function.name));

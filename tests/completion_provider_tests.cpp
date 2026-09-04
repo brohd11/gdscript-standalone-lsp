@@ -162,6 +162,9 @@ void check_extended_types(Harness &harness) {
 		expect_result(result.disposition == CompletionDisposition::Augment && result.provider == "extendedTypeHints" &&
 			has_item(result, test.expected), "extended type completion handles " + std::string(test.name), result);
 	}
+	auto native = harness.probe(prelude + "var reference: <caret>\n");
+	expect_result(has_item(native, "RefCounted"),
+		"native API classes remain available in type-hint completion", native);
 
 	auto qualified = harness.probe(prelude + "var value: Product.<caret>\n");
 	expect(has_item(qualified, "Nested") && !has_item(qualified, "title"),

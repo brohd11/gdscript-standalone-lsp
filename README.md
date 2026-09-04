@@ -20,10 +20,7 @@ ctest --test-dir build-cmake -C Release --output-on-failure
 On Windows, run those commands from a Visual Studio developer shell (or let
 CMake select the installed Visual Studio generator). Running `cmake --install build-cmake --config Release --prefix dist`
 produces a self-contained layout with the executable and bundled Godot API
-metadata. The Windows GitHub Actions workflow verifies the MSVC build and
-publishes the same layout as `gdscript-lsp-windows-x64`; semantic GDScript tests
-remain a manual editor-console check because their full addon dependencies are
-not present in CI.
+metadata. Semantic GDScript addon tests remain a manual editor-console check.
 
 The server communicates over standard input/output using LSP 3.17. An editor should launch it without project arguments; the server selects and indexes the Godot project from `workspaceFolders` or `rootUri` during the standard `initialize` request. `--project /path/to/project` remains available for fixed-root integrations. One server process serves one Godot project.
 

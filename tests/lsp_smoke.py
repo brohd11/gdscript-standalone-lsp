@@ -91,6 +91,12 @@ requests = [
         "method": "textDocument/documentSymbol",
         "params": {"textDocument": {"uri": (root / "alias_namespace.gd").as_uri()}},
     },
+    {
+        "jsonrpc": "2.0",
+        "id": 70,
+        "method": "textDocument/completion",
+        "params": {"textDocument": {"uri": equivalent_uri}, "position": {"line": 6, "character": 6}},
+    },
 ]
 for request in requests:
     process.stdin.write(packet(request))
@@ -102,6 +108,7 @@ resolved = read_packet(process.stdout)
 standard_outline = read_packet(process.stdout)
 rich_outline = read_packet(process.stdout)
 namespace_outline = read_packet(process.stdout)
+global_completion = read_packet(process.stdout)
 assert initialize["result"]["capabilities"]["positionEncoding"] == "utf-16"
 completion_items = {item["filterText"]: item for item in completion["result"]["items"]}
 completion_order = [item["filterText"] for item in completion["result"]["items"]]
@@ -115,6 +122,10 @@ assert completion_order.index("own") < completion_order.index("CHILD_CONSTANT") 
 assert completion_order.index("count") < completion_order.index("BASE_CONSTANT") < completion_order.index("reference_method")
 sort_ranks = [item["sortText"] for item in completion["result"]["items"]]
 assert sort_ranks == sorted(sort_ranks) and len(sort_ranks) == len(set(sort_ranks))
+global_items = {item["filterText"]: item for item in global_completion["result"]["items"]}
+assert global_items["RefCounted"]["kind"] == 5
+assert global_items["RefCounted"]["insertText"] == "RefCounted"
+assert global_items["RefCounted"]["data"]["gdscriptLsp"]["symbolId"] == "native:RefCounted"
 assert resolved["result"]["kind"] == "script_class"
 assert resolved["result"]["name"] == "ChildThing"
 standard_items = list(flatten_symbols(standard_outline["result"]))
