@@ -528,6 +528,20 @@ int main() {
 	expect(encoded_uri.find("gdscript%20lsp") != std::string::npos, "file URI percent-encodes spaces");
 	expect(path_for_file_uri(encoded_uri) == std::filesystem::absolute(encoded_path).lexically_normal(),
 		"file URI round trips to a path");
+	expect(canonical_file_uri("file:///c%3a/Users/Dev/My%20Game/main%2Egd").value_or("") ==
+#ifdef _WIN32
+		"file:///C:/Users/Dev/My%20Game/main.gd",
+#else
+		"file:///c:/Users/Dev/My%20Game/main.gd",
+#endif
+		"Windows file URIs normalize drive case and equivalent percent encoding");
+	expect(canonical_file_uri("file:///C:/Users/Dev/My%20Game/main.gd").value_or("") ==
+		"file:///C:/Users/Dev/My%20Game/main.gd", "canonical Windows file URIs remain stable");
+	expect(canonical_file_uri("file://localhost/tmp/project%2Egodot").value_or("") ==
+		"file:///tmp/project.godot", "localhost file URIs normalize to the local form");
+	expect(!canonical_file_uri("file://remote-host/tmp/project.godot"),
+		"remote file URI authorities cannot be canonicalized as local files");
+	expect(!canonical_file_uri("file:///tmp/bad%2"), "malformed file URIs cannot be canonicalized");
 	expect(path_for_file_uri("file://localhost/tmp/project.godot") == std::filesystem::path("/tmp/project.godot"),
 		"localhost file URI is accepted");
 	expect(!path_for_file_uri("file://remote-host/tmp/project.godot"), "remote file URI authority is rejected");

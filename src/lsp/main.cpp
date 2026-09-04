@@ -177,6 +177,10 @@ void send(const json &message) {
 	std::cout << "Content-Length: " << body.size() << "\r\n\r\n" << body << std::flush;
 }
 
+std::string canonical_document_uri(std::string uri) {
+	return canonical_file_uri(uri).value_or(std::move(uri));
+}
+
 class DiagnosticPublisher {
 public:
 	explicit DiagnosticPublisher(Workspace &workspace) : workspace_(workspace), worker_([this](std::stop_token stop) {
@@ -224,10 +228,15 @@ public:
 		condition_.notify_all();
 	}
 
-	void set_open(const std::string &uri, bool open) {
+	void set_open(const std::string &uri, bool open, const std::string &client_uri = {}) {
 		std::lock_guard lock(mutex_);
-		if (open) open_.insert(uri);
-		else open_.erase(uri);
+		if (open) {
+			open_.insert(uri);
+			client_uris_[uri] = client_uri.empty() ? uri : client_uri;
+		} else {
+			open_.erase(uri);
+			client_uris_.erase(uri);
+		}
 	}
 
 	void set_poll_interval(std::chrono::milliseconds interval) {
@@ -342,6 +351,7 @@ private:
 		auto cache_key = items.dump();
 
 		bool should_send = false;
+		std::string published_uri = uri;
 		{
 			std::lock_guard lock(mutex_);
 			if (stopping_ || stop.stop_requested()) return false;
@@ -350,12 +360,15 @@ private:
 				return false;
 			}
 			auto previous = published_.find(uri);
-			if (previous != published_.end() && previous->second == cache_key) return true;
+			if (!force && previous != published_.end() && previous->second == cache_key) return true;
 			should_send = force || !items.empty() || previous != published_.end();
 			if (should_send) published_[uri] = std::move(cache_key);
+			if (auto preferred = client_uris_.find(uri); preferred != client_uris_.end()) {
+				published_uri = preferred->second;
+			}
 		}
 		if (!should_send) return true;
-		json params = {{"uri", uri}, {"diagnostics", std::move(items)}};
+		json params = {{"uri", published_uri}, {"diagnostics", std::move(items)}};
 		if (version >= 0) params["version"] = version;
 		send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", std::move(params)}});
 		return true;
@@ -408,6 +421,7 @@ private:
 	std::unordered_set<std::string> dirty_;
 	std::unordered_set<std::string> background_;
 	std::unordered_set<std::string> open_;
+	std::unordered_map<std::string, std::string> client_uris_;
 	std::unordered_map<std::string, std::string> published_;
 	std::unordered_map<std::string, FileStamp> stamps_;
 	uint64_t generation_ = 0;
@@ -720,10 +734,11 @@ int main(int argc, char **argv) {
 			respond(id, nullptr);
 		} else if (method == "textDocument/didOpen") {
 			auto document = params["textDocument"];
-			auto uri = document.value("uri", "");
+			auto client_uri = document.value("uri", "");
+			auto uri = canonical_document_uri(client_uri);
 			auto text = document.value("text", "");
 			buffers[uri] = text;
-			diagnostics.set_open(uri, true);
+			diagnostics.set_open(uri, true, client_uri);
 			auto generation = diagnostics.begin_update();
 			UpdateImpact impact;
 			if (workspace.update_document(uri, std::move(text), document.value("version", -1), &error, &impact)) {
@@ -731,7 +746,7 @@ int main(int argc, char **argv) {
 			} else diagnostics.set_open(uri, false);
 		} else if (method == "textDocument/didChange") {
 			auto document = params["textDocument"];
-			auto uri = document.value("uri", "");
+			auto uri = canonical_document_uri(document.value("uri", ""));
 			if (!buffers.contains(uri)) buffers[uri] = "";
 			apply_content_changes(buffers[uri], params.value("contentChanges", json::array()));
 			auto generation = diagnostics.begin_update();
@@ -740,7 +755,7 @@ int main(int argc, char **argv) {
 				diagnostics.finish_update(generation, {uri}, impact.affected_documents);
 			}
 		} else if (method == "textDocument/didClose") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			buffers.erase(uri);
 			diagnostics.set_open(uri, false);
 			auto generation = diagnostics.begin_update();
@@ -755,7 +770,7 @@ int main(int argc, char **argv) {
 			auto generation = diagnostics.begin_update();
 			std::vector<std::string> changed;
 			for (const auto &change : params.value("changes", json::array())) {
-				auto uri = change.value("uri", "");
+				auto uri = canonical_document_uri(change.value("uri", ""));
 				if (!buffers.contains(uri)) changed.push_back(uri);
 			}
 			auto affected = workspace.affected_documents(changed);
@@ -763,7 +778,7 @@ int main(int argc, char **argv) {
 			affected = merge_uris(std::move(affected), workspace.affected_documents(changed));
 			diagnostics.finish_update(generation, {}, affected);
 		} else if (method == "textDocument/completion") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto position = parse_position(params["position"]);
 			auto buffer = buffers.find(uri);
 			if (is_space_completion_trigger(params) && (!space_prefix || buffer == buffers.end() ||
@@ -791,38 +806,38 @@ int main(int argc, char **argv) {
 			}
 			respond(id, std::move(item));
 		} else if (method == "textDocument/hover") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto hover = workspace.hover(uri, parse_position(params["position"]));
 			if (!hover) respond(id, nullptr);
 			else respond(id, {{"contents", {{"kind", "markdown"}, {"value", hover->markdown}}}, {"range", range_json(hover->range)}});
 		} else if (method == "textDocument/definition") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto locations = workspace.definition(uri, parse_position(params["position"]));
 			json output = json::array();
 			for (const auto &location : locations) output.push_back({{"uri", location.uri}, {"range", range_json(location.range)}});
 			respond(id, std::move(output));
 		} else if (method == "textDocument/documentSymbol") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			json output = json::array();
 			for (const auto &symbol : workspace.document_symbols(uri)) output.push_back(symbol_json(symbol));
 			respond(id, std::move(output));
 		} else if (method == "gdscript/documentSymbols") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto outline = workspace.document_outline(uri);
 			json symbols = json::array();
 			for (const auto &symbol : outline.symbols) symbols.push_back(outline_symbol_json(symbol));
 			respond(id, {{"version", outline.version}, {"symbols", std::move(symbols)}});
 		} else if (method == "gdscript/resolveType") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto type = workspace.resolve_type(uri, parse_position(params["position"]), params.value("expression", ""));
 			respond(id, type_json(type));
 		} else if (method == "gdscript/resolveExpression") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto expression = workspace.resolve_expression(uri, parse_position(params["position"]),
 				params.value("expression", ""));
 			respond(id, expression_json(expression));
 		} else if (method == "textDocument/diagnostic" || method == "gdscript/diagnostics") {
-			auto uri = params["textDocument"].value("uri", "");
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			json items = json::array();
 			for (const auto &diagnostic : workspace.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
 			respond(id, {{"kind", "full"}, {"items", std::move(items)}});

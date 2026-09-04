@@ -37,7 +37,8 @@ std::string percent_encode(std::string_view input) {
 	constexpr char hex[] = "0123456789ABCDEF";
 	std::string result;
 	for (unsigned char value : input) {
-		if (std::isalnum(value) || value == '/' || value == '-' || value == '_' || value == '.' || value == '~' ||
+		if ((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+			(value >= '0' && value <= '9') || value == '/' || value == '-' || value == '_' || value == '.' || value == '~' ||
 			value == ':') {
 			result.push_back(static_cast<char>(value));
 		} else {
@@ -49,29 +50,53 @@ std::string percent_encode(std::string_view input) {
 	return result;
 }
 
-} // namespace
-
-std::string file_uri_for_path(const std::filesystem::path &path) {
-	auto value = std::filesystem::absolute(path).lexically_normal().generic_string();
-#ifdef _WIN32
-	if (value.size() >= 2 && std::isalpha(static_cast<unsigned char>(value[0])) && value[1] == ':') value.insert(0, "/");
-#endif
-	return "file://" + percent_encode(value);
-}
-
-std::optional<std::filesystem::path> path_for_file_uri(std::string_view uri) {
+std::optional<std::string> decoded_local_file_uri(std::string_view uri) {
 	if (!uri.starts_with("file://")) return std::nullopt;
 	auto value = uri.substr(7);
 	if (!value.starts_with('/')) {
 		auto slash = value.find('/');
-		if (slash == std::string_view::npos) return std::nullopt;
-		auto authority = value.substr(0, slash);
-		if (authority != "localhost") return std::nullopt;
+		if (slash == std::string_view::npos || value.substr(0, slash) != "localhost") return std::nullopt;
 		value.remove_prefix(slash);
 	}
-	auto decoded = percent_decode(value);
+	return percent_decode(value);
+}
+
+#ifdef _WIN32
+void canonicalize_windows_drive(std::string &path) {
+	if (path.size() >= 3 && path[0] == '/' && std::isalpha(static_cast<unsigned char>(path[1])) && path[2] == ':') {
+		path[1] = static_cast<char>(std::toupper(static_cast<unsigned char>(path[1])));
+	}
+}
+#endif
+
+} // namespace
+
+std::optional<std::string> canonical_file_uri(std::string_view uri) {
+	auto decoded = decoded_local_file_uri(uri);
 	if (!decoded) return std::nullopt;
 #ifdef _WIN32
+	canonicalize_windows_drive(*decoded);
+#endif
+	return "file://" + percent_encode(*decoded);
+}
+
+std::string file_uri_for_path(const std::filesystem::path &path) {
+	auto value = std::filesystem::absolute(path).lexically_normal().generic_string();
+#ifdef _WIN32
+	if (value.size() >= 2 && std::isalpha(static_cast<unsigned char>(value[0])) && value[1] == ':') {
+		value[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(value[0])));
+		value.insert(0, "/");
+	}
+#endif
+	auto uri = "file://" + percent_encode(value);
+	return canonical_file_uri(uri).value_or(std::move(uri));
+}
+
+std::optional<std::filesystem::path> path_for_file_uri(std::string_view uri) {
+	auto decoded = decoded_local_file_uri(uri);
+	if (!decoded) return std::nullopt;
+#ifdef _WIN32
+	canonicalize_windows_drive(*decoded);
 	if (decoded->size() >= 3 && (*decoded)[0] == '/' && std::isalpha(static_cast<unsigned char>((*decoded)[1])) &&
 		(*decoded)[2] == ':') {
 		decoded->erase(0, 1);

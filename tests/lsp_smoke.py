@@ -38,6 +38,7 @@ def flatten_symbols(symbols):
 binary = pathlib.Path(sys.argv[1]).resolve()
 root = pathlib.Path("tests/fixtures/basic").resolve()
 uri = (root / "consumer.gd").as_uri()
+equivalent_uri = uri.replace("consumer.gd", "consumer%2Egd")
 outside_root = pathlib.Path(tempfile.gettempdir())
 process = subprocess.Popen(
     [str(binary), "--api", str(root / "extension_api.json")],
@@ -60,7 +61,7 @@ requests = [
         "jsonrpc": "2.0",
         "id": 2,
         "method": "textDocument/completion",
-        "params": {"textDocument": {"uri": uri}, "position": {"line": 6, "character": 7}},
+        "params": {"textDocument": {"uri": equivalent_uri}, "position": {"line": 6, "character": 7}},
     },
     {
         "jsonrpc": "2.0",
@@ -76,7 +77,7 @@ requests = [
         "jsonrpc": "2.0",
         "id": 4,
         "method": "textDocument/documentSymbol",
-        "params": {"textDocument": {"uri": uri}},
+        "params": {"textDocument": {"uri": equivalent_uri}},
     },
     {
         "jsonrpc": "2.0",
@@ -449,7 +450,7 @@ server, response = initialize_server(
     args=("--api", root / "extension_api.json"),
 )
 assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
-leading_uri = (root / "consumer.gd").as_uri()
+leading_uri = (root / "consumer.gd").as_uri().replace("consumer.gd", "consumer%2Egd")
 leading_source = (
     "\nextends RefCounted\n\nfunc inspect() -> void:\n"
     "\tvar class_obj: Dictionary = {}\n\tvar class = 1\n"

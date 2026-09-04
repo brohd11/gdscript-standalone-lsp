@@ -20,7 +20,8 @@ std::string service_uri(const Workspace &workspace, const String &value) {
 	if (value.begins_with("res://")) {
 		return workspace.uri_for_path(workspace.root() / to_std(value.substr(6)));
 	}
-	return to_std(value);
+	auto uri = to_std(value);
+	return canonical_file_uri(uri).value_or(std::move(uri));
 }
 
 String to_godot(std::string_view value) {
