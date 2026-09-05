@@ -38,7 +38,7 @@ CallableSignature callable_signature(const json &value, bool arity_known = true)
 	result.arity_known = arity_known;
 	for (const auto &argument : value.value("arguments", json::array())) {
 		result.arguments.push_back({argument.value("name", "arg"), argument.value("type", "Variant"),
-			argument.contains("default_value")});
+			argument.contains("default_value"), argument.value("default_value", "")});
 	}
 	return result;
 }
@@ -53,6 +53,7 @@ void add_members(NativeClass &target, const json &source, const char *key, Symbo
 		member.type = value_type(entry);
 		member.kind = kind;
 		member.is_static = entry.value("is_static", false);
+		member.is_virtual = entry.value("is_virtual", false);
 		member.documentation = entry.value("description", "");
 		std::vector<std::string> enum_value_order;
 		if (kind == SymbolKind::Enum) {

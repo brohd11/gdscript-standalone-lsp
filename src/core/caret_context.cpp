@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <span>
 #include <string_view>
 #include <unordered_set>
 
@@ -22,6 +23,23 @@ struct ScanResult {
 	size_t statement_start = 0;
 	CaretLexicalContext lexical = CaretLexicalContext::Code;
 	char quote = 0;
+};
+
+enum class DeclarationCaret : uint8_t {
+	None,
+	Suppressed,
+	FunctionOverride,
+};
+
+struct DeclarationContext {
+	DeclarationCaret caret = DeclarationCaret::None;
+	bool is_static = false;
+};
+
+struct CodeToken {
+	std::string_view text;
+	size_t begin = 0;
+	size_t end = 0;
 };
 
 bool identifier_character(char value) {
@@ -167,6 +185,202 @@ bool word_at(std::string_view source, const std::vector<bool> &code, size_t offs
 	for (size_t index = offset; index < offset + word.size(); ++index) if (!code[index]) return false;
 	return (offset == 0 || !identifier_character(source[offset - 1])) &&
 		(offset + word.size() == source.size() || !identifier_character(source[offset + word.size()]));
+}
+
+const SyntaxNode *field(const SyntaxNode &node, std::string_view name);
+bool contains_byte(const SyntaxNode &node, size_t offset);
+
+std::vector<CodeToken> code_tokens(std::string_view source, const std::vector<bool> &code,
+		size_t begin, size_t end) {
+	std::vector<CodeToken> result;
+	for (size_t index = begin; index < end;) {
+		if (index >= code.size() || !code[index] || std::isspace(static_cast<unsigned char>(source[index]))) {
+			++index;
+			continue;
+		}
+		auto start = index;
+		if (identifier_start(source[index])) {
+			while (index < end && index < code.size() && code[index] && identifier_character(source[index])) ++index;
+		} else {
+			++index;
+		}
+		result.push_back({source.substr(start, index - start), start, index});
+	}
+	return result;
+}
+
+bool identifier_token(std::string_view value) {
+	return !value.empty() && identifier_start(value.front()) &&
+		std::all_of(value.begin(), value.end(), identifier_character);
+}
+
+const SyntaxNode *deepest_function_at(const SyntaxNode &node, size_t offset) {
+	if (!contains_byte(node, offset)) return nullptr;
+	const SyntaxNode *result = node.kind == "function_definition" || node.kind == "constructor_definition" ||
+		node.kind == "lambda" ? &node : nullptr;
+	for (const auto &child : node.children) {
+		if (auto *nested = deepest_function_at(child, offset)) result = nested;
+	}
+	return result;
+}
+
+bool member_function_declaration(const Document &document, size_t func_offset,
+		const std::vector<CodeToken> &tokens, size_t func_token) {
+	for (size_t index = 0; index < func_token; ++index) {
+		if (tokens[index].text == "=" || tokens[index].text == "return" || tokens[index].text == "await" ||
+				tokens[index].text == "var" || tokens[index].text == "const") return false;
+	}
+	auto *function = deepest_function_at(document.syntax_root(), func_offset);
+	if (!function) return true;
+	if (function->kind == "lambda") return false;
+	if (auto *name = field(*function, "name"); name && name->start_byte >= func_offset) return true;
+	if (auto *parameters = field(*function, "parameters"); parameters && parameters->start_byte >= func_offset) return true;
+	auto prefix = document.text(*function);
+	auto relative = func_offset >= function->start_byte ? func_offset - function->start_byte : 0;
+	auto colon = prefix.find(':');
+	return function->range.start.line == byte_to_position(document.source(), func_offset).line &&
+		(colon == std::string_view::npos || colon >= relative);
+}
+
+bool declaration_parameter(const ScanResult &scan, const std::vector<CodeToken> &tokens,
+		std::string_view source, size_t offset) {
+	for (auto delimiter = scan.stack.rbegin(); delimiter != scan.stack.rend(); ++delimiter) {
+		if (delimiter->value != '(') continue;
+		auto open = std::find_if(tokens.begin(), tokens.end(), [&](const CodeToken &token) {
+			return token.begin == delimiter->offset && token.text == "(";
+		});
+		if (open == tokens.end() || open == tokens.begin()) continue;
+		auto before = std::prev(open);
+		bool declaration = before->text == "func" || before->text == "signal";
+		if (!declaration && identifier_token(before->text) && before != tokens.begin()) {
+			auto keyword = std::prev(before);
+			declaration = keyword->text == "func" || keyword->text == "signal";
+		}
+		if (!declaration) continue;
+		size_t segment_start = delimiter->commas.empty() ? delimiter->offset + 1 : delimiter->commas.back() + 1;
+		auto segment = trim(masked_text(source, scan.code, segment_start, offset));
+		if (segment.find(':') != std::string::npos || segment.find('=') != std::string::npos) return false;
+		if (segment.starts_with("...")) segment = trim(std::string_view(segment).substr(3));
+		return segment.empty() || identifier_token(segment);
+	}
+	return false;
+}
+
+bool enum_value_declaration(const ScanResult &scan, const std::vector<CodeToken> &tokens,
+		std::string_view source, size_t offset) {
+	for (auto delimiter = scan.stack.rbegin(); delimiter != scan.stack.rend(); ++delimiter) {
+		if (delimiter->value != '{') continue;
+		auto open = std::find_if(tokens.begin(), tokens.end(), [&](const CodeToken &token) {
+			return token.begin == delimiter->offset && token.text == "{";
+		});
+		if (open == tokens.end()) continue;
+		bool declaration = false;
+		for (auto token = open; token != tokens.begin();) {
+			--token;
+			if (token->text == "enum") { declaration = true; break; }
+			if (token->text == "=" || token->text == ":" || token->text == "{") break;
+		}
+		if (!declaration) continue;
+		size_t segment_start = delimiter->offset + 1;
+		for (const auto &token : tokens) {
+			if (token.begin > delimiter->offset && token.begin < offset && token.text == ",") segment_start = token.end;
+		}
+		auto segment = trim(masked_text(source, scan.code, segment_start, offset));
+		if (segment.find('=') != std::string::npos) return false;
+		return segment.empty() || identifier_token(segment);
+	}
+	return false;
+}
+
+DeclarationContext declaration_context(const Document &document, const ScanResult &scan,
+		size_t statement_start, size_t offset) {
+	auto &source = document.source();
+	auto tokens = code_tokens(source, scan.code, statement_start, offset);
+	if (declaration_parameter(scan, tokens, source, offset) || enum_value_declaration(scan, tokens, source, offset)) {
+		return {DeclarationCaret::Suppressed};
+	}
+	static const std::unordered_set<std::string_view> declarations = {
+		"var", "const", "signal", "class", "class_name", "enum", "func", "for"
+	};
+	std::optional<size_t> keyword;
+	for (size_t index = 0; index < tokens.size(); ++index) {
+		if (declarations.contains(tokens[index].text)) keyword = index;
+	}
+	if (!keyword) return {};
+	auto &token = tokens[*keyword];
+	auto after = std::span(tokens).subspan(*keyword + 1);
+	auto has = [&](std::string_view value) {
+		return std::any_of(after.begin(), after.end(), [&](const CodeToken &candidate) { return candidate.text == value; });
+	};
+	auto only_name = [&]() {
+		return after.empty() || (after.size() == 1 && identifier_token(after.front().text));
+	};
+	if (token.text == "func") {
+		if (has("(") || !only_name()) return {};
+		if (token.end == offset || token.end >= source.size() ||
+				!std::isspace(static_cast<unsigned char>(source[token.end]))) {
+			return {DeclarationCaret::Suppressed};
+		}
+		if (!member_function_declaration(document, token.begin, tokens, *keyword)) {
+			return {DeclarationCaret::Suppressed};
+		}
+		bool is_static = *keyword > 0 && tokens[*keyword - 1].text == "static";
+		return {DeclarationCaret::FunctionOverride, is_static};
+	}
+	if ((token.text == "var" || token.text == "const") && !has(":") && !has("=") && only_name()) {
+		return {DeclarationCaret::Suppressed};
+	}
+	if (token.text == "signal" && !has("(") && only_name()) return {DeclarationCaret::Suppressed};
+	if (token.text == "class" && !has("extends") && !has(":") && only_name()) {
+		return {DeclarationCaret::Suppressed};
+	}
+	if (token.text == "class_name" && !has(",") && !has("extends") && only_name()) {
+		return {DeclarationCaret::Suppressed};
+	}
+	if (token.text == "enum" && !has("{") && only_name()) return {DeclarationCaret::Suppressed};
+	if (token.text == "for" && !has("in") && !has(":") && only_name()) return {DeclarationCaret::Suppressed};
+	return {};
+}
+
+bool exact_statement_keyword(std::string_view source, const std::vector<bool> &code, size_t offset) {
+	static const std::unordered_set<std::string_view> keywords = {
+		"if", "elif", "else", "for", "while", "match", "when", "pass", "break", "continue",
+		"return", "breakpoint", "await", "assert", "yield"
+	};
+	size_t begin = offset;
+	while (begin > 0 && begin - 1 < code.size() && code[begin - 1] && identifier_character(source[begin - 1])) --begin;
+	return begin < offset && keywords.contains(source.substr(begin, offset - begin));
+}
+
+std::string line_indentation(std::string_view source, size_t offset) {
+	auto begin = source.rfind('\n', offset == 0 ? 0 : offset - 1);
+	begin = begin == std::string_view::npos ? 0 : begin + 1;
+	auto end = begin;
+	while (end < source.size() && (source[end] == ' ' || source[end] == '\t')) ++end;
+	return std::string(source.substr(begin, end - begin));
+}
+
+std::string inferred_indent_unit(std::string_view source, std::string_view current) {
+	bool prefer_spaces = !current.empty() && current.find('\t') == std::string_view::npos;
+	if (!current.empty() && !prefer_spaces) return "\t";
+	size_t smallest_spaces = std::string_view::npos;
+	for (size_t line = 0; line < source.size();) {
+		auto end = source.find('\n', line);
+		if (end == std::string_view::npos) end = source.size();
+		size_t first = line;
+		while (first < end && (source[first] == ' ' || source[first] == '\t')) ++first;
+		if (first < end && first > line) {
+			auto indentation = source.substr(line, first - line);
+			if (indentation.find('\t') != std::string_view::npos) {
+				if (!prefer_spaces) return "\t";
+			} else {
+				smallest_spaces = std::min(smallest_spaces, indentation.size());
+			}
+		}
+		line = end < source.size() ? end + 1 : source.size();
+	}
+	return smallest_spaces == std::string_view::npos ? (prefer_spaces ? "    " : "\t") :
+		std::string(smallest_spaces, ' ');
 }
 
 std::string identifier_after_keyword(std::string_view statement, std::string_view keyword) {
@@ -439,6 +653,8 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	auto scan = scan_to(source, result.byte_offset);
 	result.lexical = scan.lexical;
 	result.statement_start = scan.statement_start;
+	result.line_indentation = line_indentation(source, result.byte_offset);
+	result.indent_unit = inferred_indent_unit(source, result.line_indentation);
 
 	// Keep call information even in strings: member-string providers need the
 	// containing callable and argument index.
@@ -526,9 +742,15 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	// pattern, including incomplete patterns that do not have a colon yet.
 	if (!root_colon) result.match_expression = enclosing_match(source, result.byte_offset);
 	if (result.lexical != CaretLexicalContext::Code) return result;
+	auto declaration = declaration_context(document, scan, result.statement_start, result.byte_offset);
 	auto previous = previous_code_nonspace(source, scan.code, result.byte_offset);
 	auto immediately_after_root_colon = root_colon && previous == *root_colon;
-	if (result.in_type_hint) result.role = CaretRole::TypeHint;
+	if (declaration.caret == DeclarationCaret::FunctionOverride) {
+		result.role = CaretRole::FunctionOverride;
+		result.function_override_static = declaration.is_static;
+	} else if (declaration.caret == DeclarationCaret::Suppressed ||
+			exact_statement_keyword(source, scan.code, result.byte_offset)) result.role = CaretRole::Suppressed;
+	else if (result.in_type_hint) result.role = CaretRole::TypeHint;
 	else if (result.member_access) result.role = CaretRole::MemberAccess;
 	else if (immediately_after_root_colon) result.role = CaretRole::Suppressed;
 	else if (result.conditional) {

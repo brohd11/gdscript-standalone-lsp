@@ -315,6 +315,66 @@ void check_private_filter(Harness &harness) {
 	harness.reset_config();
 }
 
+void check_suppressed_contexts(Harness &harness) {
+	for (auto profile : {CompletionProfile::Helpers, CompletionProfile::Full}) {
+		auto keyword = harness.body("\treturn<caret>\n", profile);
+		expect_result(keyword.disposition == CompletionDisposition::Replace && keyword.provider == "context" &&
+			keyword.items.empty(), "a completed statement keyword suppresses completion", keyword);
+		auto declaration = harness.body("\tvar local_name<caret>\n", profile);
+		expect_result(declaration.disposition == CompletionDisposition::Replace && declaration.provider == "context" &&
+			declaration.items.empty(), "a declaration name suppresses completion", declaration);
+		auto parameter = harness.probe(prelude + "func declared(parameter_name<caret>) -> void: pass\n", profile);
+		expect_result(parameter.disposition == CompletionDisposition::Replace && parameter.provider == "context" &&
+			parameter.items.empty(), "a parameter name suppresses completion", parameter);
+	}
+	auto operand = harness.body("\treturn <caret>\n", CompletionProfile::Full);
+	expect_result(operand.disposition == CompletionDisposition::Replace && operand.provider == "semantic" &&
+		!operand.items.empty(), "completion resumes after a keyword operand boundary", operand);
+	auto initializer = harness.body("\tvar local_name = <caret>\n", CompletionProfile::Full);
+	expect_result(initializer.disposition == CompletionDisposition::Replace && !initializer.items.empty(),
+		"completion resumes in a declaration initializer", initializer);
+}
+
+void check_overrides(Harness &harness) {
+	auto instance = harness.probe(prelude + "func <caret>\n", CompletionProfile::Helpers);
+	expect_result(instance.disposition == CompletionDisposition::Replace && instance.provider == "overrides" &&
+		has_item(instance, "inherited_method") && has_item(instance, "inherited_typed") &&
+		has_item(instance, "_native_virtual") && !has_item(instance, "reference_method") &&
+		!has_item(instance, "inherited_static"),
+		"instance function declarations contain only script and native virtual overrides", instance);
+	auto *script = find_item(instance, "inherited_typed");
+	expect_result(script && script->label == "inherited_typed(value: int = 4, ...rest) -> String" &&
+		script->insert_text == "inherited_typed(value: int = 4, ...rest) -> String:\n\tpass" &&
+		script->origin_id.ends_with("::inherited_typed"),
+		"script overrides insert a complete inherited signature and pass body", instance);
+	auto *native = find_item(instance, "_native_virtual");
+	expect_result(native && native->label == "_native_virtual(delta: float, enabled: bool = true) -> void" &&
+		native->insert_text == "_native_virtual(delta: float, enabled: bool = true) -> void:\n\tpass" &&
+		native->origin_id == "native:RefCounted::_native_virtual",
+		"native overrides retain virtual signatures, defaults, and origins", instance);
+
+	auto static_result = harness.probe(prelude + "static func <caret>\n", CompletionProfile::Full);
+	expect_result(static_result.disposition == CompletionDisposition::Replace && static_result.provider == "overrides" &&
+		has_item(static_result, "inherited_static") && !has_item(static_result, "inherited_method") &&
+		!has_item(static_result, "_native_virtual"),
+		"static function declarations contain only inherited static methods", static_result);
+	auto *static_item = find_item(static_result, "inherited_static");
+	expect_result(static_item && static_item->insert_text ==
+		"inherited_static(label: String = \"ok\") -> int:\n\tpass",
+		"static overrides insert the inherited signature", static_result);
+	auto spaced = harness.probe(prelude +
+		"class Spaced extends CompletionProviderBase:\n    func <caret>\n", CompletionProfile::Helpers);
+	auto *spaced_item = find_item(spaced, "inherited_method");
+	expect_result(spaced_item && spaced_item->insert_text.ends_with(":\n        pass"),
+		"override bodies preserve space-based indentation", spaced);
+
+	auto already_overridden = harness.probe(prelude +
+		"func inherited_method() -> void: pass\n\nfunc inh<caret>\n", CompletionProfile::Helpers);
+	expect_result(already_overridden.disposition == CompletionDisposition::Replace &&
+		!has_item(already_overridden, "inherited_method") && has_item(already_overridden, "inherited_typed"),
+		"methods already declared in the current script are excluded from overrides", already_overridden);
+}
+
 } // namespace
 
 int main() {
@@ -328,6 +388,8 @@ int main() {
 	check_constructors(harness);
 	check_member_strings(harness);
 	check_private_filter(harness);
+	check_suppressed_contexts(harness);
+	check_overrides(harness);
 	if (failures) {
 		std::cerr << failures << " completion-provider test(s) failed\n";
 		return 1;

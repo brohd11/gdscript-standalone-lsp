@@ -15,6 +15,8 @@ def reduce_member(member: dict) -> dict:
         for key in ("name", "type", "return_type", "is_static", "is_vararg", "default_value")
         if key in member
     }
+    if member.get("is_virtual") is True:
+        result["is_virtual"] = True
     if isinstance(member.get("return_value"), dict):
         result["return_value"] = {
             key: member["return_value"][key]

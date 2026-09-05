@@ -28,6 +28,7 @@ struct Expected {
 	std::optional<bool> type_hint;
 	std::optional<std::string> suppressed;
 	std::optional<ConditionalBranch> branch;
+	std::optional<bool> override_static;
 	Expected(std::string p_name, std::string p_source,
 			CaretLexicalContext p_lexical = CaretLexicalContext::Code,
 			std::optional<CaretRole> p_role = {}, std::optional<bool> p_member_access = {},
@@ -35,11 +36,12 @@ struct Expected {
 			std::optional<std::string> p_callee = {}, std::optional<size_t> p_argument = {},
 			std::optional<std::string> p_operation = {}, std::optional<std::string> p_left = {},
 			std::optional<bool> p_type_hint = {}, std::optional<std::string> p_suppressed = {},
-			std::optional<ConditionalBranch> p_branch = {}) :
+			std::optional<ConditionalBranch> p_branch = {}, std::optional<bool> p_override_static = {}) :
 			name(std::move(p_name)), source(std::move(p_source)), lexical(p_lexical), role(p_role),
 			member_access(p_member_access), receiver(std::move(p_receiver)), prefix(std::move(p_prefix)),
 			callee(std::move(p_callee)), argument(p_argument), operation(std::move(p_operation)),
-			left(std::move(p_left)), type_hint(p_type_hint), suppressed(std::move(p_suppressed)), branch(p_branch) {}
+			left(std::move(p_left)), type_hint(p_type_hint), suppressed(std::move(p_suppressed)), branch(p_branch),
+			override_static(p_override_static) {}
 };
 
 void fail(const Expected &expected, std::string_view field, std::string actual) {
@@ -88,6 +90,9 @@ void check(Expected expected) {
 	if (expected.branch && (!context.conditional || context.conditional->branch != *expected.branch)) {
 		fail(expected, "conditional", context.conditional ?
 			std::to_string(static_cast<int>(context.conditional->branch)) : "<none>");
+	}
+	if (expected.override_static && context.function_override_static != *expected.override_static) {
+		fail(expected, "override_static", context.function_override_static ? "true" : "false");
 	}
 }
 
@@ -156,9 +161,27 @@ int main() {
 		{"subscript", "func f(values, index):\n\tvar value = values[index + <caret>]", CaretLexicalContext::Code,
 			CaretRole::IndexAccess, {}, {}, {}, {}, {}, "+", "index"},
 		{"declaration self", "func f():\n\tvar current<caret>", CaretLexicalContext::Code,
-			{}, {}, {}, {}, {}, {}, {}, {}, {}, "current"},
+			CaretRole::Suppressed, {}, {}, {}, {}, {}, {}, {}, {}, "current"},
 		{"assignment self", "func f():\n\tcurrent = nested(<caret>)", CaretLexicalContext::Code,
 			CaretRole::CallArgument, {}, {}, {}, "nested", 0, {}, {}, {}, "current"},
+		{"constant name", "const VALUE<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"signal name", "signal changed<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"signal parameter", "signal changed(value<caret>)", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"class name", "class Nested<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"global class name", "class_name RootThing<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"enum name", "enum State<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"enum value", "enum State { READY<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"function override", "extends RefCounted\n\nfunc rea<caret>", CaretLexicalContext::Code,
+			CaretRole::FunctionOverride},
+		{"static function override", "extends RefCounted\n\nstatic func mak<caret>", CaretLexicalContext::Code,
+			CaretRole::FunctionOverride},
+		{"lambda name", "var callback = func named<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"function parameter name", "func inspect(value<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"for binding", "func f():\n\tfor value<caret>", CaretLexicalContext::Code, CaretRole::Suppressed},
+		{"match binding", "func f(n):\n\tmatch n:\n\t\tvar value<caret>", CaretLexicalContext::Code,
+			CaretRole::Suppressed},
+		{"return operand", "func f():\n\treturn <caret>", CaretLexicalContext::Code, CaretRole::None},
+		{"keyword-like identifier", "func f():\n\treturn_value<caret>", CaretLexicalContext::Code, CaretRole::None},
 
 		{"ternary condition", "func f(flag):\n\tvar x = 1 if flag <caret>else 2", CaretLexicalContext::Code,
 			CaretRole::ConditionalCondition, {}, {}, {}, {}, {}, {}, {}, {}, {}, ConditionalBranch::Condition},
@@ -184,6 +207,11 @@ int main() {
 		{"match arm body", "func f(n):\n\tmatch n:\n\t\t_:\n\t\t\tvalue<caret>", CaretLexicalContext::Code,
 			CaretRole::None},
 	};
+	for (auto keyword : {"if", "elif", "else", "for", "while", "match", "when", "pass", "break",
+			"continue", "return", "breakpoint", "await", "assert", "yield"}) {
+		cases.emplace_back("completed keyword " + std::string(keyword),
+			"func f():\n\t" + std::string(keyword) + "<caret>", CaretLexicalContext::Code, CaretRole::Suppressed);
+	}
 	for (auto &test : cases) check(std::move(test));
 	if (failures) {
 		std::cerr << failures << " caret-context test(s) failed\n";

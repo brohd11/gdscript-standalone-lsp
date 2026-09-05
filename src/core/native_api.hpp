@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace gdscript_lsp {
@@ -20,6 +21,13 @@ struct NativeArgument {
 	std::string name;
 	std::string type = "Variant";
 	bool has_default = false;
+	std::string default_value;
+
+	NativeArgument() = default;
+	NativeArgument(std::string p_name, std::string p_type, bool p_has_default = false,
+			std::string p_default_value = {}) :
+			name(std::move(p_name)), type(std::move(p_type)), has_default(p_has_default),
+			default_value(std::move(p_default_value)) {}
 };
 
 struct CallableSignature {
@@ -37,6 +45,7 @@ struct NativeMember {
 	std::string documentation;
 	SymbolKind kind = SymbolKind::Property;
 	bool is_static = false;
+	bool is_virtual = false;
 	std::optional<CallableSignature> signature;
 	std::unordered_set<std::string> enum_values;
 };

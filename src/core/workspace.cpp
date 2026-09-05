@@ -2134,6 +2134,96 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		return output;
 	}
 	auto *context = document->class_at(position);
+	if (site.role == CaretRole::FunctionOverride) {
+		std::unordered_set<std::string> names;
+		if (context) for (const auto &member : context->members) names.insert(member.name);
+		auto script_signature = [](const Symbol &method) {
+			std::string signature = method.name + "(";
+			bool first = true;
+			for (const auto &parameter : method.children) {
+				if (!parameter.is_parameter) continue;
+				if (!first) signature += ", ";
+				first = false;
+				if (parameter.is_variadic) signature += "...";
+				signature += parameter.name;
+				if (!parameter.declared_type.empty()) signature += ": " + parameter.declared_type;
+				if (!parameter.initializer.empty()) {
+					signature += parameter.is_inferred ? " := " : " = ";
+					signature += parameter.initializer;
+				}
+			}
+			signature += ")";
+			if (!method.declared_type.empty()) signature += " -> " + method.declared_type;
+			return signature;
+		};
+		auto native_signature = [&](const NativeMember &method) {
+			std::string signature = method.name + "(";
+			bool first = true;
+			if (method.signature) for (const auto &argument : method.signature->arguments) {
+				if (!first) signature += ", ";
+				first = false;
+				signature += argument.name;
+				if (!argument.type.empty()) signature += ": " + normalize_api_type(argument.type);
+				if (argument.has_default) signature += " = " + argument.default_value;
+			}
+			if (method.signature && method.signature->is_vararg) {
+				if (!first) signature += ", ";
+				signature += "...args";
+			}
+			signature += ")";
+			if (!method.type.empty()) signature += " -> " + normalize_api_type(method.type);
+			return signature;
+		};
+		auto add_override = [&](std::string signature, std::string detail, std::string documentation,
+				SymbolKind kind, std::string symbol_id) {
+			CompletionItem item;
+			auto open = signature.find('(');
+			item.filter_text = open == std::string::npos ? signature : signature.substr(0, open);
+			item.label = signature;
+			item.insert_text = signature + ":\n" + site.line_indentation + site.indent_unit + "pass";
+			item.detail = std::move(detail);
+			item.documentation = std::move(documentation);
+			item.kind = kind;
+			item.symbol_id = std::move(symbol_id);
+			item.origin_id = item.symbol_id;
+			output.items.push_back(std::move(item));
+		};
+		std::string base_id = context ? context->base_class_id : std::string{};
+		std::unordered_set<std::string> visited;
+		while (!base_id.empty() && !base_id.starts_with("native:") && visited.insert(base_id).second) {
+			auto *base = find_class(base_id);
+			if (!base) break;
+			for (const auto &member : base->members) {
+				if (!names.insert(member.name).second) continue;
+				if (!callable_kind(member.kind) || member.is_static != site.function_override_static) continue;
+				add_override(script_signature(member),
+					(site.function_override_static ? "override static func from " : "override func from ") +
+						base->symbol.name, member.documentation, member.kind, member.id);
+			}
+			base_id = base->base_class_id;
+		}
+		if (base_id.starts_with("native:")) {
+			auto native = base_id.substr(7);
+			auto access = site.function_override_static ? MemberAccess::Type : MemberAccess::Instance;
+			for (auto *member : native_api_.members(native, access)) {
+				if (!names.insert(member->name).second) continue;
+				if (!member->signature || !member->is_virtual ||
+						member->is_static != site.function_override_static) continue;
+				add_override(native_signature(*member),
+					(site.function_override_static ? "override static func from " : "override func from ") +
+						member->owner, member->documentation, member->kind,
+					"native:" + member->owner + "::" + member->name);
+			}
+		}
+		output.disposition = CompletionDisposition::Replace;
+		output.provider = "overrides";
+		for (size_t index = 0; index < output.items.size(); ++index) {
+			auto value = std::to_string(index);
+			output.items[index].sort_text = std::string(10 - std::min<size_t>(value.size(), 10), '0') + value;
+			output.items[index].provider = output.provider;
+		}
+		return output;
+	}
 	auto in_type_hint = site.role == CaretRole::TypeHint;
 
 	auto infer = [&](std::string expression) {

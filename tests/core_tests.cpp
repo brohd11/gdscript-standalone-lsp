@@ -283,7 +283,7 @@ int main() {
 	std::vector<std::string> native_instance_names;
 	for (auto *member : native_instance_members) native_instance_names.push_back(member->name);
 	expect(native_instance_names == std::vector<std::string>({
-		"reference_method", "native_takes", "ref_static", "get_class", "object_static"}),
+		"reference_method", "native_takes", "_native_virtual", "ref_static", "get_class", "object_static"}),
 		"native members preserve API order, static tails, and nearest-first inheritance");
 	auto native_type_members = workspace.native_api().members("RefCounted", MemberAccess::Type);
 	std::vector<std::string> native_type_names;
@@ -685,7 +685,7 @@ int main() {
 		has_item(enum_result.items, "State.IDLE") && has_item(enum_result.items, "State.READY"),
 		"enum helper owns an expected script-enum assignment");
 	auto enum_argument = diagnostic_workspace.completion_result(diagnostic_uri,
-		helper_position("accepts("), CompletionProfile::Helpers);
+		helper_position("\taccepts("), CompletionProfile::Helpers);
 	expect(enum_argument.disposition == CompletionDisposition::Replace && has_item(enum_argument.items, "State.IDLE"),
 		"enum helper resolves a script function argument type");
 	auto enum_member_helpers = diagnostic_workspace.completion_result(diagnostic_uri,

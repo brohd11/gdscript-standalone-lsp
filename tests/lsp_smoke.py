@@ -30,6 +30,13 @@ def read_packet(stream):
     return json.loads(stream.read(length))
 
 
+def read_response(stream, request_id):
+    while True:
+        message = read_packet(stream)
+        if message.get("id") == request_id:
+            return message
+
+
 def flatten_symbols(symbols):
     for symbol in symbols:
         yield symbol
@@ -185,6 +192,7 @@ assert process.wait(timeout=5) == 0
 # native members for a project that has never been opened by Godot.
 native_root = pathlib.Path("tests/fixtures/native").resolve()
 native_uri = (native_root / "main.gd").as_uri()
+native_override_uri = (native_root / "override.gd").as_uri()
 process = subprocess.Popen(
     [str(binary)],
     stdin=subprocess.PIPE,
@@ -199,16 +207,38 @@ for request in [
         "method": "textDocument/completion",
         "params": {"textDocument": {"uri": native_uri}, "position": {"line": 3, "character": 4}},
     },
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": native_override_uri,
+                "languageId": "gdscript",
+                "version": 1,
+                "text": "extends Node\n\nfunc \n",
+            }
+        },
+    },
+    {
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "textDocument/completion",
+        "params": {"textDocument": {"uri": native_override_uri}, "position": {"line": 2, "character": 5}},
+    },
     {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
     {"jsonrpc": "2.0", "method": "exit", "params": {}},
 ]:
     process.stdin.write(packet(request))
 process.stdin.flush()
-read_packet(process.stdout)
-native_completion = read_packet(process.stdout)
-read_packet(process.stdout)
+read_response(process.stdout, 1)
+native_completion = read_response(process.stdout, 2)
+native_override_completion = read_response(process.stdout, 20)
+read_response(process.stdout, 3)
 native_items = {item["filterText"]: item for item in native_completion["result"]["items"]}
 assert {"queue_free", "print_tree"} <= native_items.keys()
+native_override_items = {item["filterText"]: item for item in native_override_completion["result"]["items"]}
+assert {"_ready", "_process"} <= native_override_items.keys()
+assert native_override_items["_process"]["data"]["gdscriptLsp"]["provider"] == "overrides"
 assert process.wait(timeout=5) == 0
 
 # Missing function bodies and recovered parameter lists must survive both
@@ -389,7 +419,7 @@ process.stdin.write(
             "jsonrpc": "2.0",
             "id": 40,
             "method": "textDocument/completion",
-            "params": {"textDocument": {"uri": diagnostic_uri}, "position": {"line": 2, "character": 3}},
+            "params": {"textDocument": {"uri": diagnostic_uri}, "position": {"line": 2, "character": 17}},
         }
     )
 )
@@ -1117,6 +1147,64 @@ assert string_items["build"]["data"]["gdscriptLsp"]["provider"] == "memberString
 assert string_items["build"]["insertText"] == "build"
 assert "title" in private_items and "_private" not in private_items
 assert provider_responses[155]["items"] == []
+
+override_source = "extends CompletionProviderBase\n\nfunc \n"
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": provider_uri, "version": 2},
+                "contentChanges": [{"text": override_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 156,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": provider_uri}, "position": {"line": 2, "character": 5}},
+        }
+    )
+)
+server.stdin.flush()
+override_response = read_response(server.stdout, 156)["result"]
+override_items = items_by_filter(override_response)
+assert override_items["inherited_typed"]["data"]["gdscriptLsp"]["provider"] == "overrides"
+assert override_items["inherited_typed"]["insertText"] == (
+    "inherited_typed(value: int = 4, ...rest) -> String:\n\tpass"
+)
+assert "_native_virtual" in override_items and "reference_method" not in override_items
+
+keyword_source = "extends CompletionProviderBase\n\nfunc inspect() -> void:\n\treturn"
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": provider_uri, "version": 3},
+                "contentChanges": [{"text": keyword_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 157,
+            "method": "textDocument/completion",
+            "params": {"textDocument": {"uri": provider_uri}, "position": {"line": 3, "character": 7}},
+        }
+    )
+)
+server.stdin.flush()
+assert read_response(server.stdout, 157)["result"]["items"] == []
 stop_server(server)
 
 
@@ -1199,13 +1287,6 @@ def connect_tcp(port):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.02)
-
-
-def read_response(stream, request_id):
-    while True:
-        message = read_packet(stream)
-        if message.get("id") == request_id:
-            return message
 
 
 def stop_tcp_session(stream, request_id):

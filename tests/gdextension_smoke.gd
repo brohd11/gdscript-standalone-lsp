@@ -149,6 +149,26 @@ func _on_ready() -> void:
 		quit(1)
 		return
 	service.set_configuration({"completion": {"constructors": true}})
+	var override_source := "extends BaseThing\n\nfunc \n"
+	service.update_document(uri, override_source, 8)
+	var overrides: Dictionary = service.completion_ex(uri, 2, 5, {"profile": "helpers"})
+	var overrides_by_name := {}
+	for item: Dictionary in overrides.items:
+		overrides_by_name[item.filterText] = item
+	if overrides.disposition != "replace" or overrides.provider != "overrides" \
+			or not overrides_by_name.has("label") or not overrides_by_name.has("_native_virtual") \
+			or overrides_by_name.has("reference_method") \
+			or overrides_by_name.label.insertText != "label() -> String:\n\tpass":
+		push_error("unexpected override completion: %s" % [overrides])
+		quit(1)
+		return
+	var keyword_source := "extends BaseThing\n\nfunc inspect() -> void:\n\treturn"
+	service.update_document(uri, keyword_source, 9)
+	var keyword: Dictionary = service.completion_ex(uri, 3, 7, {"profile": "helpers"})
+	if keyword.disposition != "replace" or keyword.provider != "context" or not keyword.items.is_empty():
+		push_error("completed keyword was not suppressed: %s" % [keyword])
+		quit(1)
+		return
 	service.close_document(uri)
 	var resolved: Dictionary = service.resolve_type(uri, 6, 4, "local")
 	if resolved.kind != "script_class" or resolved.name != "ChildThing":

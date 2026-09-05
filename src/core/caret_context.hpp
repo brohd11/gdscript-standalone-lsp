@@ -19,6 +19,7 @@ enum class CaretLexicalContext : uint8_t {
 enum class CaretRole : uint8_t {
 	None,
 	Suppressed,
+	FunctionOverride,
 	MemberAccess,
 	TypeHint,
 	AssignmentValue,
@@ -81,6 +82,9 @@ struct CaretContext {
 	std::string suppressed_symbol;
 	std::string match_expression;
 	bool in_type_hint = false;
+	bool function_override_static = false;
+	std::string line_indentation;
+	std::string indent_unit = "\t";
 };
 
 CaretContext analyze_caret(const Document &document, Position position);

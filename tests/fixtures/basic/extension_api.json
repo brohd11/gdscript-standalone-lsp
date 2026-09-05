@@ -63,6 +63,14 @@
             {"name": "label", "type": "String", "default_value": "\"ok\""}
           ]
         },
+        {
+          "name": "_native_virtual",
+          "is_virtual": true,
+          "arguments": [
+            {"name": "delta", "type": "float"},
+            {"name": "enabled", "type": "bool", "default_value": "true"}
+          ]
+        },
         {"name": "ref_static", "is_static": true}
       ]
     },
