@@ -1,0 +1,19 @@
+{
+  "header": {"version_major": 4, "version_minor": 6, "version_patch": 0},
+  "builtin_classes": [
+    {"name": "String", "methods": [{"name": "length", "return_type": "int"}]},
+    {"name": "Array", "methods": [{"name": "size", "return_type": "int"}]},
+    {"name": "Dictionary", "methods": [{"name": "keys", "return_type": "Array"}]},
+    {"name": "Callable", "methods": [{"name": "call", "return_type": "Variant", "is_vararg": true}]}
+  ],
+  "classes": [
+    {"name": "Object", "inherits": "", "methods": [{"name": "get_class", "return_value": {"type": "String"}}]},
+    {"name": "RefCounted", "inherits": "Object"},
+    {"name": "Node", "inherits": "Object", "methods": [
+      {"name": "queue_free", "return_value": {"type": "void"}},
+      {"name": "get_name", "return_value": {"type": "String"}},
+      {"name": "get_child", "arguments": [{"name": "index", "type": "int"}], "return_value": {"type": "Node"}}
+    ]}
+  ],
+  "utility_functions": [], "singletons": [], "global_constants": [], "global_enums": []
+}

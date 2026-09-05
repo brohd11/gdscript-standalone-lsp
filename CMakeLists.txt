@@ -137,6 +137,12 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:gdscript-lsp>"
   )
   set_tests_properties(lsp-smoke PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_executable(broken-syntax-tests tests/broken_syntax_tests.cpp)
+  target_link_libraries(broken-syntax-tests PRIVATE gdscript-lsp-core Threads::Threads)
+  add_test(NAME semantic-recovery
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/broken_syntax.py"
+            "$<TARGET_FILE:gdscript-lsp>" "$<TARGET_FILE:broken-syntax-tests>")
+  set_tests_properties(semantic-recovery PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 300)
 endif()
 
 include(GNUInstallDirs)

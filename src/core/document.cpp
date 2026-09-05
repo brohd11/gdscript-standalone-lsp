@@ -443,6 +443,7 @@ struct FunctionExtent {
 	size_t body_start = 0;
 	size_t end = 0;
 	bool is_static = false;
+	bool has_body_colon = false;
 	bool valid = false;
 };
 
@@ -461,24 +462,40 @@ FunctionExtent function_extent(std::string_view source, const std::vector<bool> 
 	result.keyword = cursor;
 	cursor += 4;
 	while (cursor < source.size() && std::isspace(static_cast<unsigned char>(source[cursor])) && source[cursor] != '\n') ++cursor;
-	if (cursor >= source.size() || !(std::isalpha(static_cast<unsigned char>(source[cursor])) || source[cursor] == '_')) return result;
-	result.name_start = cursor++;
+	result.name_start = cursor;
 	while (cursor < source.size() && (std::isalnum(static_cast<unsigned char>(source[cursor])) || source[cursor] == '_')) ++cursor;
 	result.name_end = cursor;
 
 	int grouping = 0;
 	size_t colon = std::string_view::npos;
 	auto limit = std::min(source.size(), start + 64 * 1024);
+	auto header_indent = indentation_width(source.substr(start, result.keyword - start));
 	for (size_t index = cursor; index < limit; ++index) {
+		if (index > start && source[index - 1] == '\n') {
+			auto first = index;
+			while (first < source.size() && (source[first] == ' ' || source[first] == '\t')) ++first;
+			auto rest = source.substr(first);
+			if (first < code.size() && code[first] && indentation_width(source.substr(index, first - index)) <= header_indent &&
+					(rest.starts_with("func") || rest.starts_with("static func") || rest.starts_with("class") ||
+					 rest.starts_with("var ") || rest.starts_with("const ") || rest.starts_with("signal ") || rest.starts_with("enum "))) {
+				limit = index == 0 ? 0 : index - 1;
+				break;
+			}
+		}
 		if (index >= code.size() || !code[index]) continue;
 		auto character = source[index];
 		if (character == '(' || character == '[' || character == '{') ++grouping;
 		else if ((character == ')' || character == ']' || character == '}') && grouping > 0) --grouping;
 		else if (character == ':' && grouping == 0) { colon = index; break; }
-		else if (character == '\n' && grouping == 0) break;
+		else if (character == '\n' && grouping == 0) { limit = index; break; }
 	}
-	if (colon == std::string_view::npos) return result;
+	if (colon == std::string_view::npos) {
+		result.header_end = result.body_start = result.end = limit;
+		result.valid = true;
+		return result;
+	}
 	result.header_end = colon + 1;
+	result.has_body_colon = true;
 	auto header_line_end = line_end(source, colon);
 	auto tail = trim(source.substr(colon + 1, header_line_end - colon - 1));
 	if (!tail.empty() && !tail.starts_with('#')) {
@@ -488,7 +505,6 @@ FunctionExtent function_extent(std::string_view source, const std::vector<bool> 
 		return result;
 	}
 	result.body_start = header_line_end < source.size() ? header_line_end + 1 : source.size();
-	auto header_indent = indentation_width(source.substr(start, result.keyword - start));
 	result.end = source.size();
 	grouping = 0;
 	bool continued = false;
@@ -583,7 +599,7 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.declared_type = trim(node_text(field(node, "return_type"), source));
 	symbol.is_static = has_named_child(node, "static_keyword");
 	auto body = field(node, "body");
-	symbol.body_recovered = ts_node_is_null(body) || ts_node_has_error(body);
+	symbol.body_recovered = ts_node_is_null(body) || ts_node_has_error(node);
 	symbol.detail = (symbol.is_static ? "static func " : "func ") + symbol.name + "(";
 	auto parameters = field(node, "parameters");
 	for (uint32_t i = 0; !ts_node_is_null(parameters) && i < ts_node_named_child_count(parameters); ++i) {
@@ -720,10 +736,27 @@ RecoveredFunction recover_function(TSParser *parser, std::string_view source, si
 	if (!ts_node_is_null(function)) {
 		result.symbol = function_symbol(function, uri, owner_id, source);
 		result.syntax = syntax_node(function, source);
+		if (ts_node_has_error(function) && extent.has_body_colon) {
+			// A missing control-flow colon can move earlier statements into an
+			// ERROR sibling of the body. Recover all statements in the lexical body.
+			std::erase_if(result.symbol.children, [](const Symbol &symbol) { return !symbol.is_parameter; });
+			collect_locals(function, result.symbol, source, extent.body_start, extent.end + 1);
+			std::erase_if(result.syntax.children, [&](const SyntaxNode &child) { return child.end_byte > extent.header_end; });
+			SyntaxNode body;
+			body.kind = "body";
+			body.field = "body";
+			body.start_byte = static_cast<uint32_t>(std::min(extent.body_start, extent.end));
+			body.end_byte = static_cast<uint32_t>(extent.end);
+			body.range = {byte_to_position(source, body.start_byte), byte_to_position(source, body.end_byte)};
+			body.has_error = true;
+			collect_body_syntax(function, source, body.start_byte, body.end_byte, body.children);
+			result.syntax.children.push_back(std::move(body));
+		}
 	} else {
 		// A complete header can still be destroyed by an unfinished body. Parse
 		// it with a throwaway body; only the original header nodes are retained.
-		auto header_text = std::string(source.substr(start, extent.header_end - start)) + " pass\n";
+		auto header_text = std::string(source.substr(start, extent.header_end - start));
+		if (extent.has_body_colon) header_text += " pass\n";
 		BlockTree header(parser, header_text, start, point);
 		auto header_function = first_kind_between(header.root, "function_definition", start, start + header_text.size() + 1);
 		if (ts_node_is_null(header_function)) {
@@ -847,6 +880,7 @@ void Document::parse(const Document *previous) {
 	auto root = ts_tree_root_node(impl_->tree);
 	syntax_root_ = syntax_node(root, source_);
 	collect_errors(root, source_, syntax_errors_);
+	auto code = source_code_mask(source_);
 
 	ClassRecord root_class;
 	root_class.symbol.id = resource_path_;
@@ -860,8 +894,10 @@ void Document::parse(const Document *previous) {
 
 	std::function<void(TSNode, ClassRecord &, const std::string &)> collect_class;
 	collect_class = [&](TSNode container, ClassRecord &record, const std::string &owner_id) {
+		if (ts_node_is_null(container)) return;
 		for (uint32_t i = 0; i < ts_node_named_child_count(container); ++i) {
 			auto child = ts_node_named_child(container, i);
+			if (owner_id != resource_path_ && !record.symbol.range.contains(node_range(child, source_).start)) continue;
 			auto type = node_type(child);
 			if (type == "class_name_statement") {
 				auto name_node = field(child, "name");
@@ -920,6 +956,9 @@ void Document::parse(const Document *previous) {
 				if (!symbol.name.empty()) record.members.push_back(std::move(symbol));
 			} else if (type == "class_definition") {
 				auto name_node = field(child, "name");
+				// A missing class name may be borrowed from a later method's
+				// return annotation, even turning a native type into a script class.
+				if (ts_node_is_null(name_node) || ts_node_start_point(name_node).row != ts_node_start_point(child).row) continue;
 				ClassRecord inner;
 				inner.symbol.name = trim(node_text(name_node, source_));
 				inner.symbol.id = owner_id + "." + inner.symbol.name;
@@ -927,6 +966,32 @@ void Document::parse(const Document *previous) {
 				inner.symbol.uri = uri_;
 				inner.symbol.kind = SymbolKind::Class;
 				inner.symbol.range = node_range(child, source_);
+				inner.symbol.range.end = byte_to_position(source_, source_.size());
+				auto header_start = static_cast<size_t>(ts_node_start_byte(child));
+				while (header_start > 0 && source_[header_start - 1] != '\n') --header_start;
+				auto indent = indentation_width(std::string_view(source_).substr(header_start));
+				int grouping = 0;
+				for (size_t next = line_end(source_, header_start); next < source_.size();) {
+					++next;
+					auto end = line_end(source_, next);
+					auto first = next;
+					while (first < end && std::isspace(static_cast<unsigned char>(source_[first]))) ++first;
+					auto rest = std::string_view(source_).substr(first);
+					if (first < end && code[first] && indentation_width(std::string_view(source_).substr(next)) <= indent &&
+							(grouping == 0 || rest.starts_with("func") || rest.starts_with("class") || rest.starts_with("static func"))) {
+						inner.symbol.range.end = byte_to_position(source_, next - 1);
+						break;
+					}
+					auto function = function_extent(source_, code, next);
+					if (function.valid) { next = function.end; continue; }
+					for (size_t index = next; index < end; ++index) {
+						if (!code[index]) continue;
+						auto c = source_[index];
+						if (c == '(' || c == '[' || c == '{') ++grouping;
+						else if ((c == ')' || c == ']' || c == '}') && grouping > 0) --grouping;
+					}
+					next = end;
+				}
 				inner.symbol.selection_range = node_range(name_node, source_);
 				inner.extends_text = extends_text(field(child, "extends"), source_);
 				if (inner.extends_text.empty()) inner.extends_text = "RefCounted";
@@ -944,7 +1009,6 @@ void Document::parse(const Document *previous) {
 	// Lexical boundaries are authoritative when error recovery swallows a later
 	// declaration. Replace both symbols and semantic syntax from isolated blocks;
 	// impl_->tree remains the original tree used for the next incremental edit.
-	auto code = source_code_mask(source_);
 	for (size_t line = 0; line < source_.size();) {
 		auto extent = function_extent(source_, code, line);
 		if (extent.valid) {
@@ -959,17 +1023,27 @@ void Document::parse(const Document *previous) {
 			Symbol *existing = nullptr;
 			if (owner) for (auto &member : owner->members) {
 				if ((member.kind == SymbolKind::Method || member.kind == SymbolKind::Constructor) &&
-						member.name == name && (member.selection_range.start == name_position ||
+						((member.name == name && member.selection_range.start == name_position) || member.range.start == header_position ||
 							(member.kind == SymbolKind::Constructor && member.range.contains(header_position)))) {
 					existing = &member;
 					break;
 				}
 			}
 			auto end_position = byte_to_position(source_, extent.end);
-			if (owner && (!existing || existing->body_recovered || existing->range.end > end_position)) {
+			auto code_end = extent.end;
+			while (code_end > line && std::isspace(static_cast<unsigned char>(source_[code_end - 1]))) --code_end;
+			if (owner && (!existing || existing->body_recovered || existing->range.end > end_position ||
+					existing->range.end < byte_to_position(source_, code_end))) {
 				auto recovered = recover_function(impl_->parser, source_, line, extent, uri_, owner->symbol.id);
 				if (existing) *existing = std::move(recovered.symbol);
 				else owner->members.push_back(std::move(recovered.symbol));
+				if (name.empty()) std::erase_if(owner->members, [&](const Symbol &member) { return member.range.start == header_position; });
+				if (owner != &classes_.front()) {
+					std::erase_if(syntax_root_.children, [&](const SyntaxNode &child) {
+						return (child.kind == "function_definition" || child.kind == "constructor_definition") &&
+							child.start_byte < extent.end && child.end_byte > line;
+					});
+				}
 				auto *container = owner == &classes_.front() ? &syntax_root_ :
 					class_syntax_container(syntax_root_, owner->symbol.range.start);
 				if (container) {
@@ -995,6 +1069,24 @@ void Document::parse(const Document *previous) {
 		auto end = line_end(source_, line);
 		if (end == source_.size()) break;
 		line = end + 1;
+	}
+	// Discard symbols which the damaged whole-document tree incorrectly emitted
+	// at class scope or inside an earlier function. The bounded declarations own
+	// every local in their lexical body.
+	for (auto &record : classes_) {
+		std::vector<Range> functions;
+		for (const auto &member : record.members) {
+			if (member.kind == SymbolKind::Method || member.kind == SymbolKind::Constructor) functions.push_back(member.range);
+		}
+		std::erase_if(record.members, [&](const Symbol &member) {
+			for (const auto &inner : classes_) {
+				if (inner.symbol.id != member.id && inner.symbol.id.starts_with(record.symbol.id + ".") &&
+						inner.symbol.range.contains(member.range.start)) return true;
+			}
+			return std::any_of(functions.begin(), functions.end(), [&](Range range) {
+				return range.start < member.range.start && member.range.start < range.end;
+			});
+		});
 	}
 }
 

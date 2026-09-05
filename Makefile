@@ -22,7 +22,7 @@ LSP_CPP := $(wildcard src/lsp/*.cpp)
 LSP_OBJ := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(LSP_CPP))
 DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 	$(BUILD_DIR)/tests/caret_context_tests.d $(BUILD_DIR)/tests/completion_provider_tests.d \
-	$(BUILD_DIR)/tests/incremental_update_tests.d $(BUILD_DIR)/tools/dump_tree.d
+	$(BUILD_DIR)/tests/incremental_update_tests.d $(BUILD_DIR)/tests/broken_syntax_tests.d $(BUILD_DIR)/tools/dump_tree.d
 
 -include $(DEPFILES)
 
@@ -47,12 +47,16 @@ $(BUILD_DIR)/completion-provider-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests
 $(BUILD_DIR)/incremental-update-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/incremental_update_tests.o
 	$(CXX) $^ $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/broken-syntax-tests: $(CORE_OBJ) $(TS_OBJ) $(BUILD_DIR)/tests/broken_syntax_tests.o
+	$(CXX) $^ $(LDFLAGS) -o $@
+
 test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/completion-provider-tests \
-		$(BUILD_DIR)/incremental-update-tests $(BUILD_DIR)/gdscript-lsp
+		$(BUILD_DIR)/incremental-update-tests $(BUILD_DIR)/broken-syntax-tests $(BUILD_DIR)/gdscript-lsp
 	$(BUILD_DIR)/core-tests
 	$(BUILD_DIR)/caret-context-tests
 	$(BUILD_DIR)/completion-provider-tests
 	$(BUILD_DIR)/incremental-update-tests
+	python3 tests/broken_syntax.py $(BUILD_DIR)/gdscript-lsp $(BUILD_DIR)/broken-syntax-tests
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
 
 benchmark-completion: $(BUILD_DIR)/gdscript-lsp

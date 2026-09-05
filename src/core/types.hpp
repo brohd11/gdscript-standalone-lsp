@@ -131,8 +131,8 @@ struct Symbol {
 	bool is_inferred = false;
 	bool is_iteration_variable = false;
 	bool malformed = false;
-	// The declaration header is valid, but tree-sitter recovered its body as an
-	// error node. This must not make the exported signature look malformed.
+	// The function needs bounded syntax recovery. This alone must not make an
+	// otherwise intact exported signature look malformed.
 	bool body_recovered = false;
 	std::vector<Symbol> children;
 };
