@@ -1,0 +1,1168 @@
+{
+  "reference": "Godot 4.6.3; generalized diagnostics, not full compiler parity",
+  "cases": [
+    {
+      "name": "break",
+      "source": "extends Node\nfunc test():\n    break\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "outside of a loop"
+    },
+    {
+      "name": "continue",
+      "source": "extends Node\nfunc test():\n    continue\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "outside of a loop"
+    },
+    {
+      "name": "loop_valid",
+      "source": "extends Node\nfunc test():\n    for i in range(2):\n        if i:\n            continue\n        break\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "lambda_loop_boundary",
+      "source": "extends Node\nfunc test():\n    while true:\n        var callback = func():\n            break\n        callback.call()\n        break\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 12
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "outside of a loop"
+    },
+    {
+      "name": "required_parameter",
+      "source": "extends Node\nfunc test(first=1, second=2, third=3, required=4):\n    pass\nfunc invalid(first=1, second):\n    pass\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 22
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "mandatory parameters"
+    },
+    {
+      "name": "parameters_valid",
+      "source": "extends Node\nfunc test(first, second=2):\n    print(first,second)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "void_type",
+      "source": "extends Node\nvar value: void\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "void_parameter",
+      "source": "extends Node\nfunc test(value: void):\n    pass\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 17
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "void_element",
+      "source": "extends Node\nvar values: Array[void]\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 12
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "standalone_lambda",
+      "source": "extends Node\nfunc test():\n    func():\n        pass\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Standalone lambdas"
+    },
+    {
+      "name": "assigned_lambda",
+      "source": "extends Node\nfunc test():\n    var callback = func():\n        pass\n    callback.call()\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "yield",
+      "source": "extends Node\nfunc test():\n    yield()\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "yield"
+    },
+    {
+      "name": "unicode_valid",
+      "source": "extends Node\nvar 位置: int = 1\nfunc café(усер: int) -> int:\n    var usеr = усер\n    print(usеr)\n    return 位置\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "unicode_error_range",
+      "source": "extends Node\nfunc test():\n    print(\"🧪\", undeclared)\n",
+      "expected": [
+        {
+          "code": "undefined-identifier",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 16
+            },
+            "end": {
+              "line": 2,
+              "character": 26
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "not declared"
+    },
+    {
+      "name": "operator",
+      "source": "extends Node\nfunc test():\n    var value := Vector2.ZERO + Node.new()\n    print(value)\n",
+      "expected": [
+        {
+          "code": "invalid-operator",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 17
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Invalid operands"
+    },
+    {
+      "name": "operator_valid",
+      "source": "extends Node\nfunc test():\n    var value: Vector2 = Vector2.ONE * 2.0\n    print(value, \"x=%s\" % Node.new(), 2 + 0.5)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "operator_missing_metadata",
+      "source": "extends Node\nfunc test():\n    var value := Vector2.ZERO + Node.new()\n    print(value)\n",
+      "expected": [],
+      "warnings": false,
+      "operator_metadata": false
+    },
+    {
+      "name": "cast",
+      "source": "extends Node\nfunc test():\n    var value := 12 as Node\n    print(value)\n",
+      "expected": [
+        {
+          "code": "invalid-cast",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 17
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Invalid cast"
+    },
+    {
+      "name": "cast_valid",
+      "source": "extends Node\nfunc test(value: Variant, node: Node):\n    var a := value as Node\n    var b := node as Node2D\n    var c := 12 as float\n    print(a,b,c)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "downcast_valid",
+      "source": "extends Node\nfunc test():\n    var value: Node2D = Node.new()\n    print(value)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "void_value",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test():\n    var value = nothing()\n    print(value)\n",
+      "expected": [
+        {
+          "code": "void-value",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "returns \"void\""
+    },
+    {
+      "name": "void_argument",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test():\n    print(nothing())\n",
+      "expected": [
+        {
+          "code": "void-value",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 10
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "returns \"void\""
+    },
+    {
+      "name": "void_operand",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test():\n    print(nothing() + 1)\n",
+      "expected": [
+        {
+          "code": "void-value",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 10
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "returns \"void\""
+    },
+    {
+      "name": "void_return_valid",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test() -> void:\n    return nothing()\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "void_return_error",
+      "source": "extends Node\nfunc test() -> void:\n    return 1\n",
+      "expected": [
+        {
+          "code": "return-value-in-void",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void function"
+    },
+    {
+      "name": "unsafe_void_return",
+      "source": "extends Node\nfunc dynamic():\n    return 1\nfunc test() -> void:\n    return dynamic()\n",
+      "expected": [
+        {
+          "code": "unsafe-void-return",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unsafe_void_return",
+      "godot_pattern": "void"
+    },
+    {
+      "name": "array",
+      "source": "extends Node\nfunc test():\n    var values: Array[int] = [1, \"three\"]\n    print(values)\n",
+      "expected": [
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 33
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Array\\[int\\]"
+    },
+    {
+      "name": "array_argument",
+      "source": "extends Node\nfunc consume(values: Array[int]):\n    print(values)\nfunc test():\n    consume([1, \"three\"])\n",
+      "expected": [
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "int"
+    },
+    {
+      "name": "array_return",
+      "source": "extends Node\nfunc test() -> Array[int]:\n    return [1, \"three\"]\n",
+      "expected": [
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 15
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "int"
+    },
+    {
+      "name": "array_assignment",
+      "source": "extends Node\nfunc test():\n    var values: Array[int] = []\n    values = [\"three\"]\n    values[0] = \"four\"\n",
+      "expected": [
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 14
+            }
+          }
+        },
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "int"
+    },
+    {
+      "name": "array_valid",
+      "source": "extends Node\nfunc test(values: Array):\n    var a: Array[int] = [1, 2]\n    var b: Array[int] = values\n    a[0] = 3\n    print(a,b)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "unused_variable",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": "never used"
+    },
+    {
+      "name": "unused_constant",
+      "source": "extends Node\nfunc test():\n    const UNUSED = 1\n",
+      "expected": [
+        {
+          "code": "unused-local-constant",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 10
+            },
+            "end": {
+              "line": 2,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unused_local_constant",
+      "godot_pattern": "never used"
+    },
+    {
+      "name": "unused_parameter",
+      "source": "extends Node\nfunc test(unused):\n    pass\n",
+      "expected": [
+        {
+          "code": "unused-parameter",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 10
+            },
+            "end": {
+              "line": 1,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unused_parameter",
+      "godot_pattern": "never used"
+    },
+    {
+      "name": "unused_valid",
+      "source": "extends Node\nfunc test(_unused, value):\n    var used = value\n    var _ignored = 1\n    print(used)\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "write_not_read",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n    unused = 2\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "compound_read",
+      "source": "extends Node\nfunc test():\n    var value = 1\n    value += 2\n",
+      "expected": [],
+      "warnings": true
+    },
+    {
+      "name": "capture_read",
+      "source": "extends Node\nfunc test():\n    var captured = 1\n    var callback = func():\n        print(captured)\n    callback.call()\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "capture_write",
+      "source": "extends Node\nfunc test():\n    var captured = 1\n    var callback = func():\n        captured = 2\n    callback.call()\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "shadow_member",
+      "source": "extends Node\nvar member = 1\nfunc test():\n    var member = 2\n    print(member)\n",
+      "expected": [
+        {
+          "code": "shadowed-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 8
+            },
+            "end": {
+              "line": 3,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "shadowed_variable",
+      "godot_pattern": "shadow"
+    },
+    {
+      "name": "shadow_base",
+      "source": "extends Node2D\nfunc test():\n    var position = Vector2.ZERO\n    print(position)\n",
+      "expected": [
+        {
+          "code": "shadowed-variable-base-class",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "shadowed_variable_base_class",
+      "godot_pattern": "shadow"
+    },
+    {
+      "name": "shadow_global",
+      "source": "extends Node\nfunc test():\n    var abs = 2\n    print(abs)\n",
+      "expected": [
+        {
+          "code": "shadowed-global-identifier",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "shadowed_global_identifier",
+      "godot_pattern": "same name"
+    },
+    {
+      "name": "shadow_valid",
+      "source": "extends Node\nvar member = 1\nfunc test():\n    var local = member\n    print(local)\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "shadowed_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "unreachable",
+      "source": "extends Node\nfunc test() -> void:\n    return\n    print(\"unreachable\")\n",
+      "expected": [
+        {
+          "code": "unreachable-code",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unreachable_code",
+      "godot_pattern": "Unreachable"
+    },
+    {
+      "name": "unreachable_branch",
+      "source": "extends Node\nfunc test(flag) -> int:\n    if flag:\n        return 1\n    else:\n        return 2\n    print(\"unreachable\")\n",
+      "expected": [
+        {
+          "code": "unreachable-code",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 6,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "reachable_branch",
+      "source": "extends Node\nfunc test(flag):\n    if flag:\n        return\n    print(\"reachable\")\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unreachable_code",
+      "godot_pattern": null
+    },
+    {
+      "name": "unreachable_loop",
+      "source": "extends Node\nfunc test():\n    while true:\n        break\n        print(\"unreachable\")\n    print(\"reachable\")\n",
+      "expected": [
+        {
+          "code": "unreachable-code",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 8
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "unreachable_pattern",
+      "source": "extends Node\nfunc test(value):\n    match value:\n        _:\n            pass\n        1:\n            pass\n",
+      "expected": [
+        {
+          "code": "unreachable-pattern",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 5,
+              "character": 8
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_warning": "unreachable_pattern",
+      "godot_pattern": "pattern"
+    },
+    {
+      "name": "guarded_pattern",
+      "source": "extends Node\nfunc test(value, flag):\n    match value:\n        _ when flag:\n            pass\n        1:\n            pass\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unreachable_pattern",
+      "godot_pattern": null
+    },
+    {
+      "name": "guarded_return",
+      "source": "extends Node\nfunc test(value, flag) -> int:\n    match value:\n        _ when flag:\n            return 1\n",
+      "expected": [
+        {
+          "code": "missing-return-path",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 5
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Not all code paths"
+    },
+    {
+      "name": "warning_disabled",
+      "source": "extends Node\nfunc test(unused):\n    var value = 1\n",
+      "expected": [],
+      "warnings": false
+    },
+    {
+      "name": "warning_error",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "settings": "gdscript/warnings/unused_variable=2\n"
+    },
+    {
+      "name": "warning_ignore",
+      "source": "extends Node\nfunc test():\n    @warning_ignore(\"unused_variable\")\n    var unused = 1\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "warning_ignore_error",
+      "source": "extends Node\n@warning_ignore(\"unused_parameter\")\nfunc test(unused):\n    pass\n",
+      "expected": [],
+      "warnings": true,
+      "settings": "gdscript/warnings/unused_parameter=2\n",
+      "godot_warning": "unused_parameter",
+      "godot_pattern": null
+    },
+    {
+      "name": "warning_region",
+      "source": "extends Node\nfunc test():\n    @warning_ignore_start(\"unused_variable\")\n    var ignored = 1\n    @warning_ignore_restore(\"unused_variable\")\n    var reported = 2\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 5,
+              "character": 8
+            },
+            "end": {
+              "line": 5,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "warning_region_eof",
+      "source": "extends Node\n@warning_ignore_start(\"unused_variable\")\nfunc test():\n    var ignored = 1\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "warning_directory",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n",
+      "expected": [],
+      "warnings": true,
+      "path": "addons/demo/main.gd",
+      "settings": "gdscript/warnings/directory_rules={\"res://addons\":0}\n"
+    },
+    {
+      "name": "warning_directory_include",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "path": "addons/demo/main.gd",
+      "settings": "gdscript/warnings/directory_rules={\n\"res://addons\":0,\n\"res://addons/demo\":1\n}\n"
+    },
+    {
+      "name": "warning_syntax_not_suppressed",
+      "source": "extends Node\nfunc test():\n    @warning_ignore(\"syntax_error\")\n    break\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "unary_member_precedence",
+      "source": "extends Node\nfunc test(value: String):\n    if not value.is_empty():\n        print(\"ok\")\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "operator_line_continuation",
+      "source": "extends Node\nfunc test(a: bool, b: bool):\n    if a or \\\n            b:\n        pass\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "unary_invalid",
+      "source": "extends Node\nfunc test():\n    var value = -\"text\"\n    print(value)\n",
+      "expected": [
+        {
+          "code": "invalid-operator",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Invalid operand"
+    },
+    {
+      "name": "unary_void",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test():\n    print(-nothing())\n",
+      "expected": [
+        {
+          "code": "void-value",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "void_null_return",
+      "source": "extends Node\nfunc test() -> void:\n    return null\n",
+      "expected": [
+        {
+          "code": "return-value-in-void",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "void_dictionary_element",
+      "source": "extends Node\nfunc nothing() -> void:\n    pass\nfunc test():\n    var value = {\"key\": nothing()}\n    print(value)\n",
+      "expected": [
+        {
+          "code": "void-value",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 24
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "void"
+    },
+    {
+      "name": "failed_argument_no_cascade",
+      "source": "extends Node\nfunc take(value: int) -> int:\n    return value\nfunc test():\n    print(take(missing) + Node.new())\n",
+      "expected": [
+        {
+          "code": "undefined-identifier",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 15
+            }
+          }
+        }
+      ],
+      "warnings": false
+    },
+    {
+      "name": "cast_inner_class",
+      "source": "extends Node\nclass Outer:\n    class Inner:\n        pass\nfunc test(value: Variant):\n    var result := value as Outer.Inner\n    print(result)\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "shadow_script_base",
+      "source": "extends \"res://base.gd\"\nfunc test():\n    var member = 1\n    print(member)\n",
+      "expected": [
+        {
+          "code": "shadowed-variable-base-class",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true,
+      "files": {
+        "base.gd": "extends Node\nvar member = 1\n"
+      },
+      "godot_warning": "shadowed_variable_base_class",
+      "godot_pattern": "shadow"
+    },
+    {
+      "name": "region_warning_multiple",
+      "source": "extends Node\n@warning_ignore_start(\"unused_variable\", \"unused_parameter\")\nfunc test(unused):\n    var ignored = 1\n    @warning_ignore_restore(\"unused_variable\")\n    var reported = 2\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 5,
+              "character": 8
+            },
+            "end": {
+              "line": 5,
+              "character": 16
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "pattern_warning_ignore",
+      "source": "extends Node\nfunc test(value):\n    match value:\n        _:\n            pass\n        @warning_ignore(\"unreachable_pattern\")\n        1:\n            pass\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unreachable_pattern",
+      "godot_pattern": null
+    },
+    {
+      "name": "capture_shadow_identity",
+      "source": "extends Node\nfunc test():\n    var unused = 1\n    var callback = func(unused):\n        print(unused)\n    callback.call(2)\n",
+      "expected": [
+        {
+          "code": "unused-variable",
+          "severity": 2,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 8
+            },
+            "end": {
+              "line": 2,
+              "character": 14
+            }
+          }
+        }
+      ],
+      "warnings": true
+    },
+    {
+      "name": "damaged_capture",
+      "source": "extends Node\nfunc test():\n    var captured = 1\n    var callback = func():\n        captured.\n    callback.call()\n",
+      "expected": null,
+      "warnings": false,
+      "invariants": {
+        "require": [
+          "syntax-error"
+        ],
+        "forbid": [
+          "unused-variable",
+          "unused-parameter",
+          "unreachable-code"
+        ]
+      }
+    },
+    {
+      "name": "grouped_member_continuation",
+      "source": "extends Node\nfunc test(value: String):\n    print((value.\n        is_empty()))\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "explicit_member_continuation",
+      "source": "extends Node\nfunc test(value: String):\n    print(value.\\\n        is_empty())\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "constant_warning_ignore",
+      "source": "extends Node\nfunc test():\n    const IGNORE = \"unused_\" + \"variable\"\n    @warning_ignore(IGNORE)\n    var unused = 1\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "unused_variable",
+      "godot_pattern": null
+    },
+    {
+      "name": "array_member_write",
+      "source": "extends Node\nvar values: Array[int] = []\nfunc test():\n    self.values[0] = \"bad\"\n",
+      "expected": [
+        {
+          "code": "type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 21
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "int"
+    },
+    {
+      "name": "augmented_operator",
+      "source": "extends Node\nfunc test():\n    var value: int = 1\n    value += Node.new()\n",
+      "expected": [
+        {
+          "code": "invalid-operator",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Invalid operands"
+    }
+  ]
+}

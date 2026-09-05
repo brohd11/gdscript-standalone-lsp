@@ -32,7 +32,7 @@ func analyzer_errors() -> void:
     print("🧪", another_missing_identifier) # E: identifier not declared
 
     var bad_int: int = "text" # E: String cannot initialize int
-    var bad_node: Node2D = Node.new() # E: Node cannot initialize Node2D
+    var bad_node: Node2D = Node.new() # Valid statically: implicit downcast; the runtime value may fail the check.
     print(bad_int, bad_node)
 
     expects_int("text") # E: argument type mismatch

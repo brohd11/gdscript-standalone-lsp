@@ -43,11 +43,11 @@ struct CodeToken {
 };
 
 bool identifier_character(char value) {
-	return std::isalnum(static_cast<unsigned char>(value)) || value == '_';
+	return identifier_byte(value);
 }
 
 bool identifier_start(char value) {
-	return std::isalpha(static_cast<unsigned char>(value)) || value == '_';
+	return identifier_start_byte(value);
 }
 
 bool matching(char open, char close) {

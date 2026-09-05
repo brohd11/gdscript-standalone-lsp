@@ -2,6 +2,7 @@
 #include "core/caret_context.hpp"
 #include "core/gdscript_api.hpp"
 #include "core/semantic_analyzer.hpp"
+#include "core/syntax_checks.hpp"
 #include "core/text.hpp"
 #include "core/uri.hpp"
 
@@ -25,10 +26,7 @@ std::string read_file(const std::filesystem::path &path) {
 	return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 
-bool is_identifier(std::string_view value) {
-	if (value.empty() || (!std::isalpha(static_cast<unsigned char>(value.front())) && value.front() != '_')) return false;
-	return std::all_of(value.begin() + 1, value.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; });
-}
+
 
 bool is_integer_literal(std::string_view value) {
 	if (!value.empty() && (value.front() == '+' || value.front() == '-')) value.remove_prefix(1);
@@ -331,9 +329,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 	global_name_counts_.clear();
 	autoloads_.clear();
 	uid_paths_.clear();
-	unsafe_property_access_ = WarningLevel::Ignore;
-	unsafe_method_access_ = WarningLevel::Ignore;
-	unsafe_call_argument_ = WarningLevel::Ignore;
+	warning_policy_.load(read_file(root_ / "project.godot"));
 	native_api_ = {};
 	stats_ = {};
 	clear_outline_cache();
@@ -418,9 +414,7 @@ void Workspace::scan_uid_files() {
 
 void Workspace::read_project_settings() {
 	autoloads_.clear();
-	unsafe_property_access_ = WarningLevel::Ignore;
-	unsafe_method_access_ = WarningLevel::Ignore;
-	unsafe_call_argument_ = WarningLevel::Ignore;
+	warning_policy_.load(read_file(root_ / "project.godot"));
 	std::istringstream stream(read_file(root_ / "project.godot"));
 	std::string line;
 	std::string section;
@@ -439,15 +433,7 @@ void Workspace::read_project_settings() {
 			value = value.substr(1, value.size() - 2);
 			if (value.starts_with('*')) value.erase(value.begin());
 			if (!value.empty()) autoloads_[name] = value;
-		} else if (section == "debug") {
-			auto warning_level = [&]() {
-				if (value == "1") return WarningLevel::Warning;
-				if (value == "2") return WarningLevel::Error;
-				return WarningLevel::Ignore;
-			}();
-			if (name == "gdscript/warnings/unsafe_property_access") unsafe_property_access_ = warning_level;
-			else if (name == "gdscript/warnings/unsafe_method_access") unsafe_method_access_ = warning_level;
-			else if (name == "gdscript/warnings/unsafe_call_argument") unsafe_call_argument_ = warning_level;
+
 		}
 	}
 }
@@ -2978,6 +2964,7 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 		result.push_back({std::move(code), std::move(message), range, severity});
 	};
 	for (const auto &issue : document->syntax_errors()) add("syntax-error", issue.message, issue.range);
+	for (const auto &issue : structural_issues(*document)) add("syntax-error", issue.message, issue.range);
 	for (const auto &record : document->classes()) {
 		if (!record.global_name.empty() && global_name_counts_.contains(record.global_name) &&
 				global_name_counts_.at(record.global_name) > 1) {
@@ -3015,8 +3002,13 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 	result.insert(result.end(), std::make_move_iterator(semantic.begin()), std::make_move_iterator(semantic.end()));
 	std::sort(result.begin(), result.end(), [](const Diagnostic &a, const Diagnostic &b) {
 		if (a.range.start != b.range.start) return a.range.start < b.range.start;
-		return a.code < b.code;
+		if (a.code != b.code) return a.code < b.code;
+		if (a.range.end != b.range.end) return a.range.end < b.range.end;
+		return a.message < b.message;
 	});
+	result.erase(std::unique(result.begin(), result.end(), [](const Diagnostic &a, const Diagnostic &b) {
+		return a.range.start == b.range.start && a.range.end == b.range.end && a.code == b.code && a.message == b.message;
+	}), result.end());
 	return result;
 }
 

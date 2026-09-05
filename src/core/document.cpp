@@ -458,12 +458,12 @@ FunctionExtent function_extent(std::string_view source, const std::vector<bool> 
 		cursor += 7;
 	}
 	if (source.substr(cursor, 4) != "func" || (cursor + 4 < source.size() &&
-			(std::isalnum(static_cast<unsigned char>(source[cursor + 4])) || source[cursor + 4] == '_'))) return result;
+			identifier_byte(source[cursor + 4]))) return result;
 	result.keyword = cursor;
 	cursor += 4;
 	while (cursor < source.size() && std::isspace(static_cast<unsigned char>(source[cursor])) && source[cursor] != '\n') ++cursor;
 	result.name_start = cursor;
-	while (cursor < source.size() && (std::isalnum(static_cast<unsigned char>(source[cursor])) || source[cursor] == '_')) ++cursor;
+	cursor = identifier_end(source, cursor);
 	result.name_end = cursor;
 
 	int grouping = 0;
@@ -1070,6 +1070,41 @@ void Document::parse(const Document *previous) {
 		if (end == source_.size()) break;
 		line = end + 1;
 	}
+	// The recovery grammar can join `receiver.` to a name on the next physical
+	// statement. Mark that tree as damaged unless grouping or a backslash makes
+	// the newline legal. Run after bounded recovery so its issue is not erased.
+	std::vector<unsigned> grouping(source_.size() + 1);
+	unsigned depth = 0;
+	for (size_t index = 0; index < source_.size(); ++index) {
+		grouping[index] = depth;
+		if (!code[index]) continue;
+		if (source_[index] == '(' || source_[index] == '[' || source_[index] == '{') ++depth;
+		else if ((source_[index] == ')' || source_[index] == ']' || source_[index] == '}') && depth) --depth;
+	}
+	grouping.back() = depth;
+	std::function<void(SyntaxNode &)> validate_attributes = [&](SyntaxNode &node) {
+		if (node.kind == "attribute") for (size_t i = 1; i < node.children.size(); ++i) {
+			const auto &previous = node.children[i - 1];
+			const auto &next = node.children[i];
+			if (previous.end_byte > next.start_byte || next.start_byte > source_.size()) continue;
+			if (grouping[previous.end_byte]) continue;
+			for (size_t at = previous.end_byte; at < next.start_byte; ++at) if (source_[at] == '\n') {
+				auto before = at;
+				while (before > previous.end_byte && (source_[before - 1] == ' ' || source_[before - 1] == '\t' || source_[before - 1] == '\r')) --before;
+				if (before > previous.end_byte && source_[before - 1] == '\\' && code[before - 1]) continue;
+				auto dot = source_.find('.', previous.end_byte);
+				if (dot == std::string::npos || dot > at) dot = previous.end_byte;
+				add_parse_issue(syntax_errors_, {byte_to_position(source_, dot), byte_to_position(source_, dot + 1)}, "Expected a member name before the end of the statement.");
+				node.has_error = true;
+				break;
+			}
+		}
+		for (auto &child : node.children) {
+			validate_attributes(child);
+			node.has_error = node.has_error || child.has_error;
+		}
+	};
+	validate_attributes(syntax_root_);
 	// Discard symbols which the damaged whole-document tree incorrectly emitted
 	// at class scope or inside an earlier function. The bounded declarations own
 	// every local in their lexical body.

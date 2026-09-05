@@ -43,6 +43,11 @@ def reduce_class(value: dict) -> dict:
     for key in MEMBER_KEYS:
         if isinstance(value.get(key), list):
             result[key] = [reduce_member(member) for member in value[key] if isinstance(member, dict)]
+    if isinstance(value.get("operators"), list):
+        result["operators"] = [
+            {key: op[key] for key in ("name", "right_type", "return_type") if key in op}
+            for op in value["operators"]
+        ]
     return result
 
 
@@ -54,7 +59,7 @@ def main() -> int:
     destination = pathlib.Path(sys.argv[2])
     data = json.loads(source.read_text(encoding="utf-8"))
     reduced = {
-        "gdscript_lsp_schema": 2,
+        "gdscript_lsp_schema": 3,
         "header": data.get("header", {}),
         "builtin_classes": [reduce_class(value) for value in data.get("builtin_classes", [])],
         "classes": [reduce_class(value) for value in data.get("classes", [])],

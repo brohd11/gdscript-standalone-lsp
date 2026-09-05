@@ -1,4 +1,5 @@
 #include "core/text.hpp"
+#include "core/unicode_identifiers.inc"
 
 #include <algorithm>
 #include <cctype>
@@ -24,11 +25,39 @@ uint32_t codepoint(std::string_view text, size_t offset, size_t width) {
 	return value;
 }
 
-bool identifier_char(char value) {
-	return std::isalnum(static_cast<unsigned char>(value)) || value == '_';
+template <size_t N>
+bool in_ranges(char32_t value, const unicode::CharRange (&ranges)[N]) {
+	auto it = std::lower_bound(std::begin(ranges), std::end(ranges), value,
+		[](const auto &range, char32_t character) { return range.end < character; });
+	return it != std::end(ranges) && it->start <= value;
 }
 
 } // namespace
+
+bool identifier_byte(char value) {
+	return std::isalnum(static_cast<unsigned char>(value)) || value == '_' || static_cast<unsigned char>(value) >= 0x80;
+}
+bool identifier_start_byte(char value) {
+	return std::isalpha(static_cast<unsigned char>(value)) || value == '_' || static_cast<unsigned char>(value) >= 0x80;
+}
+size_t identifier_end(std::string_view text, size_t offset) {
+	auto start = offset;
+	while (offset < text.size()) {
+		auto width = utf8_width(static_cast<unsigned char>(text[offset]));
+		if (offset + width > text.size()) break;
+		auto value = codepoint(text, offset, width);
+		bool valid = width == 1 ? static_cast<unsigned char>(text[offset]) < 0x80 : true;
+		for (size_t i = 1; i < width; ++i) valid &= (static_cast<unsigned char>(text[offset + i]) & 0xC0) == 0x80;
+		if (!valid || (width == 2 && value < 0x80) || (width == 3 && value < 0x800) ||
+			(width == 4 && value < 0x10000) || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) break;
+		if (value != '_' && !(offset == start ? in_ranges(value, unicode::xid_start) : in_ranges(value, unicode::xid_continue))) break;
+		offset += width;
+	}
+	return offset;
+}
+bool is_identifier(std::string_view value) {
+	return !value.empty() && identifier_end(value, 0) == value.size();
+}
 
 size_t position_to_byte(std::string_view text, Position position) {
 	size_t offset = 0;
@@ -65,15 +94,16 @@ Position byte_to_position(std::string_view text, size_t byte_offset) {
 
 std::string identifier_at(std::string_view text, Position position) {
 	size_t offset = position_to_byte(text, position);
-	if (offset == text.size() || !identifier_char(text[offset])) {
-		if (offset == 0 || !identifier_char(text[offset - 1])) return {};
+	if (offset == text.size() || !identifier_byte(text[offset])) {
+		if (offset == 0 || !identifier_byte(text[offset - 1])) return {};
 		--offset;
 	}
 	size_t start = offset;
-	while (start > 0 && identifier_char(text[start - 1])) --start;
+	while (start > 0 && identifier_byte(text[start - 1])) --start;
 	size_t end = offset;
-	while (end < text.size() && identifier_char(text[end])) ++end;
-	return std::string(text.substr(start, end - start));
+	while (end < text.size() && identifier_byte(text[end])) ++end;
+	auto candidate = text.substr(start, end - start);
+	return is_identifier(candidate) ? std::string(candidate) : std::string{};
 }
 
 std::string trim(std::string_view text) {

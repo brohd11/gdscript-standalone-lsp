@@ -1,4 +1,6 @@
 #include "core/semantic_analyzer.hpp"
+#include "core/syntax_checks.hpp"
+#include "core/warnings.hpp"
 
 #include "core/document.hpp"
 #include "core/gdscript_api.hpp"
@@ -39,8 +41,19 @@ const SyntaxNode *first_identifier(const SyntaxNode &node) {
 	return nullptr;
 }
 
+struct Binding {
+	std::string name;
+	std::string warning;
+	Range range;
+	bool read = false;
+	bool written = false;
+};
+
 struct Value {
 	ResolvedType type;
+	std::shared_ptr<Binding> binding;
+	std::vector<Value> elements;
+	bool array_literal = false;
 	std::vector<CallableSignature> signatures;
 	bool resolved = false;
 	bool callable = false;
@@ -84,7 +97,7 @@ std::optional<std::string> string_literal_value(std::string value) {
 
 class SemanticAnalyzerImpl {
 public:
-	SemanticAnalyzerImpl(const Workspace &p_workspace, const Document &p_document) : workspace(p_workspace), document(p_document) {}
+	SemanticAnalyzerImpl(const Workspace &p_workspace, const Document &p_document) : workspace(p_workspace), document(p_document), suppressions(p_document) {}
 
 	std::vector<Diagnostic> run() {
 		analyze_class_container(document.syntax_root());
@@ -97,6 +110,53 @@ private:
 	const ClassRecord *current_class = nullptr;
 	std::vector<Scope> scopes;
 	std::vector<Diagnostic> diagnostics;
+	WarningSuppressions suppressions;
+	struct FunctionBindings {
+		std::vector<std::shared_ptr<Binding>> declarations;
+		bool damaged = false;
+	};
+	std::vector<FunctionBindings> functions;
+
+	void warn(std::string code, std::string message, Range range) {
+		auto level = workspace.warning_policy_.level(code, document.resource_path());
+		if (level == WarningLevel::Ignore || suppressions.contains(code, range.start)) return;
+		add(std::move(code), std::move(message), range,
+			level == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
+	}
+
+	void declare(const SyntaxNode &name, Value value, std::string unused = {}) {
+		auto spelling = text(document, name);
+		if (!functions.empty()) {
+			if (!unused.empty()) {
+				value.binding = std::make_shared<Binding>(Binding{spelling, unused, name.range});
+				functions.back().declarations.push_back(value.binding);
+			}
+			if (!functions.back().damaged && current_class) {
+				const Symbol *shadow = nullptr;
+				for (const auto &member : current_class->members) if (member.name == spelling) { shadow = &member; break; }
+				std::string code;
+				if (shadow) code = "shadowed-variable";
+				else if (current_class->inheritance_error.empty() &&
+					(workspace.find_member(*current_class, spelling) || workspace.native_api_.find_member(workspace.native_base(*current_class), spelling)))
+					code = "shadowed-variable-base-class";
+				else if (workspace.global_classes_.contains(spelling) || workspace.autoloads_.contains(spelling) ||
+					workspace.native_api_.has_class(spelling) || workspace.native_api_.has_global_symbol(spelling) ||
+					workspace.native_api_.find_utility_function(spelling) || find_gdscript_builtin_function(spelling))
+					code = "shadowed-global-identifier";
+				if (!code.empty()) warn(code, "The local declaration \"" + spelling + "\" shadows an existing declaration.", name.range);
+			}
+		}
+		scopes.back()[spelling] = std::move(value);
+	}
+
+	void finish_function() {
+		if (!functions.back().damaged) for (const auto &binding : functions.back().declarations) {
+			if (!binding->read && !binding->name.starts_with('_'))
+				warn(binding->warning, "The declaration \"" + binding->name + "\" is never used.", binding->range);
+		}
+		functions.pop_back();
+	}
+
 
 	void add(std::string code, std::string message, Range range,
 			DiagnosticSeverity severity = DiagnosticSeverity::Error) {
@@ -153,9 +213,10 @@ private:
 		return result;
 	}
 
-	Value resolve_name(std::string_view name, Position position, bool call_target, Range range) {
+	Value resolve_name(std::string_view name, Position position, bool call_target, Range range, bool read = true) {
 		for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
 			if (auto found = scope->find(std::string(name)); found != scope->end()) {
+				if (found->second.binding && read) found->second.binding->read = true;
 				if (call_target && !found->second.callable) {
 					if (auto *utility = workspace.native_api_.find_utility_function(name)) {
 						return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
@@ -288,8 +349,9 @@ private:
 
 	Value member_value(const Value &receiver, std::string_view name, Range range,
 			MemberAccessKind access = MemberAccessKind::Property) {
-		if (!receiver.resolved || !receiver.type.known() || receiver.type.kind == TypeKind::Variant ||
-			(receiver.type.kind == TypeKind::Builtin && receiver.type.name == "Dictionary")) return {};
+		if (!receiver.resolved || !receiver.type.known()) return {};
+		if (receiver.type.kind == TypeKind::Variant || (receiver.type.kind == TypeKind::Builtin && receiver.type.name == "Dictionary"))
+			return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		if (name == "new" && !receiver.type.instance &&
 			(receiver.type.kind == TypeKind::ScriptClass || receiver.type.kind == TypeKind::NativeClass)) {
 			Value result{{TypeKind::Callable, "Callable"}, {}, true, true};
@@ -362,21 +424,82 @@ private:
 		}
 		if (receiver.type.instance && (receiver.type.kind == TypeKind::ScriptClass ||
 				receiver.type.kind == TypeKind::NativeClass)) {
-			auto level = access == MemberAccessKind::Method ?
-				workspace.unsafe_method_access_ : workspace.unsafe_property_access_;
-			if (level != WarningLevel::Ignore) {
-				auto method = access == MemberAccessKind::Method;
-				add(method ? "unsafe-method-access" : "unsafe-property-access",
-					(method ? "Method \"" : "Property \"") + std::string(name) +
-					"\" is not present on the inferred type \"" + receiver.type.display() +
-					"\" (but may be present on a subtype).", range,
-					level == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
-			}
+			auto method = access == MemberAccessKind::Method;
+			warn(method ? "unsafe-method-access" : "unsafe-property-access",
+				(method ? "Method \"" : "Property \"") + std::string(name) +
+				"\" is not present on type \"" + receiver.type.display() + "\" (but may be present on a subtype).", range);
 			return {};
 		}
 		add("unknown-member", "Member \"" + std::string(name) + "\" does not exist on type \"" +
 			receiver.type.display() + "\".", range);
 		return {};
+	}
+
+	Value require_value(Value value, Range range) {
+		if (value.resolved && value.type.kind == TypeKind::Void) {
+			add("void-value", "Cannot use the result of a call that returns void.", range);
+			return {};
+		}
+		return value;
+	}
+
+	bool compatible_value(const ResolvedType &expected, const Value &value) const {
+		if (expected.name == "Array" && !expected.arguments.empty() && value.array_literal) {
+			for (const auto &element : value.elements) if (!compatible_value(expected.arguments.front(), element)) return false;
+			return true;
+		}
+		return !value.resolved || workspace.is_assignable(expected, value.type) || workspace.is_potential_downcast(expected, value.type);
+	}
+
+	bool check_array(const ResolvedType &expected, const Value &value, const SyntaxNode &source) {
+		if (expected.name != "Array" || expected.arguments.empty() || !value.array_literal) return false;
+		const SyntaxNode *array = &source;
+		while (array->kind == "parenthesized_expression" && !array->children.empty()) array = &array->children.front();
+		size_t index = 0;
+		for (const auto &element : array->children) {
+			if (element.kind == "comment") continue;
+			if (index >= value.elements.size()) break;
+			const auto &actual = value.elements[index++];
+			if (check_array(expected.arguments.front(), actual, element)) continue;
+			if (!compatible_value(expected.arguments.front(), actual))
+				add("type-mismatch", "Array element of type \"" + actual.type.display() + "\" is incompatible with \"" + expected.arguments.front().display() + "\".", element.range);
+		}
+		return true;
+	}
+
+	std::string operation(const SyntaxNode &node) const {
+		auto left = field(node, "left"), right = field(node, "right");
+		if (!left || !right || right->start_byte < left->end_byte) return {};
+		auto source = std::string_view(document.source()).substr(left->end_byte, right->start_byte - left->end_byte);
+		std::string result;
+		bool comment = false;
+		for (char c : source) {
+			if (c == '\n') comment = false;
+			if (c == '#') comment = true;
+			if (!comment && c != '\\' && !std::isspace(static_cast<unsigned char>(c))) result += c;
+		}
+		if (result == "isnot") return "is not";
+		if (result == "notin") return "not in";
+		return result;
+	}
+
+	Value cast_value(const SyntaxNode &node, std::string target_name = {}) {
+		auto left = field(node, "left"), right = field(node, "right");
+		if (!left || !right) return {};
+		auto source = require_value(evaluate(*left), left->range);
+		if (target_name.empty()) target_name = text(document, *right);
+		auto target = workspace.type_from_name(target_name, current_class);
+		if (!target.known()) {
+			add("unknown-type", "Could not find cast type \"" + text(document, *right) + "\".", right->range);
+			return {};
+		}
+		if (!source.resolved || !source.type.known()) return {};
+		if (source.type.kind != TypeKind::Variant && !workspace.is_assignable(target, source.type) && !workspace.is_potential_downcast(target, source.type)) {
+			add("invalid-cast", "Cannot cast \"" + source.type.display() + "\" to \"" + target.display() + "\".", node.range);
+			return {};
+		}
+		target.instance = true;
+		return {target, {}, true, false};
 	}
 
 	std::vector<const SyntaxNode *> argument_nodes(const SyntaxNode *arguments) const {
@@ -389,8 +512,9 @@ private:
 	Value call_value(Value callee, const SyntaxNode *arguments, Range range) {
 		auto nodes = argument_nodes(arguments);
 		std::vector<Value> values;
-		for (auto *node : nodes) values.push_back(evaluate(*node));
-		if (!callee.resolved) return {};
+		for (auto *node : nodes) values.push_back(require_value(evaluate(*node), node->range));
+		if (!callee.resolved || std::any_of(values.begin(), values.end(), [](const Value &value) { return !value.resolved; })) return {};
+		if (!callee.callable && callee.type.kind == TypeKind::Variant) return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		if (!callee.callable) {
 			if (callee.type.kind != TypeKind::Variant && callee.type.known()) {
 				add("not-callable", "A value of type \"" + callee.type.display() + "\" is not callable.", range);
@@ -416,14 +540,15 @@ private:
 			bool compatible = true;
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
 				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
-				if (expected.known() && values[index].type.known() && !workspace.is_assignable(expected, values[index].type)) {
+				if (expected.known() && values[index].type.known() &&
+					(!workspace.is_assignable(expected, values[index].type) || (values[index].array_literal && !compatible_value(expected, values[index])))) {
 					compatible = false;
 					break;
 				}
 			}
 			if (compatible) {
 				auto result_type = workspace.type_from_name(signature->return_type, signature_context);
-				if (!result_type.known()) result_type = {TypeKind::Variant, "Variant"};
+				// An unavailable return type stays unknown rather than becoming dynamic.
 				return {result_type, {}, true, false};
 			}
 		}
@@ -431,9 +556,10 @@ private:
 			bool compatible = true;
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
 				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
-				if (expected.known() && values[index].type.known() &&
+				if ((values[index].array_literal && !compatible_value(expected, values[index])) ||
+					(expected.known() && values[index].type.known() &&
 						!workspace.is_assignable(expected, values[index].type) &&
-						!workspace.is_potential_downcast(expected, values[index].type)) {
+						!workspace.is_potential_downcast(expected, values[index].type))) {
 					compatible = false;
 					break;
 				}
@@ -442,18 +568,18 @@ private:
 			for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
 				auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
 				if (!workspace.is_potential_downcast(expected, values[index].type) ||
-						workspace.unsafe_call_argument_ == WarningLevel::Ignore) continue;
-				add("unsafe-call-argument", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
-					"\", but the value has the broader type \"" + values[index].type.display() + "\".", nodes[index]->range,
-					workspace.unsafe_call_argument_ == WarningLevel::Error ? DiagnosticSeverity::Error : DiagnosticSeverity::Warning);
+						workspace.warning_policy_.level("unsafe-call-argument", document.resource_path()) == WarningLevel::Ignore) continue;
+				warn("unsafe-call-argument", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
+					"\", but the value has the broader type \"" + values[index].type.display() + "\".", nodes[index]->range);
 			}
 			auto result_type = workspace.type_from_name(signature->return_type, signature_context);
-			if (!result_type.known()) result_type = {TypeKind::Variant, "Variant"};
+			// An unavailable return type stays unknown rather than becoming dynamic.
 			return {result_type, {}, true, false};
 		}
 		auto *signature = arity_matches.front();
 		for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
 			auto expected = workspace.type_from_name(signature->arguments[index].type, signature_context);
+			if (check_array(expected, values[index], *nodes[index])) continue;
 			if (expected.known() && values[index].type.known() && !workspace.is_assignable(expected, values[index].type)) {
 				add("argument-type", "Argument " + std::to_string(index + 1) + " expects \"" + expected.display() +
 					"\", but received \"" + values[index].type.display() + "\".", nodes[index]->range);
@@ -464,20 +590,50 @@ private:
 		return {result_type, {}, true, false};
 	}
 
-	Value binary_result(const SyntaxNode &node, Value left_value, Value right_value) const {
-		auto *left = field(node, "left");
-		auto *right = field(node, "right");
-		auto operation = left && right && right->start_byte >= left->end_byte ?
-			trim(std::string_view(document.source()).substr(left->end_byte, right->start_byte - left->end_byte)) : std::string{};
-		if (operation == "==" || operation == "!=" || operation == "<" || operation == "<=" ||
-				operation == ">" || operation == ">=" || operation == "is" || operation == "is not" ||
-				operation == "in" || operation == "not in") {
+	Value unary_result(const SyntaxNode &node, Value value) {
+		const auto &operand = node.children.back();
+		if (!value.resolved || !value.type.known()) return {};
+		auto op = trim(std::string_view(document.source()).substr(node.start_byte, operand.start_byte - node.start_byte));
+		if (op == "!" || op == "not") return {{TypeKind::Builtin, "bool"}, {}, true, false};
+		if (value.type.kind == TypeKind::Variant) return value;
+		if (op == "+" || op == "-") op = "unary" + op;
+		auto name = value.type.kind == TypeKind::Enum ? "int" : value.type.name;
+		if (auto native = workspace.native_api_.find_class(name); native && native->operators_known) {
+			for (const auto &entry : native->operators) if (entry.name == op && entry.right_type.empty())
+				return {workspace.type_from_name(entry.return_type, current_class), {}, true, false};
+			add("invalid-operator", "Invalid operand for unary operator \"" + op + "\".", node.range);
+			return {};
+		}
+		return value;
+	}
+
+	Value binary_result(const SyntaxNode &node, Value left_value, Value right_value) {
+		auto op = operation(node);
+		if (node.kind == "augmented_assignment" && op.ends_with('=')) op.pop_back();
+		if (!left_value.resolved || !right_value.resolved || !left_value.type.known() || !right_value.type.known()) return {};
+		if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
+			op == "is" || op == "is not" || op == "in" || op == "not in" || op == "and" || op == "or" || op == "&&" || op == "||")
 			return {{TypeKind::Builtin, "bool"}, {}, true, false};
+		if (left_value.type.kind == TypeKind::Variant || right_value.type.kind == TypeKind::Variant)
+			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+		auto left_name = left_value.type.kind == TypeKind::Enum ? "int" : left_value.type.name;
+		auto right_name = right_value.type.kind == TypeKind::Enum ? "int" : right_value.type.name;
+		if (right_value.type.kind == TypeKind::NativeClass || right_value.type.kind == TypeKind::ScriptClass) right_name = "Object";
+		auto *native = workspace.native_api_.find_class(left_name);
+		if (native && native->operators_known) {
+			const NativeOperator *wildcard = nullptr;
+			for (const auto &entry : native->operators) if (entry.name == op) {
+				if (entry.right_type == right_name) return {workspace.type_from_name(entry.return_type, current_class), {}, true, false};
+				if (entry.right_type == "Variant") wildcard = &entry;
+			}
+			if (wildcard) return {workspace.type_from_name(wildcard->return_type, current_class), {}, true, false};
+			add("invalid-operator", "Invalid operands \"" + left_value.type.display() + "\" and \"" + right_value.type.display() + "\" for operator \"" + op + "\".", node.range);
+			return {};
 		}
-		if (left_value.type.known() && right_value.type.known() && left_value.type.name == right_value.type.name) {
-			return left_value;
-		}
-		return {{TypeKind::Variant, "Variant"}, {}, true, false};
+		// Old reduced snapshots do not contain operator tables. Keep completion-era
+		// inference, but do not manufacture incompatibility diagnostics.
+		if (left_value.type.name == right_value.type.name) return left_value;
+		return {};
 	}
 
 	Value apply_attribute_nodes(Value current, const std::vector<const SyntaxNode *> &parts) {
@@ -505,9 +661,12 @@ private:
 				auto *identifier = first_identifier(part);
 				current = identifier ? member_value(current, text(document, *identifier), identifier->range) : Value{};
 				if (auto *arguments = field(part, "arguments")) {
-					for (const auto &child : arguments->children) evaluate(child);
+					for (const auto &child : arguments->children) require_value(evaluate(child), child.range);
 				}
-				current = {{TypeKind::Variant, "Variant"}, {}, true, false};
+				if (current.type.name == "Array" && !current.type.arguments.empty()) {
+					auto element = current.type.arguments.front();
+					current = {element, {}, true, false};
+				} else current = {{TypeKind::Variant, "Variant"}, {}, true, false};
 			}
 		}
 		return current;
@@ -520,16 +679,25 @@ private:
 	}
 
 	Value evaluate_with_attribute_suffix(const SyntaxNode &node, std::vector<const SyntaxNode *> suffix) {
-		if (node.kind == "attribute" && !node.children.empty() && node.children.front().kind == "binary_operator") {
+		if (node.kind == "attribute" && !node.children.empty() && (node.children.front().kind == "binary_operator" || node.children.front().kind == "unary_operator")) {
 			std::vector<const SyntaxNode *> combined;
 			for (size_t index = 1; index < node.children.size(); ++index) combined.push_back(&node.children[index]);
 			combined.insert(combined.end(), suffix.begin(), suffix.end());
 			return evaluate_with_attribute_suffix(node.children.front(), std::move(combined));
 		}
+		if (node.kind == "unary_operator" && !node.children.empty()) {
+			const auto &operand = node.children.back();
+			return unary_result(node, require_value(evaluate_with_attribute_suffix(operand, std::move(suffix)), operand.range));
+		}
 		if (node.kind == "binary_operator") {
+			if (operation(node) == "as") {
+				auto right = field(node, "right");
+				if (right && !suffix.empty()) return cast_value(node, trim(std::string_view(document.source()).substr(right->start_byte, suffix.back()->end_byte - right->start_byte)));
+				return cast_value(node);
+			}
 			auto *left = field(node, "left");
 			auto *right = field(node, "right");
-			auto left_value = left ? evaluate(*left) : Value{};
+			auto left_value = left ? require_value(evaluate(*left), left->range) : Value{};
 			auto right_value = right ? evaluate_with_attribute_suffix(*right, std::move(suffix)) : Value{};
 			return binary_result(node, std::move(left_value), std::move(right_value));
 		}
@@ -547,31 +715,38 @@ private:
 		if (node.kind == "null") return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		if (node.kind == "get_node") return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		if (node.kind == "array") {
-			for (const auto &child : node.children) evaluate(child);
-			return {{TypeKind::Builtin, "Array"}, {}, true, false};
+			Value result{{TypeKind::Builtin, "Array"}, {}, true, false};
+			result.array_literal = true;
+			for (const auto &child : node.children) if (child.kind != "comment") result.elements.push_back(require_value(evaluate(child), child.range));
+			return result;
 		}
 		if (node.kind == "dictionary") {
 			for (const auto &child : node.children) evaluate(child);
 			return {{TypeKind::Builtin, "Dictionary"}, {}, true, false};
 		}
 		if (node.kind == "pair") {
-			for (const auto &child : node.children) evaluate(child);
+			for (const auto &child : node.children) require_value(evaluate(child), child.range);
 			return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		}
-		if (node.kind == "parenthesized_expression" || node.kind == "await_expression" || node.kind == "unary_operator") {
-			return node.children.empty() ? Value{} : evaluate(node.children.front());
+		if (node.kind == "parenthesized_expression") return node.children.empty() ? Value{} : evaluate(node.children.front());
+		if (node.kind == "await_expression") return node.children.empty() ? Value{} : require_value(evaluate(node.children.front()), node.children.front().range);
+		if (node.kind == "unary_operator") {
+			if (node.children.empty()) return {};
+			return unary_result(node, require_value(evaluate(node.children.back()), node.children.back().range));
 		}
 		if (node.kind == "binary_operator") {
+			if (operation(node) == "as") return cast_value(node);
 			auto *left = field(node, "left");
 			auto *right = field(node, "right");
-			auto left_value = left ? evaluate(*left) : Value{};
-			auto right_value = right ? evaluate(*right) : Value{};
+			auto left_value = left ? require_value(evaluate(*left), left->range) : Value{};
+			auto right_value = right ? ((operation(node) == "is" || operation(node) == "is not") ?
+				Value{workspace.type_from_name(text(document, *right), current_class), {}, true, false} : require_value(evaluate(*right), right->range)) : Value{};
 			return binary_result(node, std::move(left_value), std::move(right_value));
 		}
 		if (node.kind == "conditional_expression") {
-			if (auto *condition = field(node, "condition")) evaluate(*condition);
-			auto left = field(node, "left") ? evaluate(*field(node, "left")) : Value{};
-			auto right = field(node, "right") ? evaluate(*field(node, "right")) : Value{};
+			if (auto *condition = field(node, "condition")) require_value(evaluate(*condition), condition->range);
+			auto left = field(node, "left") ? require_value(evaluate(*field(node, "left")), field(node, "left")->range) : Value{};
+			auto right = field(node, "right") ? require_value(evaluate(*field(node, "right")), field(node, "right")->range) : Value{};
 			auto aligned = left.type.known() && right.type.known() && left.type.kind == right.type.kind &&
 				left.type.name == right.type.name && left.type.instance == right.type.instance &&
 				(left.type.symbol_id.empty() || right.type.symbol_id.empty() || left.type.symbol_id == right.type.symbol_id);
@@ -579,12 +754,23 @@ private:
 				Value{{TypeKind::Variant, "Variant"}, {}, true, false};
 		}
 		if (node.kind == "assignment" || node.kind == "augmented_assignment") {
-			if (auto *left = field(node, "left")) evaluate(*left);
-			return field(node, "right") ? evaluate(*field(node, "right")) : Value{};
+			auto left = field(node, "left"), right = field(node, "right");
+			Value target;
+			if (left) {
+				if (left->kind == "identifier") target = resolve_name(text(document, *left), left->range.start, false, left->range, node.kind == "augmented_assignment");
+				else target = evaluate(*left);
+				if (target.binding) target.binding->written = true;
+			}
+			auto value = right ? require_value(evaluate(*right), right->range) : Value{};
+			if (node.kind == "augmented_assignment") value = binary_result(node, target, std::move(value));
+			bool indexed = left && (left->kind == "subscript" || (left->kind == "attribute" && !left->children.empty() && left->children.back().kind == "attribute_subscript"));
+			if (right && !check_array(target.type, value, *right) && indexed &&
+				!compatible_value(target.type, value)) add("type-mismatch", "Assigned value is incompatible with the array element type.", right->range);
+			return value;
 		}
 		if (node.kind == "subscript") {
 			auto base = node.children.empty() ? Value{} : evaluate(node.children.front());
-			if (auto *arguments = field(node, "arguments")) for (const auto &child : arguments->children) evaluate(child);
+			if (auto *arguments = field(node, "arguments")) for (const auto &child : arguments->children) require_value(evaluate(child), child.range);
 			if (base.type.kind == TypeKind::Builtin && base.type.name == "Array" && !base.type.arguments.empty()) {
 				return {base.type.arguments.front(), {}, true, false};
 			}
@@ -594,6 +780,7 @@ private:
 		if (node.kind == "call") {
 			const SyntaxNode *callee_node = nullptr;
 			for (const auto &child : node.children) if (child.field != "arguments") { callee_node = &child; break; }
+			if (callee_node && callee_node->kind == "identifier" && text(document, *callee_node) == "yield") return {};
 			auto callee = callee_node ? evaluate(*callee_node, callee_node->kind == "identifier") : Value{};
 			auto result = call_value(std::move(callee), field(node, "arguments"), node.range);
 			if (callee_node && callee_node->kind == "identifier" &&
@@ -620,7 +807,7 @@ private:
 		}
 		if (node.kind == "attribute") {
 			if (node.children.empty()) return {};
-			if (node.children.front().kind == "binary_operator" && node.children.size() > 1) {
+			if ((node.children.front().kind == "binary_operator" || node.children.front().kind == "unary_operator") && node.children.size() > 1) {
 				std::vector<const SyntaxNode *> suffix;
 				for (size_t index = 1; index < node.children.size(); ++index) suffix.push_back(&node.children[index]);
 				return evaluate_with_attribute_suffix(node.children.front(), std::move(suffix));
@@ -633,6 +820,7 @@ private:
 			if (current_class) result.callable_context_id = current_class->symbol.id;
 			return result;
 		}
+		if (node.kind == "annotation" || node.kind == "annotations" || node.kind == "comment" || node.kind == "type") return {};
 		Value last;
 		for (const auto &child : node.children) last = evaluate(child);
 		return last;
@@ -653,7 +841,7 @@ private:
 		for (const auto &parameter : parameters->children) {
 			auto *identifier = first_identifier(parameter);
 			if (!identifier) continue;
-			if (auto *value = field(parameter, "value")) evaluate(*value);
+			if (auto *value = field(parameter, "value")) require_value(evaluate(*value), value->range);
 			ResolvedType type{TypeKind::Variant, "Variant"};
 			if (function) for (const auto &child : function->children) {
 				if (child.is_parameter && child.name == text(document, *identifier)) {
@@ -679,7 +867,7 @@ private:
 					type = {TypeKind::Variant, "Variant"};
 				}
 			}
-			scopes.back()[text(document, *identifier)] = {type, {}, true, false};
+			declare(*identifier, {type, {}, true, false}, "unused-parameter");
 		}
 	}
 
@@ -690,12 +878,15 @@ private:
 		auto *body = field(node, "body");
 		if (!body) { current_class = saved_class; return; }
 		scopes.emplace_back();
+		if (node.has_error || body->has_error) for (auto &frame : functions) frame.damaged = true;
+		functions.push_back({{}, node.has_error || body->has_error});
 		bind_parameters(field(node, "parameters"), function);
 		auto expected = function && !function->declared_type.empty() ? workspace.type_from_name(function->declared_type, current_class) : ResolvedType{};
 		analyze_block(*body, expected);
-		if (function && expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
+		if (function && !body->has_error && expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
 			add("missing-return-path", "Not all code paths return a value of type \"" + expected.display() + "\".", function->selection_range);
 		}
+		finish_function();
 		scopes.pop_back();
 		current_class = saved_class;
 	}
@@ -704,13 +895,16 @@ private:
 		auto *body = field(node, "body");
 		if (!body) return;
 		scopes.emplace_back();
+		if (node.has_error || body->has_error) for (auto &frame : functions) frame.damaged = true;
+		functions.push_back({{}, node.has_error || body->has_error});
 		bind_parameters(field(node, "parameters"), nullptr);
 		ResolvedType expected;
 		if (auto *type = field(node, "return_type")) expected = workspace.type_from_name(text(document, *type), current_class);
 		analyze_block(*body, expected);
-		if (expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
+		if (!body->has_error && expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
 			add("missing-return-path", "Not all lambda code paths return a value of type \"" + expected.display() + "\".", node.range);
 		}
+		finish_function();
 		scopes.pop_back();
 	}
 
@@ -718,11 +912,14 @@ private:
 		auto *body = field(node, "body");
 		if (!body) return;
 		scopes.emplace_back();
+		if (node.has_error || body->has_error) for (auto &frame : functions) frame.damaged = true;
+		functions.push_back({{}, node.has_error || body->has_error});
 		bind_parameters(child_kind(node, "parameters"), nullptr);
 		analyze_block(*body, expected);
-		if (expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
+		if (!body->has_error && expected.known() && expected.kind != TypeKind::Void && !always_returns(*body)) {
 			add("missing-return-path", "Not all accessor code paths return a value of type \"" + expected.display() + "\".", node.range);
 		}
+		finish_function();
 		scopes.pop_back();
 	}
 
@@ -734,15 +931,14 @@ private:
 		if (auto *type_node = field(node, "type")) {
 			auto declared = text(document, *type_node);
 			if (inferred_annotation(declared)) {
-				if (initializer.type.known()) type = initializer.type;
+				type = initializer.type;
 			} else {
 				type = workspace.type_from_name(declared, current_class);
 			}
 		} else if (node.kind == "const_statement" && initializer.type.known()) {
 			type = initializer.type;
 		}
-		if (!type.known()) type = {TypeKind::Variant, "Variant"};
-		scopes.back()[text(document, *name_node)] = {type, {}, true, false};
+		declare(*name_node, {type, {}, type.known(), false}, node.kind == "const_statement" ? "unused-local-constant" : "unused-variable");
 	}
 
 	void check_declared_assignment(const SyntaxNode &node, const Value &initializer) {
@@ -751,6 +947,8 @@ private:
 		auto declared = text(document, *type_node);
 		if (declared.empty() || inferred_annotation(declared)) return;
 		auto expected = workspace.type_from_name(declared, current_class);
+		if (auto value = field(node, "value"); value && check_array(expected, initializer, *value)) return;
+		if (expected.kind == TypeKind::Void) return;
 		if (!expected.known() || !initializer.type.known() || initializer.type.kind == TypeKind::Variant) return;
 		if (workspace.is_potential_downcast(expected, initializer.type)) {
 			return;
@@ -760,8 +958,29 @@ private:
 		}
 	}
 
+	void annotation_reads(const SyntaxNode &node) {
+		if (node.kind == "identifier") {
+			for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
+				auto found = scope->find(text(document, node));
+				if (found != scope->end()) { if (found->second.binding) found->second.binding->read = true; break; }
+			}
+		}
+		for (const auto &child : node.children) if (node.kind != "annotation" || child.field == "arguments") annotation_reads(child);
+	}
+
 	void analyze_block(const SyntaxNode &block, const ResolvedType &expected_return) {
-		for (const auto &statement : block.children) analyze_statement(statement, expected_return);
+		unsigned flow = FallsThrough;
+		bool reported = false;
+		for (const auto &statement : block.children) {
+			if (statement.kind == "comment") continue;
+			if (statement.kind == "annotation") { annotation_reads(statement); continue; }
+			if (!(flow & FallsThrough) && !reported && !block.has_error && (functions.empty() || !functions.back().damaged)) {
+				warn("unreachable-code", "This statement cannot be reached.", statement.range);
+				reported = true;
+			}
+			analyze_statement(statement, expected_return);
+			if (flow & FallsThrough) flow = (flow & ~FallsThrough) | statement_flow(statement, document);
+		}
 	}
 
 	void analyze_scoped_body(const SyntaxNode *body, const ResolvedType &expected_return,
@@ -773,12 +992,19 @@ private:
 		scopes.pop_back();
 	}
 
+	bool is_call(const SyntaxNode &node) const {
+		if (node.kind == "call" || node.kind == "base_call") return true;
+		if ((node.kind == "parenthesized_expression" || node.kind == "await_expression") && !node.children.empty()) return is_call(node.children.front());
+		return node.kind == "attribute" && !node.children.empty() && node.children.back().kind == "attribute_call";
+	}
+
 	void analyze_statement(const SyntaxNode &node, const ResolvedType &expected_return) {
+		for (const auto &child : node.children) if (child.kind == "annotations") annotation_reads(child);
 		if (node.kind == "variable_statement" || node.kind == "const_statement" ||
 			node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
 			if (node.has_error) return;
 			Value initializer;
-			if (auto *value = field(node, "value")) initializer = evaluate(*value);
+			if (auto *value = field(node, "value")) initializer = require_value(evaluate(*value), value->range);
 			check_declared_assignment(node, initializer);
 			bind_local(node, initializer);
 			return;
@@ -793,12 +1019,17 @@ private:
 			const SyntaxNode *value_node = node.children.empty() ? nullptr : &node.children.front();
 			if (!expected_return.known()) { if (value_node) evaluate(*value_node); return; }
 			if (expected_return.kind == TypeKind::Void && value_node) {
-				evaluate(*value_node);
-				add("return-value-in-void", "A void function cannot return a value.", node.range);
+				auto value = evaluate(*value_node);
+				if (value.resolved && value.type.kind == TypeKind::Variant && is_call(*value_node))
+					warn("unsafe-void-return", "The returned call is not guaranteed to return void.", node.range);
+				else if (value.resolved && value.type.known() && value.type.kind != TypeKind::Void)
+					add("return-value-in-void", "A void function cannot return a value.", node.range);
 			} else if (expected_return.kind != TypeKind::Void && !value_node && !nullable_return_type(expected_return)) {
 				add("missing-return-value", "A value of type \"" + expected_return.display() + "\" must be returned.", node.range);
 			} else if (value_node) {
-				auto actual = evaluate(*value_node).type;
+				auto value = require_value(evaluate(*value_node), value_node->range);
+				if (check_array(expected_return, value, *value_node)) return;
+				auto actual = value.type;
 				if (actual.known() && actual.kind != TypeKind::Variant && workspace.is_potential_downcast(expected_return, actual)) {
 					return;
 				} else if (actual.known() && actual.kind != TypeKind::Variant && !workspace.is_assignable(expected_return, actual)) {
@@ -809,10 +1040,10 @@ private:
 			return;
 		}
 		if (node.kind == "if_statement") {
-			if (auto *condition = field(node, "condition")) evaluate(*condition);
+			if (auto *condition = field(node, "condition")) require_value(evaluate(*condition), condition->range);
 			analyze_scoped_body(field(node, "body"), expected_return);
 			for (const auto &alternative : node.children) if (alternative.field == "alternative") {
-				if (auto *condition = field(alternative, "condition")) evaluate(*condition);
+				if (auto *condition = field(alternative, "condition")) require_value(evaluate(*condition), condition->range);
 				analyze_scoped_body(field(alternative, "body"), expected_return);
 			}
 			return;
@@ -826,14 +1057,19 @@ private:
 			return;
 		}
 		if (node.kind == "while_statement") {
-			if (auto *condition = field(node, "condition")) evaluate(*condition);
+			if (auto *condition = field(node, "condition")) require_value(evaluate(*condition), condition->range);
 			analyze_scoped_body(field(node, "body"), expected_return);
 			return;
 		}
 		if (node.kind == "match_statement") {
 			if (auto *value = field(node, "value")) evaluate(*value);
 			auto *match_body = field(node, "body");
+			bool covered = false;
 			if (match_body) for (const auto &section : match_body->children) if (section.kind == "pattern_section") {
+				if (covered && !match_body->has_error && (functions.empty() || !functions.back().damaged))
+					warn("unreachable-pattern", "This pattern cannot be reached after a catch-all pattern.",
+						{section.range.start, field(section, "body") ? field(section, "body")->range.start : section.range.end});
+				covered |= catch_all_pattern(section, document);
 				scopes.emplace_back();
 				std::function<void(const SyntaxNode &)> bind_patterns = [&](const SyntaxNode &pattern) {
 					if (pattern.kind == "pattern_binding") {
@@ -858,35 +1094,7 @@ private:
 	}
 
 	bool always_returns(const SyntaxNode &node) const {
-		if (node.kind == "return_statement") return true;
-		if (node.kind == "body") {
-			for (const auto &statement : node.children) if (always_returns(statement)) return true;
-			return false;
-		}
-		if (node.kind == "if_statement") {
-			auto *body = field(node, "body");
-			if (!body || !always_returns(*body)) return false;
-			bool has_else = false;
-			for (const auto &alternative : node.children) if (alternative.field == "alternative") {
-				has_else = has_else || alternative.kind == "else_clause";
-				auto *alternative_body = field(alternative, "body");
-				if (!alternative_body || !always_returns(*alternative_body)) return false;
-			}
-			return has_else;
-		}
-		if (node.kind == "match_statement") {
-			auto *body = field(node, "body");
-			if (!body || body->children.empty()) return false;
-			bool wildcard = false;
-			for (const auto &section : body->children) if (section.kind == "pattern_section") {
-				auto source = text(document, section);
-				wildcard = wildcard || source.starts_with("_") || source.find(", _") != std::string::npos;
-				auto *section_body = field(section, "body");
-				if (!section_body || !always_returns(*section_body)) return false;
-			}
-			return wildcard;
-		}
-		return false;
+		return statement_flow(node, document) == Returns;
 	}
 
 	void analyze_class_container(const SyntaxNode &container) {
@@ -900,7 +1108,7 @@ private:
 				auto *saved = current_class;
 				current_class = document.class_at(node.range.start);
 				Value initializer;
-				if (auto *value = field(node, "value")) initializer = evaluate(*value);
+				if (auto *value = field(node, "value")) initializer = require_value(evaluate(*value), value->range);
 				check_declared_assignment(node, initializer);
 				ResolvedType property_type;
 				if (auto *type_node = field(node, "type"); type_node && !inferred_annotation(text(document, *type_node))) {

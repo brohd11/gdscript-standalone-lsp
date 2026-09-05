@@ -3,3 +3,7 @@ config/name="Diagnostics fixture"
 
 [rendering]
 renderer/rendering_method="gl_compatibility"
+
+; Warning behavior is tested independently in diagnostic_cases.json.
+[debug]
+gdscript/warnings/enable=false

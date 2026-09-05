@@ -2,6 +2,7 @@
 
 #include "core/document.hpp"
 #include "core/native_api.hpp"
+#include "core/warnings.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -18,12 +19,6 @@ namespace gdscript_lsp {
 class SemanticAnalyzer;
 class SemanticAnalyzerImpl;
 struct CaretContext;
-
-enum class WarningLevel : uint8_t {
-	Ignore = 0,
-	Warning = 1,
-	Error = 2,
-};
 
 struct HoverResult {
 	std::string markdown;
@@ -102,9 +97,7 @@ private:
 	std::unordered_map<std::string, ResolvedType> static_symbol_types_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> document_dependencies_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> reverse_document_dependencies_;
-	WarningLevel unsafe_property_access_ = WarningLevel::Ignore;
-	WarningLevel unsafe_method_access_ = WarningLevel::Ignore;
-	WarningLevel unsafe_call_argument_ = WarningLevel::Ignore;
+	WarningPolicy warning_policy_;
 	CompletionConfig completion_config_;
 
 	void rebuild_registry();

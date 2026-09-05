@@ -994,7 +994,13 @@ int main() {
 	warning_fixture = std::filesystem::weakly_canonical(warning_fixture);
 	auto write_warning_settings = [&](const std::string &settings) {
 		std::ofstream stream(warning_fixture / "project.godot");
-		stream << settings;
+		stream << settings << "\n[debug]\n"
+			"gdscript/warnings/unused_variable=0\n"
+			"gdscript/warnings/unused_local_constant=0\n"
+			"gdscript/warnings/unused_parameter=0\n"
+			"gdscript/warnings/shadowed_variable=0\n"
+			"gdscript/warnings/shadowed_variable_base_class=0\n"
+			"gdscript/warnings/shadowed_global_identifier=0\n";
 	};
 	write_warning_settings(
 		"[application]\nconfig/name=\"Warning fixture\"\n\n"

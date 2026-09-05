@@ -26,7 +26,7 @@ DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 
 -include $(DEPFILES)
 
-.PHONY: all deps test benchmark-completion test-conformance gdextension test-gdextension install clean dump-tree
+.PHONY: all deps test benchmark-completion test-conformance test-diagnostics gdextension test-gdextension install clean dump-tree
 all: $(BUILD_DIR)/gdscript-lsp
 
 deps:
@@ -58,6 +58,8 @@ test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/comp
 	$(BUILD_DIR)/incremental-update-tests
 	python3 tests/broken_syntax.py $(BUILD_DIR)/gdscript-lsp $(BUILD_DIR)/broken-syntax-tests
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostic_cases.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostic_updates.py $(BUILD_DIR)/gdscript-lsp
 
 benchmark-completion: $(BUILD_DIR)/gdscript-lsp
 	python3 tools/completion_benchmark.py $(BUILD_DIR)/gdscript-lsp \
@@ -65,6 +67,10 @@ benchmark-completion: $(BUILD_DIR)/gdscript-lsp
 		--api "tests/fixtures/basic/extension_api.json" \
 		--iterations "$(or $(BENCHMARK_ITERATIONS),100)" \
 		--semantic-iterations "$(or $(BENCHMARK_SEMANTIC_ITERATIONS),10)"
+
+test-diagnostics: $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostic_cases.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostic_updates.py $(BUILD_DIR)/gdscript-lsp
 
 test-conformance: $(BUILD_DIR)/gdscript-lsp
 	python3 tools/godot_diagnostic_oracle.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"

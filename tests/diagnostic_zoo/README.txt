@@ -35,5 +35,24 @@ warning-as-error defaults to Warn so the warning fixture can report broadly.
 Some diagnostics are build-feature dependent. In particular, Unicode confusable
 identifier reporting depends on Unicode security support.
 
-This environment did not have a Godot executable installed, so the fixture is
-source-derived rather than locally executed against a Godot binary.
+Standalone coverage verified against Godot 4.6.3 on 2026-09-05
+------------------------------------------------------------
+Implemented warning categories: UNUSED_VARIABLE, UNUSED_LOCAL_CONSTANT,
+UNUSED_PARAMETER, SHADOWED_VARIABLE, SHADOWED_VARIABLE_BASE_CLASS,
+SHADOWED_GLOBAL_IDENTIFIER, UNREACHABLE_CODE, UNREACHABLE_PATTERN,
+UNSAFE_VOID_RETURN, UNSAFE_PROPERTY_ACCESS, UNSAFE_METHOD_ACCESS,
+and UNSAFE_CALL_ARGUMENT. The remaining warning categories are deferred.
+
+The analyzer error zoo's four former gaps (operators, casts, void results,
+and typed-array literal elements) are checked. Node2D = Node.new() is valid
+statically; its old error expectation was corrected. Unicode identifiers are
+accepted without duplicate syntax errors. The parser zoo now checks loop
+control, parameter ordering, void type positions, standalone lambdas and yield;
+unknown annotations and nested typed collections are deliberately deferred.
+
+This remains a combined recovery fixture, not a count-based conformance test.
+Isolated sources, exact diagnostics, valid counterparts, and selected Godot
+warning comparisons live in ../diagnostic_cases.json. Run make test-diagnostics
+and make test-conformance GODOT=/path/to/godot from the repository root.
+The selected cases have been executed against 4.6.3; the full master-warning
+checklist above remains source-derived and is not a claim of engine parity.

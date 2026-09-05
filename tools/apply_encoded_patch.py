@@ -32,7 +32,17 @@ def main() -> int:
 
     if git_apply(repository, ["--reverse", "--check"], patch):
         return 0
+    previous = encoded_path.with_name(encoded_path.name.replace(".patch.gz.b64", "-previous.patch.gz.b64"))
+    rollback = None
+    if not git_apply(repository, ["--check"], patch) and previous.exists():
+        old = gzip.decompress(base64.b64decode(previous.read_bytes()))
+        if git_apply(repository, ["--reverse", "--check"], old):
+            if not git_apply(repository, ["--reverse"], old):
+                return 1
+            rollback = old
     if not git_apply(repository, ["--check"], patch):
+        if rollback is not None:
+            git_apply(repository, [], rollback)
         print(f"{encoded_path.name} does not apply cleanly to {repository}", file=sys.stderr)
         return 1
     if not git_apply(repository, [], patch):

@@ -129,6 +129,10 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 			if (value.name.empty()) continue;
 			value.parent = entry.value("inherits", builtin ? "" : "Object");
 			value.builtin = builtin;
+			value.operators_known = builtin && entry.contains("operators") && entry["operators"].is_array();
+			if (value.operators_known) for (const auto &op : entry["operators"]) {
+				value.operators.push_back({op.value("name", ""), op.value("right_type", ""), op.value("return_type", "Variant")});
+			}
 			for (const auto &constructor : entry.value("constructors", json::array())) {
 				value.constructors.push_back(callable_signature(constructor, arity_known));
 			}

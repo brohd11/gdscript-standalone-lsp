@@ -60,3 +60,11 @@ Notes:
 - The last three are deprecated-gated 3.x leftovers explicitly marked "Never produced" in Godot source.
 - Godot docs state there are currently no deprecated GDScript keywords, so DEPRECATED_KEYWORD is never produced.
 - CONFUSABLE_IDENTIFIER depends on Unicode security support in the build.
+
+Standalone implementation status (2026-09-05)
+-------------------------------------------
+Implemented: UNUSED_VARIABLE, UNUSED_LOCAL_CONSTANT, UNUSED_PARAMETER,
+SHADOWED_VARIABLE, SHADOWED_VARIABLE_BASE_CLASS, SHADOWED_GLOBAL_IDENTIFIER,
+UNREACHABLE_CODE, UNREACHABLE_PATTERN, UNSAFE_VOID_RETURN,
+UNSAFE_PROPERTY_ACCESS, UNSAFE_METHOD_ACCESS, UNSAFE_CALL_ARGUMENT.
+All other producible categories listed above remain deferred.

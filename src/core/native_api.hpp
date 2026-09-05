@@ -52,6 +52,12 @@ struct NativeMember {
 
 bool is_type_level_member(const NativeMember &member);
 
+struct NativeOperator {
+	std::string name;
+	std::string right_type; // Empty for unary operators; Variant is a wildcard.
+	std::string return_type;
+};
+
 struct NativeClass {
 	std::string name;
 	std::string parent;
@@ -59,6 +65,8 @@ struct NativeClass {
 	std::unordered_map<std::string, NativeMember> members;
 	std::vector<std::string> member_order;
 	std::vector<CallableSignature> constructors;
+	bool operators_known = false;
+	std::vector<NativeOperator> operators;
 };
 
 class NativeApi {
