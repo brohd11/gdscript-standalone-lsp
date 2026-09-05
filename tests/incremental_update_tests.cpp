@@ -96,7 +96,26 @@ int main() {
 		"extends RefCounted\n\nfunc inspect() -> void:\n\tvar dangling:\n\tprint(\"😀\")\n",
 		"extends RefCounted\n\nfunc inspect() -> void:\n\tvar values := [\n\t\t1,\n\t\t2,\n\t]\n\tprint(values)\n",
 		"extends RefCounted\n\nfunc inspect() -> void:\n\tpass\n",
+		"func test():\n\tvar n = get_nodes()\n\tn.\n\nfunc get_nodes() -> Node:\n\treturn Node.new()\n",
+		"func get_nodes() -> Node:\n\treturn Node.new()\n\nfunc test():\n\tvar n = get_nodes()\n\tn.\n",
+		"func get_nodes(\n",
+		"func get_nodes()\n",
+		"func get_nodes():\n",
+		"func get_nodes() -> Node:\n\treturn Node.new()\n",
 	};
+	const std::string bounded_source =
+		"# 😀 shifts later source locations\nclass Holder:\n"
+		"\tfunc inspect():\n"
+		"\t\tvar note = \"\"\"\nfunc fake():\nreturn 99\n\"\"\"\n"
+		"\t\t# static func commented():\n"
+		"\t\tvar values = [\n1,\n2,\n]\n"
+		"\t\tvar n = make_node()\n\t\tn.\n\n"
+		"\tstatic func make_node(\n\t\tlabel: String = \"😀\"\n\t) -> Node:\n"
+		"\t\treturn Node.new()\n\n"
+		"\tfunc later():\n\t\treturn 1\n";
+	auto repaired_source = bounded_source;
+	repaired_source.replace(repaired_source.find("n.\n"), 2, "n.get_name()");
+	edits.insert(edits.end(), {bounded_source, repaired_source, bounded_source});
 	auto previous = std::make_unique<Document>(uri, resource, edits.front(), 1);
 	for (size_t index = 1; index < edits.size(); ++index) {
 		auto incremental = std::make_unique<Document>(uri, resource, edits[index], index + 1, *previous);
@@ -106,6 +125,13 @@ int main() {
 			"incremental and clean parses have identical derived models at edit " + std::to_string(index));
 		previous = std::move(incremental);
 	}
+	expect(previous->classes().size() == 2, "bounded recovery preserves the enclosing class");
+	const auto *holder = previous->class_at(byte_to_position(bounded_source, bounded_source.find("var n")));
+	expect(holder && holder->members.size() == 3 && std::none_of(holder->members.begin(), holder->members.end(),
+		[](const Symbol &member) { return member.name == "fake" || member.name == "commented"; }),
+		"multiline strings, grouped expressions, and comments do not introduce false function boundaries");
+	auto *local = previous->find_local("n", byte_to_position(bounded_source, bounded_source.find("n.\n") + 2));
+	expect(local && local->initializer == "make_node()", "locals after multiline literals remain in the function block");
 
 	{
 		auto spacing_fixture = std::filesystem::weakly_canonical("tests/fixtures/basic");

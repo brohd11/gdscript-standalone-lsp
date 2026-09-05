@@ -13,7 +13,10 @@
 - "<const|var> |" - should not be suggesting in the name part of the declaration
 - on topic of above "<func> |" - should not show standard things, only overidables
 
-# gote
+
+
+# connection closing - complete pending test
+## gote
 
 this is causeing lsp to close, cross plat
 Related to the order, if the n refeence is in a function defined beloow get_nodes, this has no issues
@@ -27,7 +30,8 @@ func get_nodes() -> Node:
 	return Node.new()
 ```
 
-so is this on mac and windows:
-````
-func get_nodes()| # on completion entered, either in the parens or out (mac and windows are not behaving identical in regard to insert)
-````
+## gote + vscode
+```
+func get_nodes()|
+```
+on completion entered, either in the parens or out (mac and windows are not behaving identical in regard to insert)

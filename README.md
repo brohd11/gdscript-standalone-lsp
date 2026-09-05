@@ -137,3 +137,5 @@ The bridge indexes asynchronously and falls through while it is not ready. It sy
 - `addons/gdscript_lsp/data`: reduced Godot 4.6 native class baseline.
 
 The index is deliberately multi-pass: all scripts are parsed first, global/path/UID class identities are registered next, statically resolvable script constants and qualified aliases are linked, then base edges are settled and cycle-checked. Queries walk that completed graph, which removes the old parser's dependency on editor-created `GDScript` resources and file load order.
+
+While editing, damaged function blocks are reparsed within lexical boundaries. Recovered signatures and body syntax feed the same symbol and semantic queries, so an incomplete expression cannot absorb a later function's return type or locals. The original whole-document tree remains available for incremental edits.

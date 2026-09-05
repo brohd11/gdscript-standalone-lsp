@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import io
 import json
 import os
 import pathlib
@@ -209,6 +210,68 @@ read_packet(process.stdout)
 native_items = {item["filterText"]: item for item in native_completion["result"]["items"]}
 assert {"queue_free", "print_tree"} <= native_items.keys()
 assert process.wait(timeout=5) == 0
+
+# Missing function bodies and recovered parameter lists must survive both
+# didOpen and didChange, and the same session must accept subsequent requests.
+forward_source = "func test():\n\tvar n = get_nodes()\n\tn.\n\nfunc get_nodes() -> Node:\n\treturn Node.new()\n"
+backward_source = "func get_nodes() -> Node:\n\treturn Node.new()\n\nfunc test():\n\tvar n = get_nodes()\n\tn.\n"
+repaired_source = "func test():\n\tvar n = Node.new()\n\tn.get_name()\n"
+recovery_uri = (native_root / "function_recovery.gd").as_uri()
+for case_name, source, position in [
+    ("forward function", forward_source, {"line": 2, "character": 3}),
+    ("backward function", backward_source, {"line": 5, "character": 3}),
+    ("inside parameters", "func get_nodes()\n", {"line": 0, "character": 15}),
+    ("after parameters", "func get_nodes()\n", {"line": 0, "character": 16}),
+]:
+    requests = [{"id": 1, "method": "initialize", "params": {"rootUri": native_root.as_uri()}}]
+    for version, text in enumerate([source, repaired_source, source, repaired_source], start=1):
+        document = {"uri": recovery_uri, "version": version}
+        if version == 1:
+            requests.append({"method": "textDocument/didOpen", "params": {
+                "textDocument": {**document, "languageId": "gdscript", "text": text},
+            }})
+        else:
+            requests.append({"method": "textDocument/didChange", "params": {
+                "textDocument": document, "contentChanges": [{
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": previous_text.count("\n"), "character": 0}},
+                    "text": text,
+                }],
+            }})
+        requests.append({"id": version + 1, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": recovery_uri},
+            "position": {"line": 2, "character": 3} if version % 2 == 0 else position,
+        }})
+        previous_text = text
+    requests.extend([
+        {"id": 6, "method": "shutdown", "params": {}},
+        {"method": "exit", "params": {}},
+    ])
+    process = subprocess.Popen(
+        [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        output, errors = process.communicate(
+            b"".join(packet({"jsonrpc": "2.0", **request}) for request in requests), timeout=10,
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    assert process.returncode == 0, (case_name, errors.decode())
+    stream = io.BytesIO(output)
+    responses = {}
+    while stream.tell() < len(output):
+        response = read_packet(stream)
+        if "id" in response:
+            responses[response["id"]] = response
+    for request_id in range(2, 6):
+        assert "result" in responses[request_id], (case_name, responses[request_id])
+        items = responses[request_id]["result"]["items"]
+        assert isinstance(items, list), (case_name, responses[request_id])
+        if request_id in (3, 5) or case_name in ("forward function", "backward function"):
+            assert "queue_free" in {item["filterText"] for item in items}, case_name
+    assert responses[6]["result"] is None, case_name
 
 # Diagnostics are available through the LSP 3.17 pull request and are also
 # pushed after overlays change. A clean overlay must publish an empty list so

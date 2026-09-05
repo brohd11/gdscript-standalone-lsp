@@ -130,6 +130,7 @@ SyntaxNode syntax_node(TSNode node, std::string_view source, std::string_view fi
 }
 
 TSNode first_descendant(TSNode node, std::string_view wanted) {
+	if (ts_node_is_null(node)) return {};
 	if (node_type(node) == wanted) return node;
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		auto found = first_descendant(ts_node_named_child(node, i), wanted);
@@ -335,12 +336,15 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 
 void collect_locals(TSNode node, Symbol &function, std::string_view source,
 		size_t begin = 0, size_t end = std::numeric_limits<size_t>::max()) {
+	if (ts_node_is_null(node)) return;
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		auto child = ts_node_named_child(node, i);
 		auto child_start = static_cast<size_t>(ts_node_start_byte(child));
 		auto child_end = static_cast<size_t>(ts_node_end_byte(child));
 		if (child_end < begin || child_start >= end) continue;
 		auto type = node_type(child);
+		if (type == "lambda" || type == "function_definition" || type == "constructor_definition" ||
+				type == "class_definition") continue;
 		if ((type == "variable_statement" || type == "const_statement") && child_start >= begin) {
 			auto local = variable_symbol(child, function.uri, function.id, source, true);
 			auto malformed = local.malformed;
@@ -486,13 +490,27 @@ FunctionExtent function_extent(std::string_view source, const std::vector<bool> 
 	result.body_start = header_line_end < source.size() ? header_line_end + 1 : source.size();
 	auto header_indent = indentation_width(source.substr(start, result.keyword - start));
 	result.end = source.size();
+	grouping = 0;
+	bool continued = false;
 	for (size_t next = result.body_start; next < source.size();) {
 		auto next_end = line_end(source, next);
 		auto line = source.substr(next, next_end - next);
-		auto clean = trim(line);
-		if (!clean.empty() && !clean.starts_with('#') && indentation_width(line) <= header_indent) {
+		auto first = next;
+		while (first < next_end && std::isspace(static_cast<unsigned char>(source[first]))) ++first;
+		auto clean = source.substr(first, next_end - first);
+		bool declaration = clean.starts_with("func ") || clean.starts_with("static func ") || clean.starts_with("class ");
+		if (first < next_end && code[first] && indentation_width(line) <= header_indent &&
+				((grouping == 0 && !continued) || declaration)) {
 			result.end = next == 0 ? 0 : next - 1;
 			break;
+		}
+		continued = false;
+		for (size_t index = next; index < next_end; ++index) {
+			if (!code[index]) continue;
+			auto character = source[index];
+			if (character == '(' || character == '[' || character == '{') ++grouping;
+			else if ((character == ')' || character == ']' || character == '}') && grouping > 0) --grouping;
+			if (!std::isspace(static_cast<unsigned char>(character))) continued = character == '\\';
 		}
 		next = next_end < source.size() ? next_end + 1 : source.size();
 	}
@@ -564,10 +582,11 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.selection_range = ts_node_is_null(name_node) ? symbol.range : node_range(name_node, source);
 	symbol.declared_type = trim(node_text(field(node, "return_type"), source));
 	symbol.is_static = has_named_child(node, "static_keyword");
-	symbol.body_recovered = ts_node_has_error(field(node, "body"));
+	auto body = field(node, "body");
+	symbol.body_recovered = ts_node_is_null(body) || ts_node_has_error(body);
 	symbol.detail = (symbol.is_static ? "static func " : "func ") + symbol.name + "(";
 	auto parameters = field(node, "parameters");
-	for (uint32_t i = 0; i < ts_node_named_child_count(parameters); ++i) {
+	for (uint32_t i = 0; !ts_node_is_null(parameters) && i < ts_node_named_child_count(parameters); ++i) {
 		auto parameter = parameter_symbol(ts_node_named_child(parameters, i), symbol, source);
 		if (parameter.name.empty()) continue;
 		if (!symbol.children.empty()) symbol.detail += ", ";
@@ -576,7 +595,7 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 		symbol.children.push_back(std::move(parameter));
 	}
 	symbol.detail += ") -> " + (symbol.declared_type.empty() ? "Variant" : symbol.declared_type);
-	collect_locals(field(node, "body"), symbol, source);
+	collect_locals(body, symbol, source);
 	return symbol;
 }
 
@@ -660,6 +679,128 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
 		collect_errors(ts_node_named_child(node, i), source, errors);
 	}
+}
+
+struct BlockTree {
+	std::unique_ptr<TSTree, decltype(&ts_tree_delete)> tree{nullptr, ts_tree_delete};
+	TSNode root{};
+	BlockTree(TSParser *parser, std::string_view text, size_t offset, TSPoint point) {
+		tree.reset(ts_parser_parse_string(parser, nullptr, text.data(), static_cast<uint32_t>(text.size())));
+		if (tree) root = ts_tree_root_node_with_offset(tree.get(), static_cast<uint32_t>(offset), point);
+	}
+};
+
+// ERROR can wrap a function's header and body together. Keep maximal body
+// subtrees, including their error nodes, without borrowing any header tokens.
+void collect_body_syntax(TSNode node, std::string_view source, size_t begin, size_t end,
+		std::vector<SyntaxNode> &output) {
+	if (ts_node_is_null(node) || ts_node_end_byte(node) <= begin || ts_node_start_byte(node) >= end) return;
+	if (ts_node_start_byte(node) >= begin && ts_node_end_byte(node) <= end) {
+		output.push_back(syntax_node(node, source));
+		return;
+	}
+	for (uint32_t index = 0; index < ts_node_named_child_count(node); ++index) {
+		collect_body_syntax(ts_node_named_child(node, index), source, begin, end, output);
+	}
+}
+
+struct RecoveredFunction {
+	Symbol symbol;
+	SyntaxNode syntax;
+	std::vector<ParseIssue> errors;
+};
+
+RecoveredFunction recover_function(TSParser *parser, std::string_view source, size_t start,
+		const FunctionExtent &extent, const std::string &uri, const std::string &owner_id) {
+	auto point = tree_sitter_point(source, start);
+	BlockTree block(parser, source.substr(start, extent.end - start), start, point);
+	auto function = first_kind_between(block.root, "function_definition", start, extent.end + 1);
+	if (ts_node_is_null(function)) function = first_kind_between(block.root, "constructor_definition", start, extent.end + 1);
+	RecoveredFunction result;
+	if (!ts_node_is_null(function)) {
+		result.symbol = function_symbol(function, uri, owner_id, source);
+		result.syntax = syntax_node(function, source);
+	} else {
+		// A complete header can still be destroyed by an unfinished body. Parse
+		// it with a throwaway body; only the original header nodes are retained.
+		auto header_text = std::string(source.substr(start, extent.header_end - start)) + " pass\n";
+		BlockTree header(parser, header_text, start, point);
+		auto header_function = first_kind_between(header.root, "function_definition", start, start + header_text.size() + 1);
+		if (ts_node_is_null(header_function)) {
+			header_function = first_kind_between(header.root, "constructor_definition", start, start + header_text.size() + 1);
+		}
+		if (!ts_node_is_null(header_function)) {
+			result.symbol = function_symbol(header_function, uri, owner_id, source);
+			result.syntax = syntax_node(header_function, source);
+			std::erase_if(result.syntax.children, [](const SyntaxNode &node) { return node.field == "body"; });
+		} else {
+			// Preserve a lexical declaration even when its header is incomplete.
+			auto &symbol = result.symbol;
+			symbol.name = std::string(source.substr(extent.name_start, extent.name_end - extent.name_start));
+			symbol.id = owner_id + "::" + symbol.name;
+			symbol.qualified_name = symbol.id;
+			symbol.uri = uri;
+			symbol.kind = symbol.name == "_init" ? SymbolKind::Constructor : SymbolKind::Method;
+			symbol.range.start = byte_to_position(source, extent.keyword);
+			symbol.selection_range = {byte_to_position(source, extent.name_start), byte_to_position(source, extent.name_end)};
+			symbol.is_static = extent.is_static;
+			symbol.malformed = true;
+			symbol.detail = (extent.is_static ? "static func " : "func ") + symbol.name + "(";
+			auto parameters = first_kind_between(block.root, "parameters", start, extent.header_end);
+			for (uint32_t index = 0; !ts_node_is_null(parameters) && index < ts_node_named_child_count(parameters); ++index) {
+				auto parameter = parameter_symbol(ts_node_named_child(parameters, index), symbol, source);
+				if (parameter.name.empty()) continue;
+				if (!symbol.children.empty()) symbol.detail += ", ";
+				symbol.detail += parameter.name;
+				if (!parameter.declared_type.empty()) symbol.detail += ": " + parameter.declared_type;
+				symbol.children.push_back(std::move(parameter));
+			}
+			auto return_type = first_field_between(block.root, "return_type", start, extent.header_end);
+			symbol.declared_type = trim(node_text(return_type, source));
+			symbol.detail += ") -> " +
+				(symbol.declared_type.empty() ? "Variant" : symbol.declared_type);
+			result.syntax.kind = symbol.kind == SymbolKind::Constructor ? "constructor_definition" : "function_definition";
+			result.syntax.start_byte = static_cast<uint32_t>(extent.keyword);
+			result.syntax.range.start = symbol.range.start;
+			SyntaxNode name;
+			name.kind = "name";
+			name.field = "name";
+			name.start_byte = static_cast<uint32_t>(extent.name_start);
+			name.end_byte = static_cast<uint32_t>(extent.name_end);
+			name.range = symbol.selection_range;
+			result.syntax.children.push_back(std::move(name));
+			if (!ts_node_is_null(parameters)) result.syntax.children.push_back(syntax_node(parameters, source, "parameters"));
+			if (!ts_node_is_null(return_type)) result.syntax.children.push_back(syntax_node(return_type, source, "return_type"));
+		}
+		result.symbol.body_recovered = true;
+		collect_locals(block.root, result.symbol, source, extent.body_start, extent.end + 1);
+		SyntaxNode body;
+		body.kind = "body";
+		body.field = "body";
+		body.start_byte = static_cast<uint32_t>(extent.body_start);
+		body.end_byte = static_cast<uint32_t>(extent.end);
+		body.range = {byte_to_position(source, extent.body_start), byte_to_position(source, extent.end)};
+		body.has_error = true;
+		collect_body_syntax(block.root, source, extent.body_start, extent.end, body.children);
+		result.syntax.children.push_back(std::move(body));
+		result.syntax.has_error = true;
+	}
+	result.symbol.range.end = byte_to_position(source, extent.end);
+	result.syntax.end_byte = static_cast<uint32_t>(extent.end);
+	result.syntax.range.end = result.symbol.range.end;
+	if (!ts_node_is_null(block.root)) collect_errors(block.root, source, result.errors);
+	return result;
+}
+
+SyntaxNode *class_syntax_container(SyntaxNode &node, Position class_start) {
+	if (node.kind == "class_definition" && node.range.start == class_start) {
+		for (auto &child : node.children) if (child.field == "body") return &child;
+	}
+	for (auto &child : node.children) {
+		if (child.kind != "class_definition" && child.kind != "body" && child.kind != "source") continue;
+		if (auto *container = class_syntax_container(child, class_start)) return container;
+	}
+	return nullptr;
 }
 
 } // namespace
@@ -800,9 +941,9 @@ void Document::parse(const Document *previous) {
 	collect_class(root, root_class, root_class.symbol.id);
 	classes_.insert(classes_.begin(), std::move(root_class));
 
-	// A parser error at the caret can shorten a function node to the last valid
-	// token, or replace the whole function with ERROR. Recover the lexical block
-	// so symbols declared before the error remain usable while editing.
+	// Lexical boundaries are authoritative when error recovery swallows a later
+	// declaration. Replace both symbols and semantic syntax from isolated blocks;
+	// impl_->tree remains the original tree used for the next incremental edit.
 	auto code = source_code_mask(source_);
 	for (size_t line = 0; line < source_.size();) {
 		auto extent = function_extent(source_, code, line);
@@ -824,38 +965,32 @@ void Document::parse(const Document *previous) {
 					break;
 				}
 			}
-			if (existing) {
-				existing->range.end = byte_to_position(source_, extent.end);
-			} else if (owner) {
-				Symbol recovered;
-				recovered.name = name;
-				recovered.id = owner->symbol.id + "::" + name;
-				recovered.qualified_name = recovered.id;
-				recovered.uri = uri_;
-				recovered.kind = name == "_init" ? SymbolKind::Constructor : SymbolKind::Method;
-				recovered.range = {header_position, byte_to_position(source_, extent.end)};
-				recovered.selection_range = {name_position, byte_to_position(source_, extent.name_end)};
-				recovered.is_static = extent.is_static;
-				recovered.body_recovered = true;
-				recovered.detail = (extent.is_static ? "static func " : "func ") + name + "(";
-				auto parameters = first_kind_between(root, "parameters", extent.keyword, extent.header_end);
-				recovered.malformed = ts_node_is_null(parameters);
-				for (uint32_t index = 0; index < ts_node_named_child_count(parameters); ++index) {
-					auto parameter = parameter_symbol(ts_node_named_child(parameters, index), recovered, source_);
-					if (parameter.name.empty()) continue;
-					if (!recovered.children.empty()) recovered.detail += ", ";
-					recovered.detail += parameter.name;
-					if (!parameter.declared_type.empty()) recovered.detail += ": " + parameter.declared_type;
-					recovered.children.push_back(std::move(parameter));
+			auto end_position = byte_to_position(source_, extent.end);
+			if (owner && (!existing || existing->body_recovered || existing->range.end > end_position)) {
+				auto recovered = recover_function(impl_->parser, source_, line, extent, uri_, owner->symbol.id);
+				if (existing) *existing = std::move(recovered.symbol);
+				else owner->members.push_back(std::move(recovered.symbol));
+				auto *container = owner == &classes_.front() ? &syntax_root_ :
+					class_syntax_container(syntax_root_, owner->symbol.range.start);
+				if (container) {
+					std::erase_if(container->children, [&](const SyntaxNode &child) {
+						return child.start_byte < extent.end && child.end_byte > line;
+					});
+					container->children.push_back(std::move(recovered.syntax));
+					std::stable_sort(container->children.begin(), container->children.end(),
+						[](const SyntaxNode &left, const SyntaxNode &right) { return left.start_byte < right.start_byte; });
 				}
-				auto return_type = first_field_between(root, "return_type", extent.keyword, extent.header_end);
-				recovered.declared_type = trim(node_text(return_type, source_));
-				recovered.detail += ") -> " +
-					(recovered.declared_type.empty() ? std::string("Variant") : recovered.declared_type);
-				collect_locals(root, recovered, source_, extent.body_start,
-					extent.end == source_.size() ? extent.end : extent.end + 1);
-				owner->members.push_back(std::move(recovered));
+				auto start_position = byte_to_position(source_, line);
+				std::erase_if(syntax_errors_, [&](const ParseIssue &issue) {
+					return issue.range.start <= end_position && issue.range.end >= start_position;
+				});
+				for (auto &issue : recovered.errors) add_parse_issue(syntax_errors_, issue.range, std::move(issue.message));
+			} else if (existing) {
+				existing->range.end = end_position;
 			}
+			// Do not interpret function-looking lines in a multiline body literal
+			// or a nested lambda as independent class members.
+			line = extent.end;
 		}
 		auto end = line_end(source_, line);
 		if (end == source_.size()) break;

@@ -95,6 +95,77 @@ int main() {
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
 	{
+		Workspace recovery_workspace;
+		auto native_fixture = std::filesystem::weakly_canonical("tests/fixtures/native");
+		expect(recovery_workspace.open(native_fixture,
+			std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json"), &error),
+			"function recovery workspace opens: " + error);
+		auto recovery_uri = recovery_workspace.uri_for_path(native_fixture / "function_recovery.gd");
+		int64_t version = 1;
+		for (bool nested : {false, true}) for (bool inferred : {false, true}) for (bool forward : {false, true}) {
+			std::string caller = "func test():\n\tvar n = get_nodes()\n\tn.\n\n";
+			std::string factory = inferred ?
+				"func get_nodes():\n\tvar owned = Node.new()\n\treturn owned\n\n" :
+				"static func get_nodes(\n\tvalue: Node = null,\n\tlabel: String = \"😀\"\n) -> Node:\n"
+				"\tvar owned = Node.new()\n\treturn owned\n\n";
+			auto functions = (forward ? caller + factory : factory + caller) +
+				"func _init(value: int = 1):\n\tvar constructor_local = value\n";
+			std::string source = "# 😀 before declarations\n";
+			if (nested) source += "class Holder:\n\t";
+			for (size_t index = 0; index < functions.size(); ++index) {
+				source += functions[index];
+				if (nested && functions[index] == '\n' && index + 1 < functions.size()) source += '\t';
+			}
+			expect(recovery_workspace.update_document(recovery_uri, source, version++, &error), "function blocks update");
+			auto position = byte_to_position(source, source.find("n.\n") + 2);
+			expect(has_item(recovery_workspace.completion(recovery_uri, position), "queue_free"),
+				"Node member completion survives both function orders and class ownership");
+			expect(recovery_workspace.resolve_type(recovery_uri, position, "get_nodes()").name == "Node",
+				"recovered factory retains declared or inferred return type");
+			auto definitions = recovery_workspace.definition(recovery_uri,
+				byte_to_position(source, source.find("get_nodes()\n") + 2));
+			expect(definitions.size() == 1 && definitions.front().uri == recovery_uri &&
+				definitions.front().range.start == byte_to_position(source, source.find("func get_nodes") + 5),
+				"forward call definition retains its original source position");
+			auto outline = recovery_workspace.document_outline(recovery_uri).symbols;
+			auto *test = find_outline(outline, "test");
+			auto *get_nodes = find_outline(outline, "get_nodes");
+			auto *constructor = find_outline(outline, "_init");
+			expect(test && test->return_type && test->return_type->kind == TypeKind::Variant &&
+				!find_outline(test->children, "owned") && !find_outline(test->children, "constructor_local"),
+				"caller never borrows neighboring returns or locals");
+			expect(get_nodes && !get_nodes->malformed && find_outline(get_nodes->children, "owned") &&
+				get_nodes->owner_id == (nested ? "res://function_recovery.gd.Holder" : "res://function_recovery.gd"),
+				"factory body and signature belong to the correct class");
+			if (!inferred && get_nodes) {
+				auto *value = find_outline(get_nodes->children, "value");
+				auto *label = find_outline(get_nodes->children, "label");
+				expect(get_nodes->is_static && value && value->declared_type == "Node" && value->initializer == "null" &&
+					label && label->declared_type == "String" && label->initializer == "\"😀\"",
+					"multiline recovered signature retains typed defaults and static modifier");
+				expect(label && label->range.end == byte_to_position(source, source.find("\"😀\"") + std::string("\"😀\"").size()),
+					"recovered parameter ranges retain UTF-16 columns");
+			}
+			expect(constructor && constructor->kind == SymbolKind::Constructor &&
+				find_outline(constructor->children, "constructor_local"), "neighboring constructor retains its identity and locals");
+			auto diagnostics = recovery_workspace.diagnostics(recovery_uri);
+			expect(has_diagnostic(diagnostics, "syntax-error"), "incomplete member access remains a syntax error");
+			expect(std::all_of(diagnostics.begin(), diagnostics.end(), [&](const Diagnostic &item) {
+				return item.code != "syntax-error" || (test && test->range.contains(item.range.start) && test->range.contains(item.range.end));
+			}), "recovery diagnostics stay inside the damaged function");
+			expect(!has_diagnostic(diagnostics, "undefined-function") && !has_diagnostic(diagnostics, "return-type-mismatch"),
+				"semantic analysis uses recovered functions without cross-block errors");
+		}
+		const std::string invalid_return =
+			"func test() -> void:\n\tvar n = get_nodes()\n\tn.\n\nfunc get_nodes() -> Node:\n\treturn 1\n";
+		expect(recovery_workspace.update_document(recovery_uri, invalid_return, version++, &error),
+			"invalid return following an incomplete function updates");
+		auto diagnostics = recovery_workspace.diagnostics(recovery_uri);
+		auto *mismatch = find_diagnostic(diagnostics, "return-type-mismatch");
+		expect(mismatch && mismatch->range.start == Position{5, 8} && !has_diagnostic(diagnostics, "return-value-in-void"),
+			"return diagnostics analyze the later function with its own signature and original position");
+	}
+	{
 		Workspace leading_newline_workspace;
 		expect(leading_newline_workspace.open(fixture, fixture / "extension_api.json", &error),
 			"leading-newline completion workspace opens: " + error);
