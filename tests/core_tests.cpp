@@ -858,6 +858,7 @@ int main() {
 		("gdscript-lsp-warning-fixture-" + std::to_string(
 			std::chrono::steady_clock::now().time_since_epoch().count()));
 	std::filesystem::create_directories(warning_fixture);
+	warning_fixture = std::filesystem::weakly_canonical(warning_fixture);
 	auto write_warning_settings = [&](const std::string &settings) {
 		std::ofstream stream(warning_fixture / "project.godot");
 		stream << settings;

@@ -74,8 +74,9 @@ test-gdextension: gdextension
 	XDG_DATA_HOME=/tmp/gdscript-lsp-xdg $(GODOT) --headless --path . --script res://tests/gdextension_smoke.gd
 
 install: $(BUILD_DIR)/gdscript-lsp
-	install -Dm755 $(BUILD_DIR)/gdscript-lsp "$(DESTDIR)$(PREFIX)/bin/gdscript-lsp"
-	install -Dm644 addons/gdscript_lsp/data/godot-4.6-extension-api.json \
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/gdscript-lsp"
+	install -m755 $(BUILD_DIR)/gdscript-lsp "$(DESTDIR)$(PREFIX)/bin/gdscript-lsp"
+	install -m644 addons/gdscript_lsp/data/godot-4.6-extension-api.json \
 		"$(DESTDIR)$(PREFIX)/share/gdscript-lsp/godot-4.6-extension-api.json"
 
 $(BUILD_DIR)/dump-tree: $(TS_OBJ) $(BUILD_DIR)/tools/dump_tree.o

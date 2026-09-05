@@ -755,7 +755,7 @@ assert server.wait(timeout=2) == 0
 # client. Adding a global class must invalidate its previously unresolved
 # consumers; deleting it must invalidate those consumers through the old graph.
 with tempfile.TemporaryDirectory(prefix="gdscript-lsp-poll-") as temporary:
-    poll_root = pathlib.Path(temporary)
+    poll_root = pathlib.Path(temporary).resolve()
     (poll_root / "project.godot").write_text('[application]\nconfig/name="Poll fixture"\n')
     consumer_path = poll_root / "consumer.gd"
     consumer_path.write_text("extends RefCounted\n\nvar item: PollType\n")

@@ -34,7 +34,7 @@ clone_tag json v3.12.0 https://github.com/nlohmann/json.git
 script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 grammar_patch="$script_dir/patches/tree-sitter-gdscript-v6.1.0.patch.gz.b64"
 decode_grammar_patch() {
-	base64 -d "$grammar_patch" | gzip -dc
+	base64 -d < "$grammar_patch" | gzip -dc
 }
 
 if decode_grammar_patch | git -C "$deps_dir/tree-sitter-gdscript" apply --reverse --check - >/dev/null 2>&1; then
