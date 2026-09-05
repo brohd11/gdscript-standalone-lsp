@@ -235,7 +235,8 @@ int main() {
 			"balanced multiline initializers remain valid declarations");
 	}
 	auto completion = workspace.completion(consumer_uri, {6, 7});
-	expect(has_item(completion, "own"), "completion includes direct script member");
+	expect(has_item(completion, "own") && !has_item(completion, "new"),
+		"instance completion includes direct script members without a constructor");
 	expect(has_item(completion, "count"), "completion includes inherited script member");
 	expect(has_item(completion, "label"), "completion includes inherited method");
 	expect(has_item(completion, "reference_method"), "completion includes transitive native member");
@@ -262,15 +263,76 @@ int main() {
 	expect(completion_ranks_increase(completion), "completion sort ranks preserve server relevance order");
 
 	auto class_completion = workspace.completion(consumer_uri, {9, 14});
-	expect(has_item(class_completion, "CHILD_CONSTANT") && has_item(class_completion, "child_static") &&
+	expect(!class_completion.empty() && class_completion.front().filter_text == "new" &&
+		has_item(class_completion, "CHILD_CONSTANT") && has_item(class_completion, "child_static") &&
 		has_item(class_completion, "BASE_CONSTANT") && has_item(class_completion, "base_static") &&
 		!has_item(class_completion, "own") && !has_item(class_completion, "make_base") &&
 		!has_item(class_completion, "count") && !has_item(class_completion, "label"),
-		"script class receiver offers inherited type-level members and omits instance members");
-	expect(item_index(class_completion, "CHILD_CONSTANT") < item_index(class_completion, "child_static") &&
+		"script class receiver offers new first and omits instance members");
+	expect(item_index(class_completion, "new") < item_index(class_completion, "CHILD_CONSTANT") &&
+		item_index(class_completion, "CHILD_CONSTANT") < item_index(class_completion, "child_static") &&
 		item_index(class_completion, "child_static") < item_index(class_completion, "BASE_CONSTANT") &&
 		item_index(class_completion, "BASE_CONSTANT") < item_index(class_completion, "base_static"),
 		"class receiver preserves source order within each nearest-first inheritance level");
+
+	const std::string alias_completion_source =
+		"extends RefCounted\n\n"
+		"const ChildAlias = preload(\"res://child.gd\")\n\n"
+		"func inspect_type() -> void:\n"
+		"\tChildAlias.ch\n"
+		"\tRefCounted.re\n";
+	expect(workspace.update_document(consumer_uri, alias_completion_source, 1, &error),
+		"class-reference completion overlay accepted");
+	auto alias_position = byte_to_position(alias_completion_source,
+		alias_completion_source.find("ChildAlias.ch") + std::string_view("ChildAlias.ch").size());
+	auto alias_class_completion = workspace.completion(consumer_uri, alias_position);
+	auto *alias_constructor = find_item(alias_class_completion, "new");
+	expect(!alias_class_completion.empty() && alias_class_completion.front().filter_text == "new" && alias_constructor &&
+		alias_constructor->label == "new()" && alias_constructor->insert_text == "new()" &&
+		has_item(alias_class_completion, "child_static") && has_item(alias_class_completion, "base_static") &&
+		!has_item(alias_class_completion, "own") && !has_item(alias_class_completion, "make_base") &&
+		!has_item(alias_class_completion, "label"),
+		"preloaded script completion starts with new and contains only type-level members");
+	auto native_position = byte_to_position(alias_completion_source,
+		alias_completion_source.find("RefCounted.re") + std::string_view("RefCounted.re").size());
+	auto native_type_completion = workspace.completion(consumer_uri, native_position);
+	expect(!native_type_completion.empty() && native_type_completion.front().filter_text == "new" &&
+		has_item(native_type_completion, "ref_static") && !has_item(native_type_completion, "reference_method"),
+		"native class completion starts with new and excludes instance methods");
+	auto alias_type = workspace.resolve_type(consumer_uri, alias_position, "ChildAlias");
+	auto alias_instance = workspace.resolve_type(consumer_uri, alias_position, "ChildAlias.new()");
+	expect(alias_type.kind == TypeKind::ScriptClass && !alias_type.instance &&
+		alias_instance.kind == TypeKind::ScriptClass && alias_instance.instance,
+		"preload aliases remain class references until constructed");
+
+	const std::string class_access_source =
+		"extends RefCounted\n\n"
+		"const ChildAlias = preload(\"res://child.gd\")\n\n"
+		"func inspect_type() -> void:\n"
+		"\tChildAlias.make_base()\n"
+		"\tvar invalid_property = ChildAlias.own\n"
+		"\tChildThing.make_base()\n"
+		"\tChildAlias.label()\n"
+		"\tRefCounted.reference_method()\n"
+		"\tChildAlias.missing()\n"
+		"\tChildAlias.child_static()\n"
+		"\tChildAlias.new().make_base()\n"
+		"\tRefCounted.ref_static()\n";
+	expect(workspace.update_document(consumer_uri, class_access_source, 2, &error),
+		"class-reference diagnostic overlay accepted");
+	auto class_access_diagnostics = workspace.diagnostics(consumer_uri);
+	expect(diagnostic_count(class_access_diagnostics, "instance-member-access") == 5 &&
+		diagnostic_count(class_access_diagnostics, "unknown-member") == 1 &&
+		class_access_diagnostics.size() == 6,
+		"script aliases, named classes, and native classes reject instance member access without cascades");
+	expect(std::any_of(class_access_diagnostics.begin(), class_access_diagnostics.end(), [](const Diagnostic &item) {
+		return item.message ==
+			"Cannot access instance method \"make_base\" on class \"ChildThing\"; create an instance first.";
+	}) && std::any_of(class_access_diagnostics.begin(), class_access_diagnostics.end(), [](const Diagnostic &item) {
+		return item.message ==
+			"Cannot access instance property \"own\" on class \"ChildThing\"; create an instance first.";
+	}), "class-reference diagnostics distinguish methods from properties");
+	expect(workspace.close_document(consumer_uri, &error), "class-reference overlay closes");
 
 	auto child_uri = workspace.uri_for_path(fixture / "child.gd");
 	auto static_context_completion = workspace.completion(child_uri, {6, 2});

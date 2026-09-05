@@ -32,6 +32,11 @@ ResolvedType ResolvedType::unknown(std::string reason) {
 	return value;
 }
 
+bool is_type_level_member(const Symbol &symbol) {
+	return symbol.is_static || symbol.kind == SymbolKind::Constant ||
+		symbol.kind == SymbolKind::Enum || symbol.kind == SymbolKind::Class;
+}
+
 std::string_view type_kind_name(TypeKind kind) {
 	switch (kind) {
 		case TypeKind::Unknown: return "unknown";

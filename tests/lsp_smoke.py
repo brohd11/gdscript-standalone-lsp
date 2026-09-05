@@ -1070,6 +1070,7 @@ provider_source = (
     "\tvar product: Product = \n"
     "\ttarget.call(\"\")\n"
     "\tprint(target.)\n"
+    "\tProduct.\n"
     "\tif true:\n"
 )
 
@@ -1107,6 +1108,7 @@ provider_needles = {
     153: 'target.call("',
     154: "print(target.",
     155: "if true:",
+    158: "Product.",
 }
 for request_id, needle in provider_needles.items():
     server.stdin.write(
@@ -1139,6 +1141,7 @@ type_items = items_by_filter(provider_responses[151])
 constructor_items = items_by_filter(provider_responses[152])
 string_items = items_by_filter(provider_responses[153])
 private_items = items_by_filter(provider_responses[154])
+class_items = provider_responses[158]["items"]
 assert enum_items["State.IDLE"]["data"]["gdscriptLsp"]["provider"] == "enums"
 assert type_items["Product"]["data"]["gdscriptLsp"]["provider"] == "extendedTypeHints"
 assert constructor_items["Product.new"]["data"]["gdscriptLsp"]["provider"] == "constructors"
@@ -1146,7 +1149,43 @@ assert constructor_items["Product.new"]["insertText"] == "Product.new("
 assert string_items["build"]["data"]["gdscriptLsp"]["provider"] == "memberStrings"
 assert string_items["build"]["insertText"] == "build"
 assert "title" in private_items and "_private" not in private_items
+assert class_items[0]["filterText"] == "new"
+assert class_items[0]["insertText"] == "new("
+assert class_items[0]["data"]["gdscriptLsp"]["provider"] == "constructors"
 assert provider_responses[155]["items"] == []
+
+class_access_source = (
+    "extends CompletionProviderBase\n\n"
+    "class Product:\n"
+    "\tfunc build() -> void: pass\n\n"
+    "func inspect() -> void:\n"
+    "\tProduct.build()\n"
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": provider_uri, "version": 2},
+                "contentChanges": [{"text": class_access_source}],
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 159,
+            "method": "textDocument/diagnostic",
+            "params": {"textDocument": {"uri": provider_uri}},
+        }
+    )
+)
+server.stdin.flush()
+class_access_diagnostics = read_response(server.stdout, 159)["result"]["items"]
+assert [item["code"] for item in class_access_diagnostics] == ["instance-member-access"]
 
 override_source = "extends CompletionProviderBase\n\nfunc \n"
 server.stdin.write(
@@ -1155,7 +1194,7 @@ server.stdin.write(
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
-                "textDocument": {"uri": provider_uri, "version": 2},
+                "textDocument": {"uri": provider_uri, "version": 3},
                 "contentChanges": [{"text": override_source}],
             },
         }
@@ -1187,7 +1226,7 @@ server.stdin.write(
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
-                "textDocument": {"uri": provider_uri, "version": 3},
+                "textDocument": {"uri": provider_uri, "version": 4},
                 "contentChanges": [{"text": keyword_source}],
             },
         }

@@ -8,3 +8,8 @@
 
 # invalid showing
 - Nil
+
+
+"new" constructor completion must find the closest referenc for the class
+
+- tree sitter grammar seems too lenient for error, new lines don't seem to be regarded?

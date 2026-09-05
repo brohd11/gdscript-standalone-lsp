@@ -50,6 +50,8 @@ struct NativeMember {
 	std::unordered_set<std::string> enum_values;
 };
 
+bool is_type_level_member(const NativeMember &member);
+
 struct NativeClass {
 	std::string name;
 	std::string parent;

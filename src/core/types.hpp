@@ -137,6 +137,8 @@ struct Symbol {
 	std::vector<Symbol> children;
 };
 
+bool is_type_level_member(const Symbol &symbol);
+
 // A resolved, presentation-ready document symbol. The standard LSP projection
 // uses the common fields, while native and custom clients can consume the
 // declaration identity and semantic metadata without issuing one query per

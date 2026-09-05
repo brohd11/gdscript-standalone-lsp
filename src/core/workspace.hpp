@@ -157,6 +157,8 @@ private:
 	const Symbol *find_lexical_member(const ClassRecord &record, std::string_view name) const;
 	const Symbol *resolve_identifier(const Document &document, const ClassRecord *context,
 		std::string_view name, Position position) const;
+	ResolvedType completion_receiver_type(const Document &document, Position position,
+		const CaretContext &caret) const;
 	std::vector<CompletionItem> semantic_completion_locked(const Document &document, Position position,
 		const CaretContext &caret) const;
 };

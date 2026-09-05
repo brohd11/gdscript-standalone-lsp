@@ -279,6 +279,13 @@ private:
 		return result;
 	}
 
+	void add_instance_member_access(std::string_view name, const ResolvedType &receiver,
+			Range range, bool method) {
+		add("instance-member-access", "Cannot access instance " +
+			std::string(method ? "method \"" : "property \"") + std::string(name) +
+			"\" on class \"" + receiver.display() + "\"; create an instance first.", range);
+	}
+
 	Value member_value(const Value &receiver, std::string_view name, Range range,
 			MemberAccessKind access = MemberAccessKind::Property) {
 		if (!receiver.resolved || !receiver.type.known() || receiver.type.kind == TypeKind::Variant ||
@@ -304,14 +311,29 @@ private:
 		}
 		if (receiver.type.kind == TypeKind::ScriptClass) {
 			if (auto *record = workspace.find_class(receiver.type.symbol_id)) {
-				if (auto *member = workspace.find_member(*record, name)) return symbol_value(*member, range.start);
+				if (auto *member = workspace.find_member(*record, name)) {
+					if (!receiver.type.instance && !is_type_level_member(*member)) {
+						auto method = member->kind == SymbolKind::Method || member->kind == SymbolKind::Function ||
+							member->kind == SymbolKind::Constructor;
+						add_instance_member_access(name, receiver.type, range, method);
+						return {};
+					}
+					return symbol_value(*member, range.start);
+				}
 				auto native = receiver.type.instance ? workspace.native_base(*record) :
 					(workspace.native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
 				if (!native.empty()) if (auto *member = workspace.native_api_.find_member(native, name)) return native_member_value(*member);
 			}
 		} else if (receiver.type.kind == TypeKind::NativeClass || receiver.type.kind == TypeKind::Builtin ||
 			receiver.type.kind == TypeKind::Callable || receiver.type.kind == TypeKind::Signal) {
-			if (auto *member = workspace.native_api_.find_member(receiver.type.name, name)) return native_member_value(*member);
+			if (auto *member = workspace.native_api_.find_member(receiver.type.name, name)) {
+				if (!receiver.type.instance && receiver.type.kind == TypeKind::NativeClass &&
+						!is_type_level_member(*member)) {
+					add_instance_member_access(name, receiver.type, range, member->signature.has_value());
+					return {};
+				}
+				return native_member_value(*member);
+			}
 		} else if (receiver.type.kind == TypeKind::Enum) {
 			if (receiver.type.symbol_id.starts_with("global:") && workspace.native_api_.global_enum_has_value(
 					receiver.type.symbol_id.substr(7), name)) {

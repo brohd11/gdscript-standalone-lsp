@@ -203,6 +203,11 @@ const NativeMember *NativeApi::find_member(std::string_view class_name, std::str
 	return nullptr;
 }
 
+bool is_type_level_member(const NativeMember &member) {
+	return member.is_static || member.kind == SymbolKind::Constant ||
+		member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class;
+}
+
 std::vector<const NativeMember *> NativeApi::members(std::string_view class_name, MemberAccess access) const {
 	std::vector<const NativeMember *> result;
 	std::unordered_set<std::string> member_names;
@@ -216,8 +221,7 @@ std::vector<const NativeMember *> NativeApi::members(std::string_view class_name
 				auto found = record->members.find(name);
 				if (found == record->members.end()) continue;
 				const auto &member = found->second;
-				auto is_type_level = member.is_static || member.kind == SymbolKind::Constant ||
-					member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class;
+				auto is_type_level = is_type_level_member(member);
 				if (is_type_level == type_level && member_names.insert(name).second) result.push_back(&member);
 			}
 		};

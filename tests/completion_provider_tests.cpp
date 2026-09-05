@@ -210,8 +210,19 @@ void check_constructors(Harness &harness) {
 	auto comparison = harness.body("\tif target == <caret>\n");
 	expect_result(has_item(comparison, "ProductAlias.new"), "script constructor is offered for an object comparison", comparison);
 	auto member = harness.body("\tvar product: Product = Product.<caret>\n");
-	expect(member.disposition == CompletionDisposition::NotHandled && member.items.empty(),
-		"constructor helper does not leak into member access");
+	auto *member_item = find_item(member, "new");
+	expect_result(member.disposition == CompletionDisposition::Augment && member.provider == "constructors" &&
+		!member.items.empty() && member.items.front().filter_text == "new" && member_item &&
+		member_item->label == "new(\xe2\x80\xa6)" && member_item->insert_text == "new(" &&
+		member_item->origin_id.ends_with("::_init"),
+		"class member access offers its constructor first", member);
+	auto member_full = harness.body("\tvar product: Product = Product.<caret>\n", CompletionProfile::Full);
+	expect_result(member_full.disposition == CompletionDisposition::Replace && member_full.provider == "semantic" &&
+		!member_full.items.empty() && member_full.items.front().filter_text == "new" &&
+		has_item(member_full, "Nested") && has_item(member_full, "inherited_static") &&
+		!has_item(member_full, "title") && !has_item(member_full, "build") &&
+		!has_item(member_full, "inherited_method"),
+		"full class member completion starts with new and contains only type-level members", member_full);
 
 	auto config = harness.workspace.completion_config();
 	config.constructors = false;
@@ -219,6 +230,9 @@ void check_constructors(Harness &harness) {
 	auto disabled = harness.body("\tvar product: Product = <caret>\n");
 	expect(disabled.disposition == CompletionDisposition::NotHandled && disabled.items.empty(),
 		"constructor setting disables the provider");
+	auto disabled_member = harness.body("\tvar product: Product = Product.<caret>\n");
+	expect(disabled_member.disposition == CompletionDisposition::NotHandled && disabled_member.items.empty(),
+		"constructor setting disables class member constructor augmentation");
 	harness.reset_config();
 }
 

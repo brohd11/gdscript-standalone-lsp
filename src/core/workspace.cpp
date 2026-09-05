@@ -1033,8 +1033,7 @@ std::vector<const Symbol *> Workspace::all_members(const ClassRecord &record, Me
 	while (current && classes_seen.insert(current->symbol.id).second) {
 		auto append = [&](bool type_level) {
 			for (const auto &member : current->members) {
-				auto is_type_level = member.is_static || member.kind == SymbolKind::Constant ||
-					member.kind == SymbolKind::Enum || member.kind == SymbolKind::Class;
+				auto is_type_level = is_type_level_member(member);
 				if (is_type_level == type_level && names.insert(member.name).second) result.push_back(&member);
 			}
 		};
@@ -1334,9 +1333,7 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 		if (auto *record = find_class(receiver.symbol_id)) {
 			if (auto *member = find_member(*record, member_name)) {
 				if (!receiver.instance) {
-					auto type_level = member->is_static || member->kind == SymbolKind::Constant ||
-						member->kind == SymbolKind::Enum || member->kind == SymbolKind::Class;
-					if (!type_level) return ResolvedType::unknown(std::string(member_name));
+					if (!is_type_level_member(*member)) return ResolvedType::unknown(std::string(member_name));
 					if (member->kind == SymbolKind::Constant || member->kind == SymbolKind::Enum ||
 							member->kind == SymbolKind::Class) {
 						std::unordered_set<std::string> static_stack;
@@ -1389,6 +1386,9 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 		if (receiver.kind == TypeKind::Callable && (member_name == "bind" || member_name == "bindv" ||
 				member_name == "unbind")) return receiver;
 		if (auto *member = native_api_.find_member(receiver.name, member_name)) {
+			if (!receiver.instance && !is_type_level_member(*member)) {
+				return ResolvedType::unknown(std::string(member_name));
+			}
 			if (member->kind == SymbolKind::Enum) {
 				auto result = ResolvedType{TypeKind::Enum, member->name,
 					"nativeenum:" + member->owner + "." + member->name, false};
@@ -1969,6 +1969,34 @@ bool Workspace::is_potential_downcast(const ResolvedType &expected, const Resolv
 	return is_assignable(actual, expected);
 }
 
+ResolvedType Workspace::completion_receiver_type(const Document &document, Position position,
+		const CaretContext &caret) const {
+	if (!caret.member_receiver) return ResolvedType::unknown();
+	auto &receiver_text = *caret.member_receiver;
+	std::vector<std::string> stack;
+	auto *context = document.class_at(position);
+	auto receiver = infer_expression(receiver_text, document, context, position, stack);
+	auto root_end = receiver_text.find('.');
+	auto receiver_root = receiver_text.substr(0, root_end);
+	auto *receiver_symbol = resolve_identifier(document, context, receiver_root, position);
+	auto singleton_type = root_end == std::string::npos ? native_api_.singleton_type(receiver_root) : std::nullopt;
+	auto value_receiver = receiver_symbol || autoloads_.contains(receiver_root) || singleton_type.has_value();
+	if (singleton_type) {
+		receiver = type_from_name(*singleton_type, context);
+		receiver.instance = true;
+	}
+	if (!value_receiver) {
+		std::unordered_set<std::string> static_stack;
+		auto static_receiver = resolve_static_reference(receiver_text, context, static_stack);
+		if (static_receiver.known()) receiver = std::move(static_receiver);
+	}
+	if (receiver_symbol && receiver_symbol->kind != SymbolKind::Class &&
+			!receiver_symbol->declared_type.empty() && receiver.kind != TypeKind::Enum) {
+		receiver.instance = true;
+	}
+	return receiver;
+}
+
 std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document &document_value, Position position,
 		const CaretContext &caret) const {
 	std::vector<CompletionItem> result;
@@ -1980,27 +2008,7 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 	};
 	if (caret.member_access) {
 		if (!caret.member_receiver) return result;
-		auto &receiver_text = *caret.member_receiver;
-		std::vector<std::string> stack;
-		auto *context = document->class_at(position);
-		auto receiver = infer_expression(receiver_text, *document, context, position, stack);
-		auto root_end = receiver_text.find('.');
-		auto receiver_root = receiver_text.substr(0, root_end);
-		auto *receiver_symbol = resolve_identifier(*document, context, receiver_root, position);
-		auto singleton_type = root_end == std::string::npos ? native_api_.singleton_type(receiver_root) : std::nullopt;
-		auto value_receiver = receiver_symbol || autoloads_.contains(receiver_root) || singleton_type.has_value();
-		if (singleton_type) {
-			receiver = type_from_name(*singleton_type, context);
-			receiver.instance = true;
-		}
-		if (!value_receiver) {
-			std::unordered_set<std::string> static_stack;
-			auto static_receiver = resolve_static_reference(receiver_text, context, static_stack);
-			if (static_receiver.known()) receiver = std::move(static_receiver);
-		}
-		if (receiver_symbol && !receiver_symbol->declared_type.empty() && receiver.kind != TypeKind::Enum) {
-			receiver.instance = true;
-		}
+		auto receiver = completion_receiver_type(*document, position, caret);
 		if (receiver.kind == TypeKind::ScriptClass) {
 			if (auto *record = find_class(receiver.symbol_id)) {
 				for (auto *member : all_members(*record,
@@ -2233,6 +2241,37 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	auto symbol_by_id = [&](std::string_view id) -> const Symbol * {
 		auto found = symbols_.find(std::string(id));
 		return found == symbols_.end() ? nullptr : found->second;
+	};
+	auto constructor_completion_item = [&](const ResolvedType &type, std::string filter_text,
+			std::string access_kind = {}) -> std::optional<CompletionItem> {
+		if (type.kind != TypeKind::ScriptClass && type.kind != TypeKind::NativeClass) return std::nullopt;
+		bool has_arguments = false;
+		std::string origin_id;
+		if (type.kind == TypeKind::ScriptClass) {
+			if (auto *record = find_class(type.symbol_id)) {
+				if (auto *constructor = find_member(*record, "_init")) {
+					has_arguments = std::any_of(constructor->children.begin(), constructor->children.end(),
+						[](const Symbol &child) { return child.is_parameter; });
+					origin_id = constructor->id;
+				}
+			}
+		} else if (auto *constructors = native_api_.constructors(type.name)) {
+			has_arguments = std::any_of(constructors->begin(), constructors->end(),
+				[](const CallableSignature &signature) {
+					return !signature.arguments.empty() || signature.is_vararg;
+				});
+		}
+		CompletionItem item;
+		item.filter_text = std::move(filter_text);
+		item.label = item.filter_text + (has_arguments ? "(\xe2\x80\xa6)" : "()");
+		item.insert_text = item.filter_text + (has_arguments ? "(" : "()");
+		item.kind = SymbolKind::Constructor;
+		item.detail = "constructor";
+		item.symbol_id = type.symbol_id + "::new";
+		item.origin_id = origin_id.empty() ? item.symbol_id : std::move(origin_id);
+		item.provider = "constructors";
+		item.access_kind = std::move(access_kind);
+		return item;
 	};
 	auto &call = site.call;
 	auto callable_argument = [&](const CaretCallContext &active) -> std::optional<ExpectedValue> {
@@ -2554,6 +2593,17 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 
 	std::vector<CompletionItem> additions;
 	std::string augment_provider;
+	bool member_constructor_added = false;
+	if (completion_config_.constructors && site.member_access && !in_type_hint) {
+		auto receiver = completion_receiver_type(*document, position, site);
+		if (!receiver.instance) {
+			if (auto item = constructor_completion_item(receiver, "new")) {
+				additions.push_back(std::move(*item));
+				augment_provider = "constructors";
+				member_constructor_added = true;
+			}
+		}
+	}
 	if (completion_config_.extended_type_hints && in_type_hint) {
 		auto add_type = [&](std::string name, SymbolKind kind = SymbolKind::Class) {
 			additions.push_back(completion_item(std::move(name),
@@ -2600,34 +2650,13 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 
 	if (completion_config_.constructors && expected && expected->type.instance &&
 			(expected->type.kind == TypeKind::ScriptClass || expected->type.kind == TypeKind::NativeClass)) {
-		bool has_arguments = false;
-		if (expected->type.kind == TypeKind::ScriptClass) {
-			if (auto *record = find_class(expected->type.symbol_id)) if (auto *init = find_member(*record, "_init")) {
-				has_arguments = std::any_of(init->children.begin(), init->children.end(), [](const Symbol &child) { return child.is_parameter; });
-			}
-		} else if (auto *constructors = native_api_.constructors(expected->type.name)) {
-			has_arguments = std::any_of(constructors->begin(), constructors->end(), [](const CallableSignature &signature) {
-				return !signature.arguments.empty() || signature.is_vararg;
-			});
-		}
 		auto paths = access_paths_for_type(expected->type, context, expected->provenance);
 		auto access = !paths.empty() ? paths.front().text :
 			(expected->access.empty() ? expected->type.name : expected->access);
-		CompletionItem item;
-		item.filter_text = access + ".new";
-		item.label = item.filter_text + (has_arguments ? "(\xe2\x80\xa6)" : "()");
-		item.insert_text = item.filter_text + (has_arguments ? "(" : "()");
-		item.kind = SymbolKind::Constructor;
-		item.detail = "constructor";
-		item.symbol_id = expected->type.symbol_id + "::new";
-		item.origin_id = item.symbol_id;
-		if (expected->type.kind == TypeKind::ScriptClass) {
-			if (auto *record = find_class(expected->type.symbol_id)) {
-				if (auto *constructor = find_member(*record, "_init")) item.origin_id = constructor->id;
-			}
+		auto access_kind = paths.empty() ? "local" : std::string(access_path_kind_name(paths.front().kind));
+		if (auto item = constructor_completion_item(expected->type, access + ".new", std::move(access_kind))) {
+			additions.insert(additions.begin(), std::move(*item));
 		}
-		item.access_kind = paths.empty() ? "local" : std::string(access_path_kind_name(paths.front().kind));
-		additions.insert(additions.begin(), std::move(item));
 		if (augment_provider.empty()) augment_provider = "constructors";
 	}
 
@@ -2658,7 +2687,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		std::erase_if(output.items, [](const CompletionItem &item) { return item.filter_text.starts_with('_'); });
 	}
 	output.disposition = CompletionDisposition::Replace;
-	output.provider = augment_provider.empty() ? "semantic" : std::move(augment_provider);
+	output.provider = member_constructor_added || augment_provider.empty() ? "semantic" : std::move(augment_provider);
 	rank(output.items, output.provider);
 	return output;
 }
