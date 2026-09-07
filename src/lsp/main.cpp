@@ -2,6 +2,8 @@
 #include "core/uri.hpp"
 #include "core/workspace.hpp"
 #include "lsp/tcp_adapter.hpp"
+#include "lsp/diagnostic_coordinator.hpp"
+#include "lsp/engine_transport.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -181,257 +183,6 @@ std::string canonical_document_uri(std::string uri) {
 	return canonical_file_uri(uri).value_or(std::move(uri));
 }
 
-class DiagnosticPublisher {
-public:
-	explicit DiagnosticPublisher(Workspace &workspace) : workspace_(workspace), worker_([this](std::stop_token stop) {
-		run(stop);
-	}) {}
-
-	~DiagnosticPublisher() { stop(); }
-
-	uint64_t begin_update() {
-		std::lock_guard lock(mutex_);
-		++generation_;
-		background_.insert(dirty_.begin(), dirty_.end());
-		dirty_.clear();
-		last_change_ = std::chrono::steady_clock::now();
-		condition_.notify_all();
-		return generation_;
-	}
-
-	void finish_update(uint64_t generation, const std::vector<std::string> &immediate,
-			const std::vector<std::string> &affected) {
-		std::lock_guard lock(mutex_);
-		(void)generation;
-		if (stopping_) return;
-		for (const auto &uri : immediate) {
-			dirty_.insert(uri);
-			background_.erase(uri);
-		}
-		for (const auto &uri : affected) if (!dirty_.contains(uri)) background_.insert(uri);
-		last_change_ = std::chrono::steady_clock::now();
-		condition_.notify_all();
-	}
-
-	void schedule_full() {
-		auto stamps = file_stamps();
-		auto uris = workspace_.document_uris();
-		std::lock_guard lock(mutex_);
-		++generation_;
-		dirty_.clear();
-		background_.clear();
-		background_.insert(uris.begin(), uris.end());
-		stamps_ = std::move(stamps);
-		polling_started_ = true;
-		last_change_ = std::chrono::steady_clock::now();
-		next_poll_ = poll_interval_.count() > 0 ? last_change_ + poll_interval_ : std::chrono::steady_clock::time_point::max();
-		condition_.notify_all();
-	}
-
-	void set_open(const std::string &uri, bool open, const std::string &client_uri = {}) {
-		std::lock_guard lock(mutex_);
-		if (open) {
-			open_.insert(uri);
-			client_uris_[uri] = client_uri.empty() ? uri : client_uri;
-		} else {
-			open_.erase(uri);
-			client_uris_.erase(uri);
-		}
-	}
-
-	void set_poll_interval(std::chrono::milliseconds interval) {
-		std::lock_guard lock(mutex_);
-		poll_interval_ = interval;
-		next_poll_ = polling_started_ && interval.count() > 0 ?
-			std::chrono::steady_clock::now() + interval : std::chrono::steady_clock::time_point::max();
-		condition_.notify_all();
-	}
-
-	void request_stop() {
-		std::lock_guard lock(mutex_);
-		if (stopping_) return;
-		stopping_ = true;
-		++generation_;
-		dirty_.clear();
-		background_.clear();
-		worker_.request_stop();
-		condition_.notify_all();
-	}
-
-	void stop() {
-		if (!worker_.joinable()) return;
-		request_stop();
-		worker_.join();
-	}
-
-private:
-	static constexpr auto full_scan_delay_ = std::chrono::milliseconds(200);
-	struct FileStamp {
-		std::filesystem::file_time_type modified;
-		uintmax_t size = 0;
-		auto operator<=>(const FileStamp &) const = default;
-	};
-
-	std::unordered_map<std::string, FileStamp> file_stamps() const {
-		std::unordered_map<std::string, FileStamp> result;
-		std::error_code error;
-		for (std::filesystem::recursive_directory_iterator iterator(workspace_.root(),
-				std::filesystem::directory_options::skip_permission_denied, error), end;
-				iterator != end; iterator.increment(error)) {
-			if (error) {
-				error.clear();
-				continue;
-			}
-			if (iterator->is_directory()) {
-				if (iterator->path().filename() == ".git" || std::filesystem::exists(iterator->path() / ".gdignore")) {
-					iterator.disable_recursion_pending();
-				}
-				continue;
-			}
-			if (iterator->path().extension() != ".gd" && !iterator->path().string().ends_with(".gd.uid") &&
-					iterator->path().filename() != "project.godot") continue;
-			auto modified = iterator->last_write_time(error);
-			if (error) { error.clear(); continue; }
-			auto size = iterator->file_size(error);
-			if (error) { error.clear(); continue; }
-			result[workspace_.uri_for_path(iterator->path())] = {modified, size};
-		}
-		return result;
-	}
-
-	static std::vector<std::string> merged(std::vector<std::string> first, const std::vector<std::string> &second) {
-		first.insert(first.end(), second.begin(), second.end());
-		std::sort(first.begin(), first.end());
-		first.erase(std::unique(first.begin(), first.end()), first.end());
-		return first;
-	}
-
-	void refresh_external_files() {
-		auto current = file_stamps();
-		std::unordered_map<std::string, FileStamp> previous;
-		std::unordered_set<std::string> open;
-		{
-			std::lock_guard lock(mutex_);
-			previous = stamps_;
-			stamps_ = current;
-			open = open_;
-		}
-		std::vector<std::string> changed;
-		for (const auto &[uri, stamp] : current) {
-			auto found = previous.find(uri);
-			if ((found == previous.end() || found->second != stamp) && !open.contains(uri)) changed.push_back(uri);
-		}
-		for (const auto &[uri, stamp] : previous) {
-			(void)stamp;
-			if (!current.contains(uri) && !open.contains(uri)) changed.push_back(uri);
-		}
-		if (changed.empty()) return;
-		std::sort(changed.begin(), changed.end());
-		changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-		auto generation = begin_update();
-		auto affected = workspace_.affected_documents(changed);
-		std::string error;
-		for (const auto &uri : changed) workspace_.refresh_file(uri, &error);
-		affected = merged(std::move(affected), workspace_.affected_documents(changed));
-		finish_update(generation, {}, affected);
-	}
-
-	bool publish(const std::string &uri, uint64_t generation, bool force, std::stop_token stop) {
-		{
-			std::lock_guard lock(mutex_);
-			if (stopping_ || stop.stop_requested()) return false;
-			if (generation != generation_) {
-				background_.insert(uri);
-				return false;
-			}
-		}
-		json items = json::array();
-		for (const auto &diagnostic : workspace_.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
-		auto version = workspace_.document_version(uri);
-		auto cache_key = items.dump();
-
-		bool should_send = false;
-		std::string published_uri = uri;
-		{
-			std::lock_guard lock(mutex_);
-			if (stopping_ || stop.stop_requested()) return false;
-			if (generation != generation_) {
-				background_.insert(uri);
-				return false;
-			}
-			auto previous = published_.find(uri);
-			if (!force && previous != published_.end() && previous->second == cache_key) return true;
-			should_send = force || !items.empty() || previous != published_.end();
-			if (should_send) published_[uri] = std::move(cache_key);
-			if (auto preferred = client_uris_.find(uri); preferred != client_uris_.end()) {
-				published_uri = preferred->second;
-			}
-		}
-		if (!should_send) return true;
-		json params = {{"uri", published_uri}, {"diagnostics", std::move(items)}};
-		if (version >= 0) params["version"] = version;
-		send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", std::move(params)}});
-		return true;
-	}
-
-	void run(std::stop_token stop) {
-		while (!stop.stop_requested()) {
-			std::string uri;
-			uint64_t generation = 0;
-			bool force = false;
-			bool poll = false;
-			{
-				std::unique_lock lock(mutex_);
-				while (!stop.stop_requested() && !stopping_) {
-					auto now = std::chrono::steady_clock::now();
-					if (!dirty_.empty()) {
-						auto found = dirty_.begin();
-						uri = *found;
-						dirty_.erase(found);
-						force = true;
-						generation = generation_;
-						break;
-					}
-					if (poll_interval_.count() > 0 && now >= next_poll_) {
-						next_poll_ = now + poll_interval_;
-						poll = true;
-						break;
-					}
-					if (!background_.empty() && now >= last_change_ + full_scan_delay_) {
-						auto found = background_.begin();
-						uri = *found;
-						background_.erase(found);
-						generation = generation_;
-						break;
-					}
-					auto deadline = next_poll_;
-					if (!background_.empty()) deadline = std::min(deadline, last_change_ + full_scan_delay_);
-					condition_.wait_until(lock, deadline);
-				}
-				if (stop.stop_requested() || stopping_) return;
-			}
-			if (poll) refresh_external_files();
-			else if (!uri.empty()) publish(uri, generation, force, stop);
-		}
-	}
-
-	Workspace &workspace_;
-	std::mutex mutex_;
-	std::condition_variable condition_;
-	std::unordered_set<std::string> dirty_;
-	std::unordered_set<std::string> background_;
-	std::unordered_set<std::string> open_;
-	std::unordered_map<std::string, std::string> client_uris_;
-	std::unordered_map<std::string, std::string> published_;
-	std::unordered_map<std::string, FileStamp> stamps_;
-	uint64_t generation_ = 0;
-	bool stopping_ = false;
-	bool polling_started_ = false;
-	std::chrono::steady_clock::time_point last_change_ = std::chrono::steady_clock::now();
-	std::chrono::milliseconds poll_interval_{1000};
-	std::chrono::steady_clock::time_point next_poll_ = std::chrono::steady_clock::time_point::max();
-	std::jthread worker_;
-};
 
 void respond(const json &id, json result) {
 	send({{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}});
@@ -601,7 +352,8 @@ std::vector<std::string> merge_uris(std::vector<std::string> first, const std::v
 	return first;
 }
 
-void apply_configuration(Workspace &workspace, DiagnosticPublisher &publisher, const json &settings) {
+void apply_configuration(Workspace &workspace, DiagnosticCoordinator &publisher, const json &settings,
+		const std::optional<EngineConfiguration> &cli_engine = std::nullopt) {
 	if (!settings.is_object()) return;
 	const json *root = &settings;
 	if (auto found = root->find("gdscriptLsp"); found != root->end() && found->is_object()) root = &*found;
@@ -631,12 +383,14 @@ void apply_configuration(Workspace &workspace, DiagnosticPublisher &publisher, c
 		workspace.set_completion_config(config);
 	}
 	if (auto diagnostics = root->find("diagnostics"); diagnostics != root->end() && diagnostics->is_object()) {
+		if (!cli_engine && diagnostics->contains("engine")) publisher.configure_engine(EngineConfiguration::parse((*diagnostics)["engine"]));
 		if (auto interval = diagnostics->find("pollIntervalMs"); interval != diagnostics->end() && interval->is_number_integer()) {
 			auto milliseconds = interval->get<int64_t>();
 			if (milliseconds > 0) milliseconds = std::max<int64_t>(milliseconds, 100);
 			publisher.set_poll_interval(std::chrono::milliseconds(std::max<int64_t>(milliseconds, 0)));
 		}
 	}
+	if (cli_engine) publisher.configure_engine(*cli_engine);
 }
 
 } // namespace
@@ -649,12 +403,27 @@ int main(int argc, char **argv) {
 	std::filesystem::path project;
 	std::filesystem::path configured_api;
 	std::optional<uint16_t> tcp_port;
+	std::optional<EngineConfiguration> cli_engine;
 	bool space_prefix = false;
 	for (int index = 1; index < argc; ++index) {
 		std::string argument = argv[index];
 		if (argument == "--project" && index + 1 < argc) project = argv[++index];
 		else if (argument == "--api" && index + 1 < argc) configured_api = argv[++index];
 		else if (argument == "--space-prefix") space_prefix = true;
+		else if (argument == "--godot" || argument == "--godot-lsp-port") {
+			if (cli_engine || index + 1 >= argc) {
+				std::cerr << "gdscript-lsp: --godot and --godot-lsp-port require a value and are mutually exclusive\n"; return 2;
+			}
+			std::string value = argv[++index];
+			try {
+				if (argument == "--godot") cli_engine = EngineConfiguration::parse({{"mode", "launch"}, {"executable", value}});
+				else {
+					int port = 0; auto parsed = std::from_chars(value.data(), value.data() + value.size(), port);
+					if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size()) throw std::invalid_argument("Invalid engine LSP port");
+					cli_engine = EngineConfiguration::parse({{"mode", "attach"}, {"port", port}});
+				}
+			} catch (const std::exception &error) { std::cerr << "gdscript-lsp: " << error.what() << '\n'; return 2; }
+		}
 		else if (argument == "--tcp") {
 			if (tcp_port || index + 1 >= argc) {
 				std::cerr << "gdscript-lsp: --tcp requires one port\n";
@@ -675,8 +444,10 @@ int main(int argc, char **argv) {
 		}
 	}
 	if (tcp_port) return run_tcp_adapter(*tcp_port, argc, argv);
+	install_engine_termination_handlers();
 	Workspace workspace;
-	DiagnosticPublisher diagnostics(workspace);
+	DiagnosticCoordinator diagnostics(workspace, send, diagnostic_json);
+	if (cli_engine) diagnostics.configure_engine(*cli_engine);
 	std::string error;
 	std::unordered_map<std::string, std::string> buffers;
 	std::unordered_set<std::string> cancelled;
@@ -690,6 +461,7 @@ int main(int argc, char **argv) {
 		json id = request ? (*message)["id"] : json();
 
 		if (method == "$/cancelRequest") {
+			diagnostics.cancel_pull(params.value("id", json(nullptr)));
 			cancelled.insert(params.contains("id") ? params["id"].dump() : "null");
 			continue;
 		}
@@ -704,7 +476,8 @@ int main(int argc, char **argv) {
 				continue;
 			}
 			if (auto options = params.find("initializationOptions"); options != params.end()) {
-				apply_configuration(workspace, diagnostics, *options);
+				try { apply_configuration(workspace, diagnostics, *options, cli_engine); }
+				catch (const std::exception &error) { respond_error(id, -32602, error.what()); continue; }
 			}
 			auto selected_project = project.empty() ? project_from_initialize(params, error) : find_project_root(project);
 			if (!selected_project) {
@@ -727,6 +500,7 @@ int main(int argc, char **argv) {
 		} else if (!initialized) {
 			if (request) respond_error(id, -32002, "Server not initialized");
 		} else if (method == "initialized") {
+			diagnostics.start_engine();
 			diagnostics.schedule_full();
 		} else if (method == "shutdown") {
 			shutdown = true;
@@ -764,8 +538,11 @@ int main(int argc, char **argv) {
 				affected = merge_uris(std::move(affected), workspace.affected_documents({uri}));
 				diagnostics.finish_update(generation, {uri}, affected);
 			}
+		} else if (method == "textDocument/didSave") {
+			diagnostics.saved(canonical_document_uri(params["textDocument"].value("uri", "")));
 		} else if (method == "workspace/didChangeConfiguration") {
-			apply_configuration(workspace, diagnostics, params.value("settings", json::object()));
+			try { apply_configuration(workspace, diagnostics, params.value("settings", json::object()), cli_engine); }
+			catch (const std::exception &error) { send({{"jsonrpc", "2.0"}, {"method", "window/logMessage"}, {"params", {{"type", 1}, {"message", error.what()}}}}); }
 		} else if (method == "workspace/didChangeWatchedFiles") {
 			auto generation = diagnostics.begin_update();
 			std::vector<std::string> changed;
@@ -775,6 +552,7 @@ int main(int argc, char **argv) {
 			}
 			auto affected = workspace.affected_documents(changed);
 			for (const auto &uri : changed) workspace.refresh_file(uri, &error);
+			diagnostics.external_changes(changed);
 			affected = merge_uris(std::move(affected), workspace.affected_documents(changed));
 			diagnostics.finish_update(generation, {}, affected);
 		} else if (method == "textDocument/completion") {
@@ -838,9 +616,12 @@ int main(int argc, char **argv) {
 			respond(id, expression_json(expression));
 		} else if (method == "textDocument/diagnostic" || method == "gdscript/diagnostics") {
 			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
-			json items = json::array();
-			for (const auto &diagnostic : workspace.diagnostics(uri)) items.push_back(diagnostic_json(diagnostic));
-			respond(id, {{"kind", "full"}, {"items", std::move(items)}});
+			diagnostics.pull(uri, id);
+		} else if (method == "gdscript/diagnosticBackend") {
+			respond(id, diagnostics.engine_status());
+		} else if (method == "gdscript/reconnectDiagnosticEngine") {
+			diagnostics.reconnect_engine();
+			if (request) respond(id, nullptr);
 		} else if (request) {
 			respond_error(id, -32601, "Method not found: " + method);
 		}

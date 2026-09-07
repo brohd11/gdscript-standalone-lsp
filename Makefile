@@ -26,7 +26,7 @@ DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 
 -include $(DEPFILES)
 
-.PHONY: all deps test benchmark-completion test-conformance test-diagnostics gdextension test-gdextension install clean dump-tree
+.PHONY: all deps test benchmark-completion test-conformance test-diagnostics test-engine-bridge test-engine-bridge-godot gdextension test-gdextension install clean dump-tree
 all: $(BUILD_DIR)/gdscript-lsp
 
 deps:
@@ -60,6 +60,13 @@ test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/comp
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
 	python3 tests/diagnostic_cases.py $(BUILD_DIR)/gdscript-lsp
 	python3 tests/diagnostic_updates.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/engine_bridge.py $(BUILD_DIR)/gdscript-lsp
+
+test-engine-bridge: $(BUILD_DIR)/gdscript-lsp
+	python3 tests/engine_bridge.py $(BUILD_DIR)/gdscript-lsp
+
+test-engine-bridge-godot: $(BUILD_DIR)/gdscript-lsp
+	python3 tests/engine_bridge_godot.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"
 
 benchmark-completion: $(BUILD_DIR)/gdscript-lsp
 	python3 tools/completion_benchmark.py $(BUILD_DIR)/gdscript-lsp \

@@ -66,6 +66,7 @@ public:
 	// and after the replacement, then take the union so removed edges are kept.
 	std::vector<std::string> affected_documents(const std::vector<std::string> &changed_uris) const;
 	int64_t document_version(const std::string &uri) const;
+	std::optional<std::pair<std::string, int64_t>> document_text(const std::string &uri) const;
 
 	const NativeApi &native_api() const { return native_api_; }
 	const IndexStats &stats() const { return stats_; }

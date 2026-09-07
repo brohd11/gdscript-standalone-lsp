@@ -116,6 +116,49 @@ make test-conformance GODOT=/path/to/godot
 
 Run `make test-diagnostics` for isolated exact-set cases and live LSP warning updates without Godot. The sources and expectations live in `tests/diagnostic_cases.json`; the combined zoo remains a recovery/coverage checklist. The conformance command checks these alongside `tests/diagnostic_oracle.json`, uses temporary projects, recognizes script errors even when Godot exits successfully, and isolates warnings by promoting one category at a time to Error. It does not launch the debugger or execute the test scripts. See `THIRD_PARTY_NOTICES.md` for Godot attribution.
 
+### Optional engine diagnostics
+
+Use a Godot **editor executable** to obtain that engine's own LSP diagnostics while keeping this server's completion, navigation, outline and type resolution:
+
+```sh
+# Launch and own a headless editor for the selected project.
+build/gdscript-lsp --godot /path/to/godot
+
+# Attach to the LSP of an editor already running the same project.
+build/gdscript-lsp --godot-lsp-port 6005
+```
+
+Both options work with stdio or the existing `--tcp` adapter. Attachment connects to `127.0.0.1` and rejects a different project. The frontend TCP port must differ from Godot's LSP port. Launch mode allocates dedicated LSP, DAP and debugger ports and owns one headless editor per frontend session; closing the session terminates its owned engine. Attachment never terminates the existing editor. On macOS, supply the executable inside the application bundle, such as `Godot.app/Contents/MacOS/Godot`.
+
+Alternatively, configure the backend through `initializationOptions` or `workspace/didChangeConfiguration`:
+
+```json
+{
+  "gdscriptLsp": {
+    "diagnostics": {
+      "engine": {
+        "mode": "launch",
+        "executable": "/path/to/godot"
+      }
+    }
+  }
+}
+```
+
+The default mode is `"off"`. Attach mode uses `{"mode":"attach","port":6005}`. `--godot` and `--godot-lsp-port` are mutually exclusive and take precedence over engine configuration. Completion configuration and native API snapshot selection remain independent of the engine bridge.
+
+While connected, engine diagnostics replace the standalone set. Numeric codes, messages, severity, ranges and optional diagnostic fields are preserved, including engine quirks; standalone warning settings and suppression logic are not reapplied. Full-text unsaved buffers are sent after a 150 ms debounce, with explicit diagnostic pulls prioritized immediately. Edits invalidate pending results, and synchronization barriers prevent unversioned engine reports from being attributed to newer edits. Push and pull diagnostics use the same accepted results. Unopened scripts are checked in the background using temporary upstream document opens.
+
+Startup and connection failures use current standalone diagnostics. Startup allows up to 60 seconds for imports; diagnostic transactions time out after five seconds. Reconnection uses exponential backoff capped at 30 seconds and replays current overlays. During a healthy connection, the previous publication retains its original document version until a new engine result arrives. Completion requests do not wait for engine I/O.
+
+Request `gdscript/diagnosticBackend` with empty parameters to inspect `mode`, `state`, `reason` and `engineVersion`. The same object is emitted through `gdscript/diagnosticBackendChanged`. States are `off`, `connecting`, `ready`, `fallback` and `reload-required`; attached engines may have an unknown (`null`) version. `gdscript/reconnectDiagnosticEngine` restarts an owned engine or reconnects an attachment. Changing engine configuration replaces the connection. Invalid runtime configuration is reported through `window/logMessage` and leaves the previous engine configuration in place.
+
+Managed launch uses normal editor initialization, including imports, tool scripts, editor plugins and GDExtensions. Godot may update project caches and generated metadata. The bridge never saves unsaved source buffers. Changes to `project.godot` restart a managed editor; an attachment falls back until you reload the project in Godot and request reconnection. A managed engine's bind interface follows Godot's editor settings; the bridge itself connects only over loopback.
+
+Parity means matching the connected **Godot LSP**, rather than adding compiler behavior its LSP does not expose. In particular, Godot 4.6.3's analyzer can resolve dependencies from disk even when another dependency buffer has unsaved edits. Upstream diagnostic ranges and duplicate reports are retained. Godot 4.6.3 is verified; other versions with the required full-text synchronization and document-symbol support are best effort. The embedded `GDScriptLanguageService` remains standalone.
+
+`make test-engine-bridge` runs the fake-engine synchronization, fallback and lifecycle suite (also included in `make test` and CTest). Run `make test-engine-bridge-godot GODOT=/path/to/godot` for direct-versus-bridged diagnostic comparisons and managed launch/restart checks in disposable projects.
+
 ## GDExtension
 
 Fetch the pinned Godot 4.6 bindings and SCons, build the adapter, and run its headless smoke test with:

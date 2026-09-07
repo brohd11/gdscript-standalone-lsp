@@ -145,6 +145,10 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostic_updates.py"
             "$<TARGET_FILE:gdscript-lsp>")
   set_tests_properties(diagnostic-updates PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME engine-bridge
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_bridge.py"
+      "$<TARGET_FILE:gdscript-lsp>")
+  set_tests_properties(engine-bridge PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 120)
   add_executable(broken-syntax-tests tests/broken_syntax_tests.cpp)
   target_link_libraries(broken-syntax-tests PRIVATE gdscript-lsp-core Threads::Threads)
   add_test(NAME semantic-recovery

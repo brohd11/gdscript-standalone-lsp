@@ -2948,6 +2948,13 @@ std::vector<std::string> Workspace::affected_documents_locked(
 	return result;
 }
 
+std::optional<std::pair<std::string, int64_t>> Workspace::document_text(const std::string &uri) const {
+	std::shared_lock lock(mutex_);
+	auto document = find_document(uri);
+	if (!document) return std::nullopt;
+	return std::pair{document->source(), document->version()};
+}
+
 int64_t Workspace::document_version(const std::string &uri) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);
