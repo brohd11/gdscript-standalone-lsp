@@ -35,14 +35,14 @@ def project_settings(case):
 
 
 def prepare(directory, case):
-    (directory / 'project.godot').write_text(project_settings(case))
+    (directory / 'project.godot').write_text(project_settings(case), encoding='utf-8')
     script = directory / case.get('path', 'main.gd')
     script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(case['source'])
+    script.write_text(case['source'], encoding='utf-8')
     for name, source in case.get('files', {}).items():
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source)
+        path.write_text(source, encoding='utf-8')
     return script
 
 
@@ -82,7 +82,7 @@ def assert_diagnostics(case, actual):
 
 def main():
     binary = pathlib.Path(sys.argv[1]).resolve()
-    cases = json.loads((ROOT / 'tests/diagnostic_cases.json').read_text())['cases']
+    cases = json.loads((ROOT / 'tests/diagnostic_cases.json').read_text(encoding='utf-8'))['cases']
     failures = []
     for case in cases:
         if len(sys.argv) > 2 and sys.argv[2] not in case['name']:
@@ -93,15 +93,15 @@ def main():
                 script = prepare(directory, case)
                 api = ROOT / case['api'] if 'api' in case else API
                 if case.get('operator_metadata') is False:
-                    metadata = json.loads(API.read_text())
+                    metadata = json.loads(API.read_text(encoding='utf-8'))
                     metadata['gdscript_lsp_schema'] = 2
                     for builtin in metadata['builtin_classes']:
                         builtin.pop('operators', None)
                     api = directory / 'extension_api.json'
-                    api.write_text(json.dumps(metadata))
+                    api.write_text(json.dumps(metadata), encoding='utf-8')
                 assert_diagnostics(case, query(binary, directory, script, api=api))
                 if case.get('overlay'):
-                    script.write_text('extends Node\n')
+                    script.write_text('extends Node\n', encoding='utf-8')
                     assert_diagnostics(case, query(binary, directory, script, source=case['source'], api=api))
         except (AssertionError, subprocess.SubprocessError) as error:
             failures.append(str(error))
