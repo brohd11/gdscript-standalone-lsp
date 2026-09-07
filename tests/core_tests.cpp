@@ -1191,97 +1191,89 @@ int main() {
 	}
 	expect(inference_diagnostics.empty(), "inference corpus introduces no semantic false positives");
 
+	// Focused, tracked counterparts of regressions originally exercised through
+	// locally installed add-ons. Keeping this workspace beneath tests makes the
+	// suite identical in a clean checkout and a developer's populated project.
 	Workspace repository_workspace;
+	auto repository_fixture = std::filesystem::weakly_canonical("tests/fixtures/repository_regressions");
 	auto repository_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");
-	expect(repository_workspace.open(".", repository_api, &error), "repository workspace opens: " + error);
-	auto u_file_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_file.gd"));
-	auto u_file_diagnostics = repository_workspace.diagnostics(u_file_uri);
-	if (!u_file_diagnostics.empty()) for (const auto &item : u_file_diagnostics) {
-		std::cerr << "u_file.gd:" << item.range.start.line + 1 << ':' << item.range.start.character + 1 << ": "
-			<< item.code << ": " << item.message << '\n';
-	}
-	expect(u_file_diagnostics.empty(),
-		"u_file.gd does not statically narrow ordinary Variant variables");
-	auto command_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/editor_console/src/default_commands/script/script.gd"));
-	expect(repository_workspace.diagnostics(command_uri).empty(),
-		"qualified EditorConsoleSingleton base resolves with all inherited command members");
+	expect(repository_workspace.open(repository_fixture, repository_api, &error),
+		"repository regression fixture opens: " + error);
+	expect(repository_workspace.stats().document_count == 5,
+		"all repository regression fixture scripts are indexed");
 	for (const auto &path : {
-			"addons/addon_lib/brohd/popup_wrapper/popup_wrapper.gd",
-			"addons/addon_lib/brohd/alib_runtime/utils/u_node.gd",
-			"addons/addon_lib/brohd/dock_manager/dock_manager.gd",
-			"addons/code_completions/src/class/editor_code_completion_singleton.gd",
-			"addons/addon_lib/brohd/alib_runtime/utils/gdscript/parser/utils/code_edit_parser.gd",
-			"addons/syntax_plus/src/highlighter/highlighter_logic.gd",
-			"addons/addon_lib/brohd/alib_editor/file_system/fs_tab/filesystem_tab.gd",
-			"addons/addon_lib/brohd/alib_editor/misc/scene_viewer/scene_viewer.gd",
-			"addons/editor_console/src/container/line_edit.gd",
-			"addons/addon_lib/brohd/alib_editor/misc/git_service/git_data_draw.gd",
-			"addons/addon_lib/brohd/collections/class/collection_button.gd",
-			"addons/gdscript_lsp/editor/native_completion.gd",
-			"addons/gdscript_lsp/plugin.gd"}) {
-		auto uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(path));
+			"completion_base.gd", "native_completion.gd", "plugin.gd", "script_resource.gd", "scenario.gd"}) {
+		auto uri = repository_workspace.uri_for_path(repository_fixture / path);
 		auto reported = repository_workspace.diagnostics(uri);
 		if (!reported.empty()) {
 			for (const auto &item : reported) {
-				std::cerr << path << ": " << item.code << ": " << item.message << '\n';
+				std::cerr << "repository fixture " << path << ": " << item.code << ": " << item.message << '\n';
 			}
 		}
-		expect(reported.empty(), std::string(path) + " has no false diagnostics");
+		expect(reported.empty(), std::string("repository fixture ") + path + " has no false diagnostics");
 	}
-	auto popup_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/addon_lib/brohd/popup_wrapper/popup_wrapper.gd"));
-	auto position_type = repository_workspace.resolve_type(popup_uri, {413, 30}, "ItemParams.Position.TOP");
+	auto scenario_uri = repository_workspace.uri_for_path(repository_fixture / "scenario.gd");
+	std::ifstream scenario_stream(repository_fixture / "scenario.gd", std::ios::binary);
+	std::string scenario_source{std::istreambuf_iterator<char>(scenario_stream), std::istreambuf_iterator<char>()};
+	auto scenario_position = [&](std::string_view marker, size_t offset = 0) {
+		auto found = scenario_source.find(marker);
+		expect(found != std::string::npos, "repository fixture marker exists: " + std::string(marker));
+		return byte_to_position(scenario_source, found + offset);
+	};
+	auto enum_expression = std::string_view("ItemParams.Position.TOP");
+	auto position_type = repository_workspace.resolve_type(scenario_uri,
+		scenario_position(enum_expression, enum_expression.size()), std::string(enum_expression));
 	expect(position_type.kind == TypeKind::Enum && position_type.name == "Position",
 		"qualified nested enum values retain their enum identity");
-	auto enum_completion = repository_workspace.completion(popup_uri, {413, 39});
+	auto enum_prefix = std::string_view("ItemParams.Position.");
+	auto enum_completion = repository_workspace.completion(scenario_uri,
+		scenario_position(enum_expression, enum_prefix.size()));
 	expect(has_item(enum_completion, "TOP") && has_item(enum_completion, "BOTTOM") && has_item(enum_completion, "keys"),
 		"qualified enum completion includes values and Dictionary methods");
-	auto u_node_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/addon_lib/brohd/alib_runtime/utils/u_node.gd"));
-	expect(has_item(repository_workspace.completion(u_node_uri, {28, 2}), "is_instance_of"),
+	auto builtin_position = scenario_position("if is_instance_of", 4);
+	expect(has_item(repository_workspace.completion(scenario_uri, builtin_position), "is_instance_of"),
 		"GDScript-specific builtins are offered in completion");
-	auto global_completion = repository_workspace.completion(u_node_uri, {28, 2});
+	auto global_completion = repository_workspace.completion(scenario_uri, builtin_position);
 	expect(has_item(global_completion, "len") && has_item(global_completion, "char"),
 		"all modeled GDScript builtins are offered in completion");
 	auto *builtin_completion = find_item(global_completion, "is_instance_of");
 	expect(builtin_completion && builtin_completion->label == "is_instance_of(\xe2\x80\xa6)" &&
 		builtin_completion->filter_text == "is_instance_of" && builtin_completion->insert_text == "is_instance_of(",
 		"GDScript builtin completion uses compact display, bare filtering, and trailing-opener insertion");
-	auto dock_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/addon_lib/brohd/dock_manager/dock_manager.gd"));
-	auto dock_symbols = repository_workspace.document_symbols(dock_uri);
+	auto scenario_symbols = repository_workspace.document_symbols(scenario_uri);
 	bool found_dock_constructor = false;
-	for (const auto &record : dock_symbols) for (const auto &member : record.children) {
+	for (const auto &record : scenario_symbols) for (const auto &member : record.children) {
 		if (member.kind == SymbolKind::Constructor && member.name == "_init" && member.children.size() == 5) {
 			found_dock_constructor = true;
 		}
 	}
 	expect(found_dock_constructor, "multiline _init is indexed with its complete constructor signature");
-	auto code_completion_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/code_completions/src/class/editor_code_completion_singleton.gd"));
-	auto script_resource_type = repository_workspace.resolve_type(code_completion_uri, {53, 30}, "PE_STRIP_CAST_SCRIPT");
+	auto script_resource_uri = repository_workspace.uri_for_path(repository_fixture / "script_resource.gd");
+	std::ifstream script_resource_stream(repository_fixture / "script_resource.gd", std::ios::binary);
+	std::string script_resource_source{std::istreambuf_iterator<char>(script_resource_stream),
+		std::istreambuf_iterator<char>()};
+	auto script_resource_marker = std::string_view("SCRIPT_RESOURCE");
+	auto script_resource_at = script_resource_source.find(script_resource_marker);
+	expect(script_resource_at != std::string::npos, "script resource fixture marker exists");
+	auto script_resource_type = repository_workspace.resolve_type(script_resource_uri,
+		byte_to_position(script_resource_source, script_resource_at + script_resource_marker.size()), "SCRIPT_RESOURCE");
 	expect(script_resource_type.kind == TypeKind::ScriptClass && !script_resource_type.instance,
 		"preloaded scripts remain class objects when used as values");
-	auto code_edit_uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(
-		"addons/addon_lib/brohd/alib_runtime/utils/gdscript/parser/utils/code_edit_parser.gd"));
-	auto path_constant_type = repository_workspace.resolve_type(code_edit_uri, {407, 42}, "TREE_SITTER_MANAGER_PATH");
+	auto path_constant_type = repository_workspace.resolve_type(scenario_uri,
+		scenario_position("RESOURCE_PATH", std::string_view("RESOURCE_PATH").size()), "RESOURCE_PATH");
 	expect(path_constant_type.kind == TypeKind::Builtin && path_constant_type.name == "String",
 		"quoted resource-path constants remain strings");
-	auto highlighter_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/syntax_plus/src/highlighter/highlighter_logic.gd"));
-	auto typed_dictionary_type = repository_workspace.resolve_type(highlighter_uri, {134, 20}, "func_arg_highlighters");
+	auto typed_dictionary_type = repository_workspace.resolve_type(scenario_uri,
+		scenario_position("typed_dictionary", std::string_view("typed_dictionary").size()), "typed_dictionary");
 	expect(typed_dictionary_type.kind == TypeKind::Builtin && typed_dictionary_type.name == "Dictionary" &&
 		typed_dictionary_type.arguments.size() == 2 && typed_dictionary_type.display() == "Dictionary[String, Dictionary]",
 		"typed dictionaries retain arguments while using the Dictionary base type");
-	auto yaml_uri = repository_workspace.uri_for_path(
-		std::filesystem::weakly_canonical("addons/addon_lib/yaml_parser/yaml.gd"));
-	expect(has_item(repository_workspace.completion(yaml_uri, {823, 8}), "depth"),
+	auto scanner_access = std::string_view("scanner.depth");
+	expect(has_item(repository_workspace.completion(scenario_uri,
+		scenario_position(scanner_access, std::string_view("scanner.").size())), "depth"),
 		"completion keeps initializer hints for ordinary Variant variables without making them statically typed");
-	auto scene_resource_uri = repository_workspace.uri_for_path(std::filesystem::weakly_canonical(
-		"addons/addon_lib/brohd/dock_manager/dock_popup/dock_popup_handler.gd"));
-	auto scene_resource_type = repository_workspace.resolve_type(scene_resource_uri, {11, 20}, "DOCK_POPUP");
+	auto scene_resource_type = repository_workspace.resolve_type(scenario_uri,
+		scenario_position("SCENE_RESOURCE", std::string_view("SCENE_RESOURCE").size()), "SCENE_RESOURCE");
 	expect(scene_resource_type.kind == TypeKind::NativeClass && scene_resource_type.name == "PackedScene",
 		"preloaded scene constants resolve as PackedScene resources");
 
