@@ -37,7 +37,7 @@ jobs:
       run:
         shell: bash
     env:
-      PACKAGE_NAME: gdscript-lsp-${{ github.ref_name }}-${{ matrix.target }}
+      PACKAGE_NAME: gdscript-lsp-${{ matrix.target }}
       EXPECTED_ARCH: ${{ matrix.arch }}
 
     steps:
@@ -48,6 +48,23 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+
+      - name: Validate shell installer syntax
+        if: runner.os != 'Windows'
+        run: sh -n install.sh
+
+      - name: Validate PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'install.ps1').Path, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
 
       - name: Select macOS toolchain
         if: runner.os == 'macOS'
@@ -146,9 +163,9 @@ jobs:
         shell: bash
         run: |
           archives=(
-            "gdscript-lsp-$RELEASE_TAG-macos-arm64.tar.gz"
-            "gdscript-lsp-$RELEASE_TAG-linux-x64.tar.gz"
-            "gdscript-lsp-$RELEASE_TAG-windows-x64.zip"
+            "gdscript-lsp-macos-arm64.tar.gz"
+            "gdscript-lsp-linux-x64.tar.gz"
+            "gdscript-lsp-windows-x64.zip"
           )
           for archive in "${archives[@]}"; do
             test -s "$archive"

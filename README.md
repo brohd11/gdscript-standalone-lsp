@@ -30,6 +30,30 @@ and Windows x64 (`windows-x64`). macOS and Linux downloads are `.tar.gz` archive
 Windows downloads are `.zip` archives. Each release includes `SHA256SUMS` for
 verifying the downloads.
 
+Install the latest release into `~/.local/bin` on macOS or Linux with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brohd11/gdscript-standalone-lsp/main/install.sh | sh
+```
+
+On Windows, run this in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/brohd11/gdscript-standalone-lsp/main/install.ps1 | iex
+```
+
+The installers verify the release checksum and place the required API metadata
+and documentation under `~/.local/share`. Set `VERSION=v0.1.0` in the Unix environment or
+`$env:VERSION = 'v0.1.0'` in PowerShell to install a specific release. `BIN_DIR`
+overrides the executable directory; its parent is treated as the install prefix.
+If `~/.local/bin` is not already on `PATH`, an interactive installer offers to
+add it. Pass `--modify-path` or `--no-modify-path` to `install.sh`; because `iex`
+cannot receive arguments, PowerShell flags use the script-block form:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/brohd11/gdscript-standalone-lsp/main/install.ps1))) -ModifyPath
+```
+
 Extract the entire archive and point your editor at `bin/gdscript-lsp` (or
 `bin/gdscript-lsp.exe` on Windows) inside the extracted directory. Keep `share/`
 beside `bin/`: it contains the bundled Godot API metadata and documentation.
