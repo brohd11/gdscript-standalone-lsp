@@ -22,6 +22,36 @@ CMake select the installed Visual Studio generator). Running `cmake --install bu
 produces a self-contained layout with the executable and bundled Godot API
 metadata. Semantic GDScript addon tests remain a manual editor-console check.
 
+### Prebuilt releases
+
+GitHub Releases provides standalone server packages for macOS 14 or newer on
+Apple Silicon (`macos-arm64`), Linux x64 (`linux-x64`, built on Ubuntu 22.04),
+and Windows x64 (`windows-x64`). macOS and Linux downloads are `.tar.gz` archives;
+Windows downloads are `.zip` archives. Each release includes `SHA256SUMS` for
+verifying the downloads.
+
+Extract the entire archive and point your editor at `bin/gdscript-lsp` (or
+`bin/gdscript-lsp.exe` on Windows) inside the extracted directory. Keep `share/`
+beside `bin/`: it contains the bundled Godot API metadata and documentation.
+You can also add the extracted `bin/` directory to `PATH`. Packages contain the
+standalone server; the GDExtension addon is built separately as described below.
+macOS packages are unsigned and are not notarized.
+
+To publish a release, push a version tag on a commit containing the release
+workflow, for example:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Every `v*` tag push builds and tests all three platforms, tests the extracted
+packages, and then publishes a GitHub release with generated notes, the three
+archives, and checksums. Tags containing a hyphen, such as `v0.2.0-rc.1`, publish
+as prereleases. Rerunning a failed workflow can resume an incomplete draft;
+an already published release is left unchanged. The workflow uses the built-in
+`GITHUB_TOKEN` and requires no additional release secrets.
+
 The server communicates over standard input/output using LSP 3.17. An editor should launch it without project arguments; the server selects and indexes the Godot project from `workspaceFolders` or `rootUri` during the standard `initialize` request. `--project /path/to/project` remains available for fixed-root integrations. One server process serves one Godot project.
 
 ### VS Code Godot Tools TCP adapter

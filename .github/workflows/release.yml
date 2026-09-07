@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: macos-arm64
+            arch: arm64
+          - runner: ubuntu-22.04
+            target: linux-x64
+            arch: x86_64
+          - runner: windows-2022
+            target: windows-x64
+            arch: AMD64
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE_NAME: gdscript-lsp-${{ github.ref_name }}-${{ matrix.target }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Select macOS toolchain
+        if: runner.os == 'macOS'
+        run: |
+          # Xcode 26 provides non-experimental C++20 std::jthread support.
+          test -d /Applications/Xcode_26.3.app/Contents/Developer
+          echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          python -c 'import os, platform; assert platform.machine() == os.environ["EXPECTED_ARCH"], platform.machine()'
+          options=()
+          case "$RUNNER_OS" in
+            macOS) options+=(-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0) ;;
+            Windows) options+=(-A x64) ;;
+          esac
+          cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON "${options[@]}"
+
+      - name: Build
+        run: cmake --build build-cmake --config Release --parallel 3
+
+      - name: Test
+        run: ctest --test-dir build-cmake -C Release --output-on-failure --timeout 300
+
+      - name: Install
+        run: cmake --install build-cmake --config Release --prefix "dist/$PACKAGE_NAME"
+
+      - name: Package and test extracted executable
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+
+          name = os.environ["PACKAGE_NAME"]
+          windows = os.environ["RUNNER_OS"] == "Windows"
+          archive_format = "zip" if windows else "gztar"
+          archive = shutil.make_archive(
+              str(pathlib.Path("artifacts", name).resolve()),
+              archive_format, root_dir="dist", base_dir=name,
+          )
+          with tempfile.TemporaryDirectory(prefix="gdscript-lsp-release-") as temporary:
+              shutil.unpack_archive(archive, temporary)
+              package = pathlib.Path(temporary, name)
+              executable = package / "bin" / ("gdscript-lsp.exe" if windows else "gdscript-lsp")
+              required = [
+                  executable,
+                  package / "share/gdscript-lsp/godot-4.6-extension-api.json",
+                  package / "share/doc/gdscript-lsp/README.md",
+                  package / "share/doc/gdscript-lsp/THIRD_PARTY_NOTICES.md",
+              ]
+              for path in required:
+                  if not path.is_file() or path.stat().st_size == 0:
+                      raise RuntimeError(f"Missing or empty package file: {path}")
+              if not windows and not os.access(executable, os.X_OK):
+                  raise RuntimeError(f"Archive lost executable permissions: {executable}")
+              environment = os.environ.copy()
+              environment.pop("GDSCRIPT_LSP_API", None)
+              subprocess.run(
+                  [sys.executable, "tests/lsp_smoke.py", str(executable)],
+                  env=environment, check=True, timeout=300,
+              )
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Verify assets and publish
+        working-directory: artifacts
+        shell: bash
+        run: |
+          archives=(
+            "gdscript-lsp-$RELEASE_TAG-macos-arm64.tar.gz"
+            "gdscript-lsp-$RELEASE_TAG-linux-x64.tar.gz"
+            "gdscript-lsp-$RELEASE_TAG-windows-x64.zip"
+          )
+          for archive in "${archives[@]}"; do
+            test -s "$archive"
+          done
+          sha256sum -- "${archives[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+          # Listing releases distinguishes an absent release from an API failure,
+          # and includes drafts when authenticated with contents: write.
+          draft=$(gh api --paginate "repos/$GH_REPO/releases" |
+            jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag) | .draft')
+          if [[ "$draft" == false ]]; then
+            echo "Release $RELEASE_TAG is already published; leaving it unchanged."
+            exit 0
+          fi
+
+          prerelease=false
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease=true
+          fi
+          if [[ -z "$draft" ]]; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "$RELEASE_TAG" --generate-notes --prerelease="$prerelease"
+          elif [[ "$draft" != true ]]; then
+            echo "Unexpected release state: $draft" >&2
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${archives[@]}" SHA256SUMS --clobber
+          # Confirm all four uploads exist before making the draft public.
+          gh release view "$RELEASE_TAG" --json assets |
+            jq -e --arg mac "${archives[0]}" --arg linux "${archives[1]}" \
+              --arg windows "${archives[2]}" \
+              '([.assets[] | select(.size > 0) | .name] | sort) == ([$mac, $linux, $windows, "SHA256SUMS"] | sort)'
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"
