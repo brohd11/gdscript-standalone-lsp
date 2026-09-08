@@ -1345,6 +1345,9 @@ ResolvedType Workspace::member_value_type(const ResolvedType &receiver, std::str
 				(native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
 			if (!native.empty()) {
 				if (auto *member = native_api_.find_member(native, member_name)) {
+					if (!receiver.instance && !is_type_level_member(*member)) {
+						return ResolvedType::unknown(std::string(member_name));
+					}
 					if (member->kind == SymbolKind::Event) {
 						ResolvedType result{TypeKind::Signal, "Signal", "native:" + member->owner + "::" + member->name};
 						result.declaration_id = result.symbol_id;
@@ -2002,7 +2005,8 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 				auto base = receiver.instance ? native_base(*record) :
 					(native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
 				if (!base.empty()) {
-					for (auto *member : native_api_.members(base, MemberAccess::Instance)) {
+					for (auto *member : native_api_.members(base,
+							receiver.instance ? MemberAccess::Instance : MemberAccess::Type)) {
 						if (names.insert(member->name).second) {
 							result.push_back(completion_item(*member));
 						}

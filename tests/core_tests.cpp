@@ -267,7 +267,12 @@ int main() {
 		has_item(class_completion, "CHILD_CONSTANT") && has_item(class_completion, "child_static") &&
 		has_item(class_completion, "BASE_CONSTANT") && has_item(class_completion, "base_static") &&
 		!has_item(class_completion, "own") && !has_item(class_completion, "make_base") &&
-		!has_item(class_completion, "count") && !has_item(class_completion, "label"),
+		!has_item(class_completion, "count") && !has_item(class_completion, "label") &&
+		!has_item(class_completion, "get_class") && !has_item(class_completion, "get_rid") &&
+		!has_item(class_completion, "can_instantiate") &&
+		static_cast<size_t>(std::count_if(class_completion.begin(), class_completion.end(), [](const CompletionItem &item) {
+			return item.filter_text == "new";
+		})) == 1,
 		"script class receiver offers new first and omits instance members");
 	expect(item_index(class_completion, "new") < item_index(class_completion, "CHILD_CONSTANT") &&
 		item_index(class_completion, "CHILD_CONSTANT") < item_index(class_completion, "child_static") &&
@@ -280,7 +285,9 @@ int main() {
 		"const ChildAlias = preload(\"res://child.gd\")\n\n"
 		"func inspect_type() -> void:\n"
 		"\tChildAlias.ch\n"
-		"\tRefCounted.re\n";
+		"\tRefCounted.re\n"
+		"\tAliasNamespace.LocalAlias.in\n"
+		"\tpreload(\"res://child.gd\").ch\n";
 	expect(workspace.update_document(consumer_uri, alias_completion_source, 1, &error),
 		"class-reference completion overlay accepted");
 	auto alias_position = byte_to_position(alias_completion_source,
@@ -291,7 +298,8 @@ int main() {
 		alias_constructor->label == "new()" && alias_constructor->insert_text == "new()" &&
 		has_item(alias_class_completion, "child_static") && has_item(alias_class_completion, "base_static") &&
 		!has_item(alias_class_completion, "own") && !has_item(alias_class_completion, "make_base") &&
-		!has_item(alias_class_completion, "label"),
+		!has_item(alias_class_completion, "label") && !has_item(alias_class_completion, "get_class") &&
+		!has_item(alias_class_completion, "get_rid") && !has_item(alias_class_completion, "can_instantiate"),
 		"preloaded script completion starts with new and contains only type-level members");
 	auto native_position = byte_to_position(alias_completion_source,
 		alias_completion_source.find("RefCounted.re") + std::string_view("RefCounted.re").size());
@@ -299,6 +307,22 @@ int main() {
 	expect(!native_type_completion.empty() && native_type_completion.front().filter_text == "new" &&
 		has_item(native_type_completion, "ref_static") && !has_item(native_type_completion, "reference_method"),
 		"native class completion starts with new and excludes instance methods");
+	auto qualified_position = byte_to_position(alias_completion_source,
+		alias_completion_source.find("AliasNamespace.LocalAlias.in") +
+		std::string_view("AliasNamespace.LocalAlias.in").size());
+	auto qualified_class_completion = workspace.completion(consumer_uri, qualified_position);
+	expect(has_item(qualified_class_completion, "Imported") && has_item(qualified_class_completion, "ExitCode") &&
+		!has_item(qualified_class_completion, "inherited_alias_member") &&
+		!has_item(qualified_class_completion, "get_rid"),
+		"qualified preloaded classes expose only type-level script members");
+	auto direct_preload_position = byte_to_position(alias_completion_source,
+		alias_completion_source.find("preload(\"res://child.gd\").ch") +
+		std::string_view("preload(\"res://child.gd\").ch").size());
+	auto direct_preload_completion = workspace.completion(consumer_uri, direct_preload_position);
+	expect(has_item(direct_preload_completion, "child_static") &&
+		!has_item(direct_preload_completion, "make_base") &&
+		!has_item(direct_preload_completion, "can_instantiate"),
+		"direct preload class completion excludes script and script-resource instance methods");
 	auto alias_type = workspace.resolve_type(consumer_uri, alias_position, "ChildAlias");
 	auto alias_instance = workspace.resolve_type(consumer_uri, alias_position, "ChildAlias.new()");
 	expect(alias_type.kind == TypeKind::ScriptClass && !alias_type.instance &&
@@ -313,6 +337,9 @@ int main() {
 		"\tvar invalid_property = ChildAlias.own\n"
 		"\tChildThing.make_base()\n"
 		"\tChildAlias.label()\n"
+		"\tChildAlias.get_class()\n"
+		"\tChildAlias.get_rid()\n"
+		"\tChildAlias.can_instantiate()\n"
 		"\tRefCounted.reference_method()\n"
 		"\tChildAlias.missing()\n"
 		"\tChildAlias.child_static()\n"
@@ -321,9 +348,9 @@ int main() {
 	expect(workspace.update_document(consumer_uri, class_access_source, 2, &error),
 		"class-reference diagnostic overlay accepted");
 	auto class_access_diagnostics = workspace.diagnostics(consumer_uri);
-	expect(diagnostic_count(class_access_diagnostics, "instance-member-access") == 5 &&
+	expect(diagnostic_count(class_access_diagnostics, "instance-member-access") == 8 &&
 		diagnostic_count(class_access_diagnostics, "unknown-member") == 1 &&
-		class_access_diagnostics.size() == 6,
+		class_access_diagnostics.size() == 9,
 		"script aliases, named classes, and native classes reject instance member access without cascades");
 	expect(std::any_of(class_access_diagnostics.begin(), class_access_diagnostics.end(), [](const Diagnostic &item) {
 		return item.message ==
@@ -331,7 +358,13 @@ int main() {
 	}) && std::any_of(class_access_diagnostics.begin(), class_access_diagnostics.end(), [](const Diagnostic &item) {
 		return item.message ==
 			"Cannot access instance property \"own\" on class \"ChildThing\"; create an instance first.";
-	}), "class-reference diagnostics distinguish methods from properties");
+	}) && std::any_of(class_access_diagnostics.begin(), class_access_diagnostics.end(), [](const Diagnostic &item) {
+		return item.message ==
+			"Cannot access instance method \"get_rid\" on class \"ChildThing\"; create an instance first.";
+	}), "class-reference diagnostics distinguish methods from properties and filter script-resource methods");
+	auto invalid_metatype_method = workspace.resolve_type(consumer_uri, {8, 2}, "ChildAlias.get_rid");
+	expect(!invalid_metatype_method.known(),
+		"script-resource instance methods do not produce callable types through class references");
 	expect(workspace.close_document(consumer_uri, &error), "class-reference overlay closes");
 
 	auto child_uri = workspace.uri_for_path(fixture / "child.gd");

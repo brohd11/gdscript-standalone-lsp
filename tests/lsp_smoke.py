@@ -1071,6 +1071,7 @@ provider_source = (
     "\ttarget.call(\"\")\n"
     "\tprint(target.)\n"
     "\tProduct.\n"
+    "\tCompletionProviderBase.\n"
     "\tif true:\n"
 )
 
@@ -1109,6 +1110,7 @@ provider_needles = {
     154: "print(target.",
     155: "if true:",
     158: "Product.",
+    160: "CompletionProviderBase.",
 }
 for request_id, needle in provider_needles.items():
     server.stdin.write(
@@ -1142,6 +1144,7 @@ constructor_items = items_by_filter(provider_responses[152])
 string_items = items_by_filter(provider_responses[153])
 private_items = items_by_filter(provider_responses[154])
 class_items = provider_responses[158]["items"]
+global_class_items = provider_responses[160]["items"]
 assert enum_items["State.IDLE"]["data"]["gdscriptLsp"]["provider"] == "enums"
 assert type_items["Product"]["data"]["gdscriptLsp"]["provider"] == "extendedTypeHints"
 assert constructor_items["Product.new"]["data"]["gdscriptLsp"]["provider"] == "constructors"
@@ -1152,6 +1155,14 @@ assert "title" in private_items and "_private" not in private_items
 assert class_items[0]["filterText"] == "new"
 assert class_items[0]["insertText"] == "new("
 assert class_items[0]["data"]["gdscriptLsp"]["provider"] == "constructors"
+assert sum(item["filterText"] == "new" for item in class_items) == 1
+assert not {"get_class", "get_rid", "can_instantiate"} & {
+    item["filterText"] for item in class_items
+}
+assert "inherited_static" in {item["filterText"] for item in global_class_items}
+assert not {"inherited_method", "get_class", "get_rid", "can_instantiate"} & {
+    item["filterText"] for item in global_class_items
+}
 assert provider_responses[155]["items"] == []
 
 class_access_source = (
@@ -1160,6 +1171,7 @@ class_access_source = (
     "\tfunc build() -> void: pass\n\n"
     "func inspect() -> void:\n"
     "\tProduct.build()\n"
+    "\tCompletionProviderBase.get_rid()\n"
 )
 server.stdin.write(
     packet(
@@ -1185,7 +1197,10 @@ server.stdin.write(
 )
 server.stdin.flush()
 class_access_diagnostics = read_response(server.stdout, 159)["result"]["items"]
-assert [item["code"] for item in class_access_diagnostics] == ["instance-member-access"]
+assert [item["code"] for item in class_access_diagnostics] == [
+    "instance-member-access",
+    "instance-member-access",
+]
 
 override_source = "extends CompletionProviderBase\n\nfunc \n"
 server.stdin.write(

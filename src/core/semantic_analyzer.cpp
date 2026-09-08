@@ -384,7 +384,13 @@ private:
 				}
 				auto native = receiver.type.instance ? workspace.native_base(*record) :
 					(workspace.native_api_.has_class("GDScript") ? std::string("GDScript") : std::string("Script"));
-				if (!native.empty()) if (auto *member = workspace.native_api_.find_member(native, name)) return native_member_value(*member);
+				if (!native.empty()) if (auto *member = workspace.native_api_.find_member(native, name)) {
+					if (!receiver.type.instance && !is_type_level_member(*member)) {
+						add_instance_member_access(name, receiver.type, range, member->signature.has_value());
+						return {};
+					}
+					return native_member_value(*member);
+				}
 			}
 		} else if (receiver.type.kind == TypeKind::NativeClass || receiver.type.kind == TypeKind::Builtin ||
 			receiver.type.kind == TypeKind::Callable || receiver.type.kind == TypeKind::Signal) {

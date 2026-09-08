@@ -75,6 +75,21 @@
       ]
     },
     {
+      "name": "Resource",
+      "inherits": "RefCounted",
+      "methods": [{"name": "get_rid", "return_value": {"type": "RID"}}]
+    },
+    {
+      "name": "Script",
+      "inherits": "Resource",
+      "methods": [{"name": "can_instantiate", "return_value": {"type": "bool"}}]
+    },
+    {
+      "name": "GDScript",
+      "inherits": "Script",
+      "methods": [{"name": "new", "is_vararg": true, "return_value": {"type": "Object"}}]
+    },
+    {
       "name": "Engine",
       "inherits": "Object",
       "methods": [{"name": "get_version_info", "return_value": {"type": "Dictionary"}}],
