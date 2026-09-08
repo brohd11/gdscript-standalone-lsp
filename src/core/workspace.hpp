@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/document.hpp"
+#include "core/annotations.hpp"
 #include "core/native_api.hpp"
 #include "core/warnings.hpp"
 
@@ -18,6 +19,7 @@ namespace gdscript_lsp {
 
 class SemanticAnalyzer;
 class SemanticAnalyzerImpl;
+class AnnotationAnalyzerImpl;
 struct CaretContext;
 
 struct HoverResult {
@@ -77,8 +79,10 @@ public:
 private:
 	friend class SemanticAnalyzer;
 	friend class SemanticAnalyzerImpl;
+	friend class AnnotationAnalyzerImpl;
 	std::filesystem::path root_;
 	NativeApi native_api_;
+	AnnotationRegistry annotation_registry_;
 	IndexStats stats_;
 	mutable std::shared_mutex mutex_;
 	std::unordered_map<std::string, std::shared_ptr<Document>> documents_;

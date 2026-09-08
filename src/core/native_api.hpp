@@ -3,6 +3,7 @@
 #include "core/types.hpp"
 
 #include <filesystem>
+#include <compare>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -11,6 +12,15 @@
 #include <vector>
 
 namespace gdscript_lsp {
+
+struct GodotVersion {
+	uint32_t major = 0;
+	uint32_t minor = 0;
+	uint32_t patch = 0;
+	auto operator<=>(const GodotVersion &) const = default;
+	bool known() const { return major != 0; }
+	std::string string() const;
+};
 
 enum class MemberAccess : uint8_t {
 	Instance,
@@ -89,8 +99,10 @@ public:
 	bool enum_has_value(std::string_view class_name, std::string_view enum_name, std::string_view value) const;
 	std::vector<std::string> enum_values(std::string_view class_name, std::string_view enum_name) const;
 	std::vector<std::string> global_enum_values(std::string_view enum_name) const;
+	std::optional<int64_t> global_enum_value(std::string_view value) const;
 	const std::unordered_map<std::string, NativeClass> &classes() const { return classes_; }
 	std::string version() const { return version_; }
+	GodotVersion version_info() const { return version_info_; }
 
 private:
 	std::unordered_map<std::string, NativeClass> classes_;
@@ -99,7 +111,9 @@ private:
 	std::unordered_set<std::string> global_symbols_;
 	std::unordered_map<std::string, std::unordered_set<std::string>> global_enums_;
 	std::unordered_map<std::string, std::string> global_enum_values_;
+	std::unordered_map<std::string, int64_t> global_enum_numeric_values_;
 	std::string version_;
+	GodotVersion version_info_;
 };
 
 } // namespace gdscript_lsp

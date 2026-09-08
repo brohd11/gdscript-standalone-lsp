@@ -473,49 +473,49 @@
       "name": "unknown-annotation",
       "source": "extends Node\n@not_a_real_annotation\nfunc f() -> void:\n\tpass\n",
       "godot": "Unrecognized annotation: \"@not_a_real_annotation\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "annotation-bad-target",
       "source": "extends Node\n@onready\nfunc f() -> void:\n\tpass\n",
       "godot": "Annotation \"@onready\" cannot be applied to a function.",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "annotation-too-many-args",
       "source": "extends Node\n@icon(\"a\", \"b\")\n",
       "godot": "Annotation \"@icon\" must be at the top of the script, before \"extends\" and \"class_name\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "annotation-standalone-dangling",
       "source": "extends Node\nfunc f() -> void:\n\tpass\n@tool\n",
       "godot": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "tool-not-top",
       "source": "extends Node\n@tool\n",
       "godot": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "export-untyped",
       "source": "extends Node\n@export var x\n",
       "godot": "Cannot use simple \"@export\" annotation with variable without type or initializer, since type can't be inferred.",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "warning-ignore-bad-name",
       "source": "extends Node\n@warning_ignore(\"not_a_warning\")\nfunc f() -> void:\n\tpass\n",
       "godot": "Invalid warning name: \"not_a_warning\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "onready-non-node",
       "source": "extends RefCounted\n@onready var x = 1\n",
       "godot": "\"@onready\" can only be used in classes that inherit \"Node\".",
-      "expect": "gap"
+      "expect": "error"
     },
     {
       "name": "invalid-character",

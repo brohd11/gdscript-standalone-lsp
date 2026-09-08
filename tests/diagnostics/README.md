@@ -8,8 +8,8 @@ conformance data.
 - `updates.py` checks push/pull consistency, overlays, and live settings changes.
 - `parse_errors.json` and `parse_errors.py` keep the 99-source Godot 4.6.3 audit
   executable. `error` entries must produce an LSP error, `ok` entries must stay
-  silent, and `gap` entries deliberately fail if they stop being silent before
-  the matrix is updated.
+  silent, and any future `gap` entries deliberately fail if they stop being
+  silent before the matrix is updated.
 - `oracle.json` and `oracle.py` compare stable fixture and warning cases with a
   real Godot executable.
 - `fixtures/errors/` and `fixtures/warnings/` contain the projects used by the
@@ -20,7 +20,7 @@ conformance data.
 Run `make test-diagnostics` without Godot. Run
 `make test-conformance GODOT=/path/to/Godot` for the engine-backed checks.
 
-The known parse-error gaps are annotation semantics: annotation recognition,
-target and placement validation, argument validation, export inference,
-`@onready` inheritance, and warning-name validation. They remain explicit in
-`parse_errors.json` until an annotation specification table is implemented.
+The annotation specification table covers the complete Godot 4.6.3 registry,
+generic placement/argument validation, and annotation-specific export,
+`@onready`, warning-region, and RPC rules. The parse-error audit currently has
+no known gaps.

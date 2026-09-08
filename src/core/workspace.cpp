@@ -358,6 +358,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 			return false;
 		}
 	}
+	annotation_registry_ = build_annotation_registry(native_api_.version_info());
 	read_project_settings();
 	scan_uid_files();
 
@@ -2977,6 +2978,8 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 	for (const auto &issue : document->syntax_errors()) add("syntax-error", issue.message, issue.range);
 	for (const auto &issue : structural_issues(*document)) add("syntax-error", issue.message, issue.range);
 	for (const auto &issue : lexical_issues(*document)) add("syntax-error", issue.message, issue.range);
+	auto annotations = AnnotationAnalyzer::run(*this, *document, annotation_registry_);
+	for (const auto &issue : annotations.issues) add("syntax-error", issue.message, issue.range);
 	for (const auto &record : document->classes()) {
 		if (!record.global_name.empty() && global_name_counts_.contains(record.global_name) &&
 				global_name_counts_.at(record.global_name) > 1) {
@@ -3010,7 +3013,7 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 			for (const auto &local : member.children) if (!local.malformed) inspect_symbol(local);
 		}
 	}
-	auto semantic = SemanticAnalyzer::run(*this, *document);
+	auto semantic = SemanticAnalyzer::run(*this, *document, annotations.suppressions);
 	result.insert(result.end(), std::make_move_iterator(semantic.begin()), std::make_move_iterator(semantic.end()));
 	std::sort(result.begin(), result.end(), [](const Diagnostic &a, const Diagnostic &b) {
 		if (a.range.start != b.range.start) return a.range.start < b.range.start;

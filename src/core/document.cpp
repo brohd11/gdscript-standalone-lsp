@@ -697,6 +697,20 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 		auto function_text = trim(node_text(node, source));
 		auto annotation = first_descendant(node, "annotation");
 		bool is_abstract = !ts_node_is_null(annotation) && trim(node_text(annotation, source)).starts_with("@abstract");
+		if (!is_abstract) {
+			size_t cursor = ts_node_start_byte(node);
+			while (cursor > 0) {
+				auto end = cursor;
+				while (end > 0 && (source[end - 1] == '\n' || source[end - 1] == '\r')) --end;
+				auto begin = source.rfind('\n', end ? end - 1 : 0);
+				begin = begin == std::string_view::npos ? 0 : begin + 1;
+				auto line = trim(source.substr(begin, end - begin));
+				if (line.starts_with("@abstract")) { is_abstract = true; break; }
+				if (!line.empty() && !line.starts_with('@') && !line.starts_with('#')) break;
+				if (begin == 0) break;
+				cursor = begin - 1;
+			}
+		}
 		if (ts_node_is_null(body)) {
 			if (!function_text.ends_with(":") && !is_abstract) {
 				add_parse_issue(errors, node_range(node, source),

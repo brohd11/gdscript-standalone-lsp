@@ -1064,6 +1064,21 @@
       "expected": [
         {
           "code": "syntax-error",
+          "message": "Invalid warning name: \"syntax_error\".",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 4
+            },
+            "end": {
+              "line": 2,
+              "character": 35
+            }
+          }
+        },
+        {
+          "code": "syntax-error",
           "severity": 1,
           "range": {
             "start": {
@@ -2137,6 +2152,158 @@
       "expected": [],
       "warnings": false,
       "godot_pattern": null
+    },
+    {
+      "name": "annotation_unknown",
+      "source": "extends Node\n@not_a_real_annotation\nfunc test() -> void:\n    pass\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Unrecognized annotation: \"@not_a_real_annotation\".",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 22}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Unrecognized annotation",
+      "overlay": true
+    },
+    {
+      "name": "annotation_4_6_baseline_valid",
+      "source": "@tool\n@icon(\"res://icon.svg\")\n@static_unload\n@abstract\nextends Node\n\n@export_category(\"Basics\")\n@export var plain: int = 1\n@export_enum(\"One\", \"Two:2\") var choice: int\n@export_file var file: String\n@export_file_path(\"*.txt\") var file_path: String\n@export_dir var directory: String\n@export_global_file var global_file: String\n@export_global_dir var global_dir: String\n@export_multiline var text: String\n@export_placeholder(\"Name\") var placeholder: String\n@export_range(0, 10, 0.5, \"or_greater\") var amount: float\n@export_exp_easing var easing: float\n@export_color_no_alpha var tint: Color\n@export_node_path(\"Node\") var target_path: NodePath\n@export_flags(\"One\", \"Two:2\") var flags: int\n@export_flags_2d_render var layer_2d_render: int\n@export_flags_2d_physics var layer_2d_physics: int\n@export_flags_2d_navigation var layer_2d_navigation: int\n@export_flags_3d_render var layer_3d_render: int\n@export_flags_3d_physics var layer_3d_physics: int\n@export_flags_3d_navigation var layer_3d_navigation: int\n@export_flags_avoidance var avoidance: int\n@export_storage var stored: Variant\n@export_custom(PROPERTY_HINT_NONE, \"\") var custom: int\n@export_tool_button(\"Run\") var run_action: Callable\n@export_group(\"Advanced\", \"advanced_\")\n@export_subgroup(\"Network\")\n@onready var ready_value: int = 1\n\n@warning_ignore(\"unused_parameter\")\n@rpc(\"any_peer\", \"call_local\", \"unreliable\", 1)\nfunc remote_action(unused: int) -> void:\n    pass\n\n@warning_ignore_start(\"unused_private_class_variable\")\nvar _ignored := 1\n@warning_ignore_restore(\"unused_private_class_variable\")\n\n@abstract\nclass Inner:\n    @abstract\n    func required() -> void\n",
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "annotation_top_level_arity",
+      "source": "@icon(\"a\", \"b\")\nextends Node\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Annotation \"@icon\" requires at most 1 arguments, but 2 were given.",
+        "severity": 1,
+        "range": {"start": {"line": 0, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "requires at most 1 arguments"
+    },
+    {
+      "name": "annotation_local_level",
+      "source": "extends Node\nfunc test() -> void:\n    @onready var value = 1\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Annotation \"@onready\" is not allowed in this level.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 4}}
+      }],
+      "warnings": false,
+      "godot_pattern": "not allowed in this level"
+    },
+    {
+      "name": "annotation_nonconstant_argument",
+      "source": "extends Node\nvar label := \"Group\"\n@export_group(label)\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Argument 1 of annotation \"@export_group\" isn't a constant expression.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 14}}
+      }],
+      "warnings": false,
+      "godot_pattern": "isn't a constant expression"
+    },
+    {
+      "name": "annotation_rpc_invalid",
+      "source": "extends Node\n@rpc(\"authority\", \"any_peer\")\nfunc test() -> void:\n    pass\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Invalid RPC config. The permission (\"any_peer\"/\"authority\") must be specified no more than once.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "permission.*no more than once"
+    },
+    {
+      "name": "annotation_duplicate_export",
+      "source": "extends Node\n@export\n@export_storage\nvar value: int\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Annotation \"@export_storage\" cannot be used with another \"@export\" annotation.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "cannot be used with another"
+    },
+    {
+      "name": "annotation_export_wrong_type",
+      "source": "extends Node\n@export_color_no_alpha var value: String\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "\"@export_color_no_alpha\" annotation requires a variable of type \"Color\", \"Array[Color]\", or \"PackedColorArray\", but type \"String\" was given instead.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "requires a variable of type"
+    },
+    {
+      "name": "annotation_icon_requires_literal",
+      "source": "@icon(ICON)\nextends Node\nconst ICON := \"res://icon.svg\"\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Argument 1 of annotation \"@icon\" must be a string literal.",
+        "severity": 1,
+        "range": {"start": {"line": 0, "character": 6}}
+      }],
+      "warnings": false,
+      "godot_pattern": "must be a string literal"
+    },
+    {
+      "name": "annotation_abstract_static",
+      "source": "extends Node\n@abstract\nstatic func required() -> void:\n    pass\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "\"@abstract\" annotation cannot be applied to static functions.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "cannot be applied to static functions"
+    },
+    {
+      "name": "annotation_abstract_body",
+      "source": "@abstract\nextends Node\n@abstract\nfunc required() -> void:\n    pass\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "An abstract function cannot have a body.",
+        "severity": 1,
+        "range": {"start": {"line": 3, "character": 24}}
+      }],
+      "warnings": false,
+      "godot_pattern": "An abstract function cannot have a body"
+    },
+    {
+      "name": "annotation_export_object_invalid",
+      "source": "extends Node\n@export var value: Object\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Export type can only be built-in, a resource, a node, or an enum.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 0}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Export type can only be"
+    },
+    {
+      "name": "annotation_export_group_local_invalid",
+      "source": "extends Node\nfunc test() -> void:\n    @export_group(\"Local\")\n    pass\n",
+      "expected": [{
+        "code": "syntax-error",
+        "message": "Unexpected standalone annotation.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 4}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Unexpected standalone annotation"
     }
   ]
 }

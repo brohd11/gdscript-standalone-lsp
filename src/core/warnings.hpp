@@ -25,7 +25,8 @@ private:
 
 class WarningSuppressions {
 public:
-	explicit WarningSuppressions(const Document &document);
+	WarningSuppressions() = default;
+	void add(std::string name, Range range);
 	bool contains(std::string_view name, Position position) const;
 private:
 	struct Entry { std::string name; Range range; };

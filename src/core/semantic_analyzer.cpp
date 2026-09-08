@@ -97,7 +97,9 @@ std::optional<std::string> string_literal_value(std::string value) {
 
 class SemanticAnalyzerImpl {
 public:
-	SemanticAnalyzerImpl(const Workspace &p_workspace, const Document &p_document) : workspace(p_workspace), document(p_document), suppressions(p_document) {}
+	SemanticAnalyzerImpl(const Workspace &p_workspace, const Document &p_document,
+			const WarningSuppressions &p_suppressions) :
+			workspace(p_workspace), document(p_document), suppressions(p_suppressions) {}
 
 	std::vector<Diagnostic> run() {
 		analyze_class_container(document.syntax_root());
@@ -1172,8 +1174,9 @@ private:
 	}
 };
 
-std::vector<Diagnostic> SemanticAnalyzer::run(const Workspace &workspace, const Document &document) {
-	return SemanticAnalyzerImpl(workspace, document).run();
+std::vector<Diagnostic> SemanticAnalyzer::run(const Workspace &workspace, const Document &document,
+		const WarningSuppressions &suppressions) {
+	return SemanticAnalyzerImpl(workspace, document, suppressions).run();
 }
 
 } // namespace gdscript_lsp

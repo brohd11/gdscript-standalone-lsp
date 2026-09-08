@@ -7,6 +7,11 @@
 #include <unordered_set>
 
 namespace gdscript_lsp {
+
+std::string GodotVersion::string() const {
+	return std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
+}
+
 namespace {
 
 using json = nlohmann::json;
@@ -102,7 +107,9 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 	global_symbols_.clear();
 	global_enums_.clear();
 	global_enum_values_.clear();
+	global_enum_numeric_values_.clear();
 	version_.clear();
+	version_info_ = {};
 	std::ifstream stream(path);
 	if (!stream) {
 		if (error) *error = "cannot open " + path.string();
@@ -114,9 +121,9 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 		return false;
 	}
 	if (auto header = data.find("header"); header != data.end() && header->is_object()) {
-		version_ = std::to_string(header->value("version_major", 0)) + "." +
-			std::to_string(header->value("version_minor", 0)) + "." +
-			std::to_string(header->value("version_patch", 0));
+		version_info_ = {header->value("version_major", 0u), header->value("version_minor", 0u),
+			header->value("version_patch", 0u)};
+		version_ = version_info_.string();
 	}
 	const bool arity_known = data.value("gdscript_lsp_schema", 0) >= 2 || data.contains("utility_functions");
 	auto load_classes = [&](const char *key, bool builtin) {
@@ -169,15 +176,27 @@ bool NativeApi::load(const std::filesystem::path &path, std::string *error) {
 			auto value_name = value.value("name", "");
 			if (!value_name.empty()) {
 				global_symbols_.insert(value_name);
+				bool unique_name = true;
 				if (!name.empty()) {
 					global_enums_[name].insert(value_name);
 					auto [found, inserted] = global_enum_values_.emplace(value_name, name);
-					if (!inserted && found->second != name) found->second.clear();
+					if (!inserted && found->second != name) {
+						found->second.clear();
+						unique_name = false;
+					}
 				}
+				if (unique_name && value.contains("value") && value["value"].is_number_integer()) {
+					global_enum_numeric_values_[value_name] = value["value"].get<int64_t>();
+				} else if (!unique_name) global_enum_numeric_values_.erase(value_name);
 			}
 		}
 	}
 	return true;
+}
+
+std::optional<int64_t> NativeApi::global_enum_value(std::string_view value) const {
+	auto found = global_enum_numeric_values_.find(std::string(value));
+	return found == global_enum_numeric_values_.end() ? std::nullopt : std::optional<int64_t>(found->second);
 }
 
 bool NativeApi::has_class(std::string_view name) const {

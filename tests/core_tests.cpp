@@ -92,6 +92,57 @@ int main() {
 	expect(workspace.open(fixture, fixture / "extension_api.json", &error), "workspace opens: " + error);
 	expect(workspace.stats().document_count == 12, "all fixture scripts indexed");
 	expect(workspace.native_api().version() == "4.6.3", "native API version loaded");
+	expect(workspace.native_api().version_info() == GodotVersion{4, 6, 3}, "structured native API version loaded");
+	{
+		auto annotations = build_annotation_registry({4, 6, 3});
+		expect(annotations.size() == 36, "Godot 4.6.3 annotation registry is complete");
+		for (auto name : {"tool", "icon", "static_unload", "abstract", "onready", "export",
+				"export_enum", "export_file", "export_file_path", "export_dir", "export_global_file",
+				"export_global_dir", "export_multiline", "export_placeholder", "export_range",
+				"export_exp_easing", "export_color_no_alpha", "export_node_path", "export_flags",
+				"export_flags_2d_render", "export_flags_2d_physics", "export_flags_2d_navigation",
+				"export_flags_3d_render", "export_flags_3d_physics", "export_flags_3d_navigation",
+				"export_flags_avoidance", "export_storage", "export_custom", "export_tool_button",
+				"export_category", "export_group", "export_subgroup", "warning_ignore",
+				"warning_ignore_start", "warning_ignore_restore", "rpc"}) {
+			expect(annotations.find(name) != nullptr, std::string("annotation registered: ") + name);
+		}
+		expect(annotations.strict_unknown_names(), "Godot 4.6 annotation names are checked strictly");
+		expect(!build_annotation_registry({4, 7, 0}).strict_unknown_names(),
+			"future annotation names use conservative validation");
+		expect(build_annotation_registry({}).target_version() == GodotVersion{4, 6, 3},
+			"missing API version defaults to the 4.6.3 annotation baseline");
+		NativeApi complete_api;
+		expect(complete_api.load("addons/gdscript_lsp/data/godot-4.6-extension-api.json", &error),
+			"complete native API loads for annotation constants: " + error);
+		expect(complete_api.global_enum_value("PROPERTY_HINT_RANGE") == 1,
+			"native enum numeric values are retained for annotation constants");
+	}
+	{
+		auto future_fixture = std::filesystem::temp_directory_path() /
+			("gdscript-lsp-future-annotations-" + std::to_string(
+				std::chrono::steady_clock::now().time_since_epoch().count()));
+		std::filesystem::create_directories(future_fixture);
+		{
+			std::ofstream stream(future_fixture / "project.godot");
+			stream << "[application]\nconfig/name=\"Future annotations\"\n";
+		}
+		{
+			std::ofstream stream(future_fixture / "extension_api.json");
+			stream << R"({"header":{"version_major":4,"version_minor":7,"version_patch":0}})";
+		}
+		{
+			std::ofstream stream(future_fixture / "future.gd");
+			stream << "@annotation_added_after_4_6\nfunc test() -> void:\n\tpass\n";
+		}
+		Workspace future_workspace;
+		expect(future_workspace.open(future_fixture, future_fixture / "extension_api.json", &error),
+			"future annotation workspace opens: " + error);
+		auto future_uri = future_workspace.uri_for_path(future_fixture / "future.gd");
+		expect(future_workspace.diagnostics(future_uri).empty(),
+			"future targets accept unknown annotations while still validating known definitions");
+		std::filesystem::remove_all(future_fixture);
+	}
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
 	{
