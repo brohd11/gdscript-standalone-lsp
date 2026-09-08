@@ -213,7 +213,8 @@ private:
 		return result;
 	}
 
-	Value resolve_name(std::string_view name, Position position, bool call_target, Range range, bool read = true) {
+	Value resolve_name(std::string_view name, Position position, bool call_target, Range range,
+			bool read = true, bool allow_pseudo_type = false) {
 		for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
 			if (auto found = scope->find(std::string(name)); found != scope->end()) {
 				if (found->second.binding && read) found->second.binding->read = true;
@@ -300,6 +301,19 @@ private:
 		}
 		auto type = workspace.type_from_name(std::string(name), current_class);
 		if (type.known()) {
+			// Godot only permits builtin and pseudo-types as the base of a call or
+			// member/subscript access. Native and script classes are ordinary
+			// metatype values, so expressions such as `Object` remain valid.
+			if (!allow_pseudo_type) {
+				if (name == "Variant") {
+					add("undefined-identifier", "Identifier \"Variant\" is not declared in the current scope.", range);
+					return {};
+				}
+				if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
+					add("invalid-type", "Builtin type cannot be used as a name on its own.", range);
+					return {};
+				}
+			}
 			type.instance = false;
 			Value result{type, {}, true, false};
 			if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
@@ -707,11 +721,12 @@ private:
 			auto right_value = right ? evaluate_with_attribute_suffix(*right, std::move(suffix)) : Value{};
 			return binary_result(node, std::move(left_value), std::move(right_value));
 		}
-		return apply_attribute_nodes(evaluate(node), suffix);
+		return apply_attribute_nodes(evaluate(node, false, !suffix.empty()), suffix);
 	}
 
-	Value evaluate(const SyntaxNode &node, bool call_target = false) {
-		if (node.kind == "identifier" || node.kind == "name") return resolve_name(text(document, node), node.range.start, call_target, node.range);
+	Value evaluate(const SyntaxNode &node, bool call_target = false, bool allow_pseudo_type = false) {
+		if (node.kind == "identifier" || node.kind == "name") return resolve_name(text(document, node), node.range.start,
+			call_target, node.range, true, allow_pseudo_type);
 		if (node.kind == "integer") return {{TypeKind::Builtin, "int"}, {}, true, false};
 		if (node.kind == "float") return {{TypeKind::Builtin, "float"}, {}, true, false};
 		if (node.kind == "string") return {{TypeKind::Builtin, "String"}, {}, true, false};
@@ -734,7 +749,8 @@ private:
 			for (const auto &child : node.children) require_value(evaluate(child), child.range);
 			return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		}
-		if (node.kind == "parenthesized_expression") return node.children.empty() ? Value{} : evaluate(node.children.front());
+		if (node.kind == "parenthesized_expression") return node.children.empty() ? Value{} :
+			evaluate(node.children.front(), call_target, allow_pseudo_type);
 		if (node.kind == "await_expression") return node.children.empty() ? Value{} : require_value(evaluate(node.children.front()), node.children.front().range);
 		if (node.kind == "unary_operator") {
 			if (node.children.empty()) return {};
@@ -775,7 +791,7 @@ private:
 			return value;
 		}
 		if (node.kind == "subscript") {
-			auto base = node.children.empty() ? Value{} : evaluate(node.children.front());
+			auto base = node.children.empty() ? Value{} : evaluate(node.children.front(), false, true);
 			if (auto *arguments = field(node, "arguments")) for (const auto &child : arguments->children) require_value(evaluate(child), child.range);
 			if (base.type.kind == TypeKind::Builtin && base.type.name == "Array" && !base.type.arguments.empty()) {
 				return {base.type.arguments.front(), {}, true, false};
@@ -787,7 +803,7 @@ private:
 			const SyntaxNode *callee_node = nullptr;
 			for (const auto &child : node.children) if (child.field != "arguments") { callee_node = &child; break; }
 			if (callee_node && callee_node->kind == "identifier" && text(document, *callee_node) == "yield") return {};
-			auto callee = callee_node ? evaluate(*callee_node, callee_node->kind == "identifier") : Value{};
+			auto callee = callee_node ? evaluate(*callee_node, callee_node->kind == "identifier", true) : Value{};
 			auto result = call_value(std::move(callee), field(node, "arguments"), node.range);
 			if (callee_node && callee_node->kind == "identifier" &&
 					(text(document, *callee_node) == "load" || text(document, *callee_node) == "preload")) {
@@ -818,7 +834,7 @@ private:
 				for (size_t index = 1; index < node.children.size(); ++index) suffix.push_back(&node.children[index]);
 				return evaluate_with_attribute_suffix(node.children.front(), std::move(suffix));
 			}
-			return apply_attribute_parts(evaluate(node.children.front()), node, 1);
+			return apply_attribute_parts(evaluate(node.children.front(), false, true), node, 1);
 		}
 		if (node.kind == "lambda") {
 			analyze_lambda(node);
@@ -1004,6 +1020,18 @@ private:
 		return node.kind == "attribute" && !node.children.empty() && node.children.back().kind == "attribute_call";
 	}
 
+	const SyntaxNode *unwrapped_expression(const SyntaxNode *node) const {
+		while (node && node->kind == "parenthesized_expression" && !node->children.empty()) node = &node->children.front();
+		return node;
+	}
+
+	bool has_statement_effect(const SyntaxNode &node) const {
+		auto *expression = unwrapped_expression(&node);
+		if (!expression) return true;
+		return expression->kind == "assignment" || expression->kind == "augmented_assignment" ||
+			expression->kind == "await_expression" || is_call(*expression);
+	}
+
 	void analyze_statement(const SyntaxNode &node, const ResolvedType &expected_return) {
 		for (const auto &child : node.children) if (child.kind == "annotations") annotation_reads(child);
 		if (node.kind == "variable_statement" || node.kind == "const_statement" ||
@@ -1017,7 +1045,18 @@ private:
 		}
 		if (node.kind == "expression_statement") {
 			if (node.has_error) return;
+			if (trim(document.text(node)) == "void") return; // Rejected by the structural parser checks.
 			for (const auto &child : node.children) evaluate(child);
+			const SyntaxNode *expression = nullptr;
+			for (const auto &child : node.children) if (child.kind != "comment") { expression = &child; break; }
+			if (expression && !has_statement_effect(*expression)) {
+				auto *unwrapped = unwrapped_expression(expression);
+				if (unwrapped && unwrapped->kind == "conditional_expression") {
+					warn("standalone-ternary", "Standalone ternary operator (the return value is being discarded).", expression->range);
+				} else {
+					warn("standalone-expression", "Standalone expression (the line may have no effect).", expression->range);
+				}
+			}
 			return;
 		}
 		if (node.kind == "return_statement") {

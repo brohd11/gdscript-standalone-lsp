@@ -14,7 +14,8 @@ namespace {
 constexpr std::string_view default_warnings[] = {
 	"unused_variable", "unused_local_constant", "unused_parameter",
 	"shadowed_variable", "shadowed_variable_base_class", "shadowed_global_identifier",
-	"unreachable_code", "unreachable_pattern", "unsafe_void_return",
+	"unreachable_code", "unreachable_pattern", "standalone_expression", "standalone_ternary",
+	"unsafe_void_return",
 };
 std::string normalized(std::string_view name) {
 	std::string result(name);

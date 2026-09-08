@@ -47,6 +47,10 @@ std::vector<ParseIssue> structural_issues(const Document &document) {
 			add("The type \"void\" is only allowed as a function return type.", node.range);
 			return;
 		}
+		if (node.kind == "expression_statement" && trim(document.text(node)) == "void") {
+			add(R"(Expected statement, found "void" instead.)", node.range);
+			return;
+		}
 		if (node.kind == "call") {
 			for (const auto &child : node.children) if (child.kind == "identifier" && document.text(child) == "yield") {
 				add("The function \"yield\" was removed in Godot 4. Use \"await\" instead.", child.range);

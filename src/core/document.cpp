@@ -687,7 +687,7 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 	}
 	if (!ts_node_is_null(name)) {
 		auto identifier = trim(node_text(name, source));
-		if (is_gdscript_reserved_identifier(identifier)) {
+		if (identifier.empty() || ts_node_has_error(name) || is_gdscript_reserved_identifier(identifier)) {
 			add_parse_issue(errors, node_range(name, source), std::move(message));
 		}
 	}
@@ -1082,6 +1082,102 @@ void Document::parse(const Document *previous) {
 		else if ((source_[index] == ')' || source_[index] == ']' || source_[index] == '}') && depth) --depth;
 	}
 	grouping.back() = depth;
+	auto replace_recovery_issue = [&](Range range, std::string message) {
+		std::erase_if(syntax_errors_, [&](const ParseIssue &issue) {
+			return issue.message == "Syntax error." && issue.range.contains(range.start) &&
+				issue.range.contains(range.end);
+		});
+		add_parse_issue(syntax_errors_, range, std::move(message));
+	};
+	auto in_function_body = [&](Position position) {
+		bool found = false;
+		std::function<void(const SyntaxNode &)> visit = [&](const SyntaxNode &node) {
+			if (found || !node.range.contains(position)) return;
+			if (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda") {
+				for (const auto &child : node.children) if (child.field == "body" && child.range.contains(position)) {
+					found = true;
+					return;
+				}
+			}
+			for (const auto &child : node.children) visit(child);
+		};
+		visit(syntax_root_);
+		return found;
+	};
+	// Recovery can discard the useful inner node entirely. Recover the common
+	// line-bounded cases from code bytes, but only replace generic parser issues;
+	// valid tokens such as the float literal `1.` remain untouched.
+	for (size_t line = 0; line < source_.size();) {
+		auto end = line_end(source_, line);
+		auto first = line;
+		while (first < end && (!code[first] || std::isspace(static_cast<unsigned char>(source_[first])))) ++first;
+		auto last = end;
+		while (last > first && (!code[last - 1] || std::isspace(static_cast<unsigned char>(source_[last - 1])))) --last;
+		if (first < last) {
+			auto range = Range{byte_to_position(source_, first), byte_to_position(source_, last)};
+			auto clean = trim(std::string_view(source_).substr(first, last - first));
+			auto missing_name = [&](std::string_view keyword) {
+				if (!clean.starts_with(keyword) || (clean.size() > keyword.size() &&
+						identifier_byte(clean[keyword.size()]))) return false;
+				auto remainder = trim(clean.substr(keyword.size()));
+				return remainder.empty() || remainder.starts_with('=') || remainder.starts_with(':');
+			};
+			if (source_[last - 1] == '.' && grouping[last - 1] == 0) {
+				auto dot = Range{byte_to_position(source_, last - 1), byte_to_position(source_, last)};
+				bool parser_rejected = std::any_of(syntax_errors_.begin(), syntax_errors_.end(), [&](const ParseIssue &issue) {
+					return issue.range.contains(dot.start);
+				});
+				if (parser_rejected) replace_recovery_issue(dot, R"(Expected identifier after "." for attribute access.)");
+			} else if (missing_name("var")) {
+				constexpr std::string_view message = R"(Expected variable name after "var".)";
+				bool already_reported = std::any_of(syntax_errors_.begin(), syntax_errors_.end(), [&](const ParseIssue &issue) {
+					return issue.message == message && issue.range.start.line == range.start.line;
+				});
+				if (!already_reported) {
+					auto at = first + 3;
+					while (at < last && std::isspace(static_cast<unsigned char>(source_[at]))) ++at;
+					auto target = Range{byte_to_position(source_, at), byte_to_position(source_, std::min(at + 1, last))};
+					replace_recovery_issue(target, std::string(message));
+				}
+			} else if (missing_name("const")) {
+				constexpr std::string_view message = R"(Expected constant name after "const".)";
+				bool already_reported = std::any_of(syntax_errors_.begin(), syntax_errors_.end(), [&](const ParseIssue &issue) {
+					return issue.message == message && issue.range.start.line == range.start.line;
+				});
+				if (!already_reported) {
+					auto at = first + 5;
+					while (at < last && std::isspace(static_cast<unsigned char>(source_[at]))) ++at;
+					auto target = Range{byte_to_position(source_, at), byte_to_position(source_, std::min(at + 1, last))};
+					replace_recovery_issue(target, std::string(message));
+				}
+			} else if (clean == "func") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected opening "(" after "func".)" :
+					R"(Expected function name after "func".)");
+			} else if (clean == "class") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected statement, found "class" instead.)" :
+					R"(Expected identifier for the class name after "class".)");
+			} else if (clean == "signal") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected statement, found "signal" instead.)" :
+					R"(Expected signal name after "signal".)");
+			} else if (clean == "class_name") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected statement, found "class_name" instead.)" :
+					R"(Expected identifier for the global class name after "class_name".)");
+			} else if (clean == "enum") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected statement, found "enum" instead.)" :
+					R"(Expected "{" after "enum".)");
+			} else if (clean == "for") {
+				replace_recovery_issue(range, in_function_body(range.start) ? R"(Expected loop variable name after "for".)" :
+					"Syntax error.");
+			} else if (is_gdscript_reserved_identifier(clean)) {
+				bool parser_rejected = std::any_of(syntax_errors_.begin(), syntax_errors_.end(), [&](const ParseIssue &issue) {
+					return issue.message == "Syntax error." && issue.range.contains(range.start) && issue.range.contains(range.end);
+				});
+				if (parser_rejected) replace_recovery_issue(range, "Syntax error.");
+			}
+		}
+		if (end == source_.size()) break;
+		line = end + 1;
+	}
 	std::function<void(SyntaxNode &)> validate_attributes = [&](SyntaxNode &node) {
 		if (node.kind == "attribute") for (size_t i = 1; i < node.children.size(); ++i) {
 			const auto &previous = node.children[i - 1];
@@ -1094,7 +1190,7 @@ void Document::parse(const Document *previous) {
 				if (before > previous.end_byte && source_[before - 1] == '\\' && code[before - 1]) continue;
 				auto dot = source_.find('.', previous.end_byte);
 				if (dot == std::string::npos || dot > at) dot = previous.end_byte;
-				add_parse_issue(syntax_errors_, {byte_to_position(source_, dot), byte_to_position(source_, dot + 1)}, "Expected a member name before the end of the statement.");
+				add_parse_issue(syntax_errors_, {byte_to_position(source_, dot), byte_to_position(source_, dot + 1)}, R"(Expected identifier after "." for attribute access.)");
 				node.has_error = true;
 				break;
 			}

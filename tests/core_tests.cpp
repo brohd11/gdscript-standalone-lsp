@@ -1033,7 +1033,9 @@ int main() {
 			"gdscript/warnings/unused_parameter=0\n"
 			"gdscript/warnings/shadowed_variable=0\n"
 			"gdscript/warnings/shadowed_variable_base_class=0\n"
-			"gdscript/warnings/shadowed_global_identifier=0\n";
+			"gdscript/warnings/shadowed_global_identifier=0\n"
+			"gdscript/warnings/standalone_expression=0\n"
+			"gdscript/warnings/standalone_ternary=0\n";
 	};
 	write_warning_settings(
 		"[application]\nconfig/name=\"Warning fixture\"\n\n"

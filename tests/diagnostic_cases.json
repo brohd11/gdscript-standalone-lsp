@@ -160,6 +160,177 @@
       "godot_pattern": "Standalone lambdas"
     },
     {
+      "name": "trailing_attribute",
+      "source": "extends Node\nfunc test():\n    Object.\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 10
+            },
+            "end": {
+              "line": 2,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Expected identifier after"
+    },
+    {
+      "name": "missing_variable_name_with_value",
+      "source": "extends Node\nfunc test():\n    var = \"\"\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 7
+            }
+          }
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Expected variable name after .*var"
+    },
+    {
+      "name": "bare_body_keywords",
+      "source": "extends Node\nfunc first():\n    func\nfunc second():\n    class\nfunc third():\n    var\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {"start": {"line": 2, "character": 4}}
+        },
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {"start": {"line": 4, "character": 4}}
+        },
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {"start": {"line": 6, "character": 7}}
+        }
+      ],
+      "warnings": false,
+      "godot_pattern": "Expected opening.*func|Expected statement.*class|Expected variable name"
+    },
+    {
+      "name": "bare_additional_body_keywords",
+      "source": "extends Node\nfunc first():\n    signal\nfunc second():\n    enum\nfunc third():\n    class_name\nfunc fourth():\n    for\nfunc fifth():\n    static\n",
+      "expected": [
+        {"code": "syntax-error", "severity": 1, "range": {"start": {"line": 2, "character": 4}}},
+        {"code": "syntax-error", "severity": 1, "range": {"start": {"line": 4, "character": 4}}},
+        {"code": "syntax-error", "severity": 1, "range": {"start": {"line": 6, "character": 4}}},
+        {"code": "syntax-error", "severity": 1, "range": {"start": {"line": 8, "character": 4}}},
+        {"code": "syntax-error", "severity": 1, "range": {"start": {"line": 10, "character": 4}}}
+      ],
+      "warnings": false,
+      "godot_pattern": "Expected statement.*signal"
+    },
+    {
+      "name": "standalone_void",
+      "source": "extends Node\nfunc test():\n    void\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {"line": 2, "character": 4},
+            "end": {"line": 2, "character": 8}
+          }
+        }
+      ],
+      "warnings": true,
+      "godot_pattern": "Expected statement.*void"
+    },
+    {
+      "name": "standalone_types",
+      "source": "extends Node\nfunc test():\n    int\n    Callable\n    Signal\n    Variant\n    Object\n",
+      "expected": [
+        {"code": "invalid-type", "severity": 1, "range": {"start": {"line": 2, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 2, "character": 4}}},
+        {"code": "invalid-type", "severity": 1, "range": {"start": {"line": 3, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 3, "character": 4}}},
+        {"code": "invalid-type", "severity": 1, "range": {"start": {"line": 4, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 4, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 5, "character": 4}}},
+        {"code": "undefined-identifier", "severity": 1, "range": {"start": {"line": 5, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 6, "character": 4}}}
+      ],
+      "warnings": true,
+      "godot_warning": "standalone_expression",
+      "godot_pattern": "Standalone expression"
+    },
+    {
+      "name": "standalone_values",
+      "source": "extends Node\nconst Alias = preload(\"res://dependency.gd\")\nfunc test():\n    Object\n    Alias\n    42\n    1 + 2\n    Vector2.ZERO\n",
+      "files": {
+        "dependency.gd": "extends RefCounted\n"
+      },
+      "expected": [
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 3, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 4, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 5, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 6, "character": 4}}},
+        {"code": "standalone-expression", "severity": 2, "range": {"start": {"line": 7, "character": 4}}}
+      ],
+      "warnings": true,
+      "godot_warning": "standalone_expression",
+      "godot_pattern": "Standalone expression"
+    },
+    {
+      "name": "standalone_ternary",
+      "source": "extends Node\nfunc test():\n    1 if true else 2\n",
+      "expected": [
+        {"code": "standalone-ternary", "severity": 2, "range": {"start": {"line": 2, "character": 4}}}
+      ],
+      "warnings": true,
+      "godot_warning": "standalone_ternary",
+      "godot_pattern": "Standalone ternary"
+    },
+    {
+      "name": "standalone_effectful",
+      "source": "extends Node\nfunc test():\n    var value = 0\n    value = 1\n    value += 1\n    print(value)\n    await Callable()\n",
+      "expected": [],
+      "warnings": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "standalone_warning_disabled",
+      "source": "extends Node\nfunc test():\n    int\n    Object\n",
+      "expected": [
+        {"code": "invalid-type", "severity": 1, "range": {"start": {"line": 2, "character": 4}}}
+      ],
+      "warnings": false,
+      "godot_pattern": "Builtin type cannot"
+    },
+    {
+      "name": "standalone_warning_error",
+      "source": "extends Node\nfunc test():\n    Object\n",
+      "expected": [
+        {"code": "standalone-expression", "severity": 1, "range": {"start": {"line": 2, "character": 4}}}
+      ],
+      "warnings": true,
+      "settings": "gdscript/warnings/standalone_expression=2\n"
+    },
+    {
+      "name": "standalone_warning_ignore",
+      "source": "extends Node\nfunc test():\n    @warning_ignore(\"standalone_expression\")\n    Object\n",
+      "expected": [],
+      "warnings": true,
+      "godot_warning": "standalone_expression",
+      "godot_pattern": null
+    },
+    {
       "name": "assigned_lambda",
       "source": "extends Node\nfunc test():\n    var callback = func():\n        pass\n    callback.call()\n",
       "expected": [],
