@@ -13,9 +13,9 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
-from diagnostic_cases import API, assert_diagnostics, prepare, query
+from diagnostics.cases import API, assert_diagnostics, prepare, query
 
 
 def check_engine(engine, directory, script, pattern):
@@ -38,14 +38,14 @@ def main():
     binary = pathlib.Path(sys.argv[1]).resolve()
     engine = sys.argv[2] if len(sys.argv) > 2 else 'godot'
     version = subprocess.run([engine, '--version'], capture_output=True, text=True, check=True, timeout=10).stdout.strip()
-    golden = json.loads((ROOT / 'tests/diagnostic_oracle.json').read_text())
+    golden = json.loads((ROOT / 'tests/diagnostics/oracle.json').read_text())
     assert version.startswith(golden['godot_version_prefix']), 'Oracle requires ' + golden['godot_version_prefix'] + 'x; found ' + version
     count = 0
     failures = []
     with tempfile.TemporaryDirectory(prefix='gdscript-oracle-') as temporary:
         base = pathlib.Path(temporary)
         legacy = base / 'legacy'
-        shutil.copytree(ROOT / 'tests/fixtures/diagnostics', legacy, ignore=shutil.ignore_patterns('.godot'))
+        shutil.copytree(ROOT / 'tests/diagnostics/fixtures/errors', legacy, ignore=shutil.ignore_patterns('.godot'))
         with (legacy / 'project.godot').open('a') as stream:
             stream.write('\n[debug]\ngdscript/warnings/enable=false\n')
         for case in golden['cases']:
@@ -58,8 +58,8 @@ def main():
             else:
                 assert codes == {case['lsp_code']}, case['script'] + ': unexpected diagnostic codes ' + repr(codes)
             count += 1
-        warning_names = re.findall(r'^([A-Z][A-Z_]+)$', (ROOT / 'tests/diagnostic_zoo/warning_codes.txt').read_text(), re.M)
-        for case in json.loads((ROOT / 'tests/diagnostic_cases.json').read_text())['cases']:
+        warning_names = re.findall(r'^([A-Z][A-Z_]+)$', (ROOT / 'tests/diagnostics/warning_coverage.md').read_text(), re.M)
+        for case in json.loads((ROOT / 'tests/diagnostics/cases.json').read_text())['cases']:
             if 'godot_pattern' not in case:
                 continue
             directory = base / case['name']

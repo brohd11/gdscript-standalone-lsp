@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 
-from diagnostic_cases import packet
+from diagnostics.cases import packet
 from engine_bridge import Client, project, read_packet
 
 

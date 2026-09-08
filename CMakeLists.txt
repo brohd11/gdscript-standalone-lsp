@@ -138,13 +138,17 @@ if(BUILD_TESTING)
   )
   set_tests_properties(lsp-smoke PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME diagnostic-cases
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostic_cases.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics/cases.py"
             "$<TARGET_FILE:gdscript-lsp>")
   set_tests_properties(diagnostic-cases PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME diagnostic-updates
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostic_updates.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics/updates.py"
             "$<TARGET_FILE:gdscript-lsp>")
   set_tests_properties(diagnostic-updates PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME diagnostic-parse-errors
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics/parse_errors.py"
+            "$<TARGET_FILE:gdscript-lsp>")
+  set_tests_properties(diagnostic-parse-errors PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME engine-bridge
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_bridge.py"
       "$<TARGET_FILE:gdscript-lsp>")

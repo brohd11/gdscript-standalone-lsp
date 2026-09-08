@@ -58,8 +58,9 @@ test: $(BUILD_DIR)/core-tests $(BUILD_DIR)/caret-context-tests $(BUILD_DIR)/comp
 	$(BUILD_DIR)/incremental-update-tests
 	python3 tests/broken_syntax.py $(BUILD_DIR)/gdscript-lsp $(BUILD_DIR)/broken-syntax-tests
 	python3 tests/lsp_smoke.py $(BUILD_DIR)/gdscript-lsp
-	python3 tests/diagnostic_cases.py $(BUILD_DIR)/gdscript-lsp
-	python3 tests/diagnostic_updates.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/cases.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/updates.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/parse_errors.py $(BUILD_DIR)/gdscript-lsp
 	python3 tests/engine_bridge.py $(BUILD_DIR)/gdscript-lsp
 
 test-engine-bridge: $(BUILD_DIR)/gdscript-lsp
@@ -76,11 +77,13 @@ benchmark-completion: $(BUILD_DIR)/gdscript-lsp
 		--semantic-iterations "$(or $(BENCHMARK_SEMANTIC_ITERATIONS),10)"
 
 test-diagnostics: $(BUILD_DIR)/gdscript-lsp
-	python3 tests/diagnostic_cases.py $(BUILD_DIR)/gdscript-lsp
-	python3 tests/diagnostic_updates.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/cases.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/updates.py $(BUILD_DIR)/gdscript-lsp
+	python3 tests/diagnostics/parse_errors.py $(BUILD_DIR)/gdscript-lsp
 
 test-conformance: $(BUILD_DIR)/gdscript-lsp
-	python3 tools/godot_diagnostic_oracle.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"
+	python3 tests/diagnostics/oracle.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"
+	python3 tests/diagnostics/parse_errors.py $(BUILD_DIR)/gdscript-lsp --godot "$(GODOT)"
 
 gdextension: deps
 	@tools/fetch_gdextension_dependencies.sh "$(DEPS_DIR)"

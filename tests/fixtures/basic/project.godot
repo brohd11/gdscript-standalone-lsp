@@ -7,6 +7,6 @@ config/features=PackedStringArray("4.6")
 [autoload]
 FixtureGlobal="*res://global.gd"
 
-; Warning behavior is tested independently in diagnostic_cases.json.
+; Warning behavior is tested independently in tests/diagnostics/cases.json.
 [debug]
 gdscript/warnings/enable=false

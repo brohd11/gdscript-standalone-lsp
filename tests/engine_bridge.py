@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 
-from diagnostic_cases import API, packet
+from diagnostics.cases import API, packet
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 

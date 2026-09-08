@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 API = ROOT / 'addons/gdscript_lsp/data/godot-4.6-extension-api.json'
 
 
@@ -77,12 +77,14 @@ def assert_diagnostics(case, actual):
         assert key(a) == key(b), f"{case['name']}: expected {a}, got {b}"
         if 'end' in a['range']:
             assert a['range']['end'] == b['range']['end'], f"{case['name']}: incorrect range: {b}"
+        if 'message' in a:
+            assert a['message'] == b['message'], f"{case['name']}: expected message {a['message']!r}, got {b['message']!r}"
         assert b['message'].strip(), f"{case['name']}: missing message"
 
 
 def main():
     binary = pathlib.Path(sys.argv[1]).resolve()
-    cases = json.loads((ROOT / 'tests/diagnostic_cases.json').read_text(encoding='utf-8'))['cases']
+    cases = json.loads((ROOT / 'tests/diagnostics/cases.json').read_text(encoding='utf-8'))['cases']
     failures = []
     for case in cases:
         if len(sys.argv) > 2 and sys.argv[2] not in case['name']:

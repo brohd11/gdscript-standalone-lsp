@@ -9,7 +9,9 @@ import tempfile
 import threading
 import time
 
-from diagnostic_cases import API, packet
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+from diagnostics.cases import API, packet
 
 
 def read(stream):

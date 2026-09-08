@@ -306,7 +306,7 @@ for case_name, source, position in [
 # Diagnostics are available through the LSP 3.17 pull request and are also
 # pushed after overlays change. A clean overlay must publish an empty list so
 # clients remove errors that came from the disk version.
-diagnostic_root = pathlib.Path("tests/fixtures/diagnostics").resolve()
+diagnostic_root = pathlib.Path("tests/diagnostics/fixtures/errors").resolve()
 diagnostic_uri = (diagnostic_root / "errors.gd").as_uri()
 process = subprocess.Popen(
     [

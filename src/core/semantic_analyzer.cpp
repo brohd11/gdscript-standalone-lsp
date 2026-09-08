@@ -215,6 +215,7 @@ private:
 
 	Value resolve_name(std::string_view name, Position position, bool call_target, Range range,
 			bool read = true, bool allow_pseudo_type = false) {
+		if (name.empty()) return {};
 		for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
 			if (auto found = scope->find(std::string(name)); found != scope->end()) {
 				if (found->second.binding && read) found->second.binding->read = true;

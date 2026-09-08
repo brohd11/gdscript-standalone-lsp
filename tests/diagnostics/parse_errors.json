@@ -1,0 +1,599 @@
+{
+  "godot_version_prefix": "4.6.3",
+  "cases": [
+    {
+      "name": "class_name-twice",
+      "source": "class_name A\nclass_name B\nextends Node\n",
+      "godot": "\"class_name\" can only be used once.",
+      "expect": "error"
+    },
+    {
+      "name": "extends-twice",
+      "source": "extends Node\nextends Node2D\n",
+      "godot": "\"extends\" can only be used once.",
+      "expect": "error"
+    },
+    {
+      "name": "extends-nonident",
+      "source": "extends 42\n",
+      "godot": "Only strings or identifiers can be used after \"extends\", found \"int\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "static-not-func-var",
+      "source": "extends Node\nstatic const X = 1\n",
+      "godot": "Expected \"func\" or \"var\" after \"static\".",
+      "expect": "error"
+    },
+    {
+      "name": "removed-tool-keyword",
+      "source": "tool\nextends Node\n",
+      "godot": "The \"tool\" keyword was removed in Godot 4. Use the \"@tool\" annotation instead.",
+      "expect": "error"
+    },
+    {
+      "name": "removed-export-keyword",
+      "source": "extends Node\nexport var x = 1\n",
+      "godot": "The \"export\" keyword was removed in Godot 4. Use an export annotation (\"@export\", \"@export_range\", etc.) instead.",
+      "expect": "error"
+    },
+    {
+      "name": "removed-onready-keyword",
+      "source": "extends Node\nonready var x = 1\n",
+      "godot": "The \"onready\" keyword was removed in Godot 4. Use the \"@onready\" annotation instead.",
+      "expect": "error"
+    },
+    {
+      "name": "removed-remote-keyword",
+      "source": "extends Node\nremote func f() -> void:\n\tpass\n",
+      "godot": "The \"remote\" keyword was removed in Godot 4. Use the \"@rpc\" annotation with \"any_peer\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "unexpected-in-class-body",
+      "source": "extends Node\n42\n",
+      "godot": "Unexpected \"Literal\" in class body.",
+      "expect": "error"
+    },
+    {
+      "name": "duplicate-member",
+      "source": "extends Node\nvar x = 1\nvar x = 2\n",
+      "godot": "Variable \"x\" has the same name as a previously declared variable.",
+      "expect": "error"
+    },
+    {
+      "name": "expected-type-after-colon",
+      "source": "extends Node\nvar x: = 1\n",
+      "godot": null,
+      "expect": "ok"
+    },
+    {
+      "name": "expected-value-after-eq",
+      "source": "extends Node\nvar x =\n",
+      "godot": "Expected expression for variable initial value after \"=\".",
+      "expect": "error"
+    },
+    {
+      "name": "const-no-initializer",
+      "source": "extends Node\nconst X\n",
+      "godot": "Expected initializer after constant name.",
+      "expect": "error"
+    },
+    {
+      "name": "signal-param-default",
+      "source": "extends Node\nsignal s(a = 1)\n",
+      "godot": "Signal parameters cannot have a default value.",
+      "expect": "error"
+    },
+    {
+      "name": "signal-dup-param",
+      "source": "extends Node\nsignal s(a, a)\n",
+      "godot": "Parameter with name \"a\" was already declared for this signal.",
+      "expect": "error"
+    },
+    {
+      "name": "enum-dup-name",
+      "source": "extends Node\nenum E { A, A }\n",
+      "godot": "Name \"A\" was already in this enum (at line 2).",
+      "expect": "error"
+    },
+    {
+      "name": "enum-no-close",
+      "source": "extends Node\nenum E { A\n",
+      "godot": "Expected closing \"}\" for enum.",
+      "expect": "error"
+    },
+    {
+      "name": "func-no-name",
+      "source": "extends Node\nfunc () -> void:\n\tpass\n",
+      "godot": "Expected function name after \"func\".",
+      "expect": "error"
+    },
+    {
+      "name": "func-no-parens",
+      "source": "extends Node\nfunc f -> void:\n\tpass\n",
+      "godot": "Expected opening \"(\" after function name.",
+      "expect": "error"
+    },
+    {
+      "name": "func-unclosed-parens",
+      "source": "extends Node\nfunc f( -> void:\n\tpass\n",
+      "godot": "Expected parameter name.",
+      "expect": "error"
+    },
+    {
+      "name": "func-no-colon",
+      "source": "extends Node\nfunc f()\n\tpass\n",
+      "godot": "Unexpected \"Indent\" in class body.",
+      "expect": "error"
+    },
+    {
+      "name": "func-no-body",
+      "source": "extends Node\nfunc f() -> void:\n",
+      "godot": "Expected indented block after function declaration.",
+      "expect": "error"
+    },
+    {
+      "name": "return-type-missing",
+      "source": "extends Node\nfunc f() ->:\n\tpass\n",
+      "godot": "Expected return type or \"void\" after \"->\".",
+      "expect": "error"
+    },
+    {
+      "name": "required-after-default",
+      "source": "extends Node\nfunc f(a = 1, b) -> void:\n\tprint(a, b)\n",
+      "godot": "Cannot have mandatory parameters after optional parameters.",
+      "expect": "error"
+    },
+    {
+      "name": "dup-parameter",
+      "source": "extends Node\nfunc f(a, a) -> void:\n\tprint(a)\n",
+      "godot": "Parameter with name \"a\" was already declared for this function.",
+      "expect": "error"
+    },
+    {
+      "name": "static-ctor-params",
+      "source": "extends Node\nstatic func _static_init(a) -> void:\n\tprint(a)\n",
+      "godot": "Static constructor cannot have parameters.",
+      "expect": "error"
+    },
+    {
+      "name": "ctor-returns-value",
+      "source": "extends Node\nfunc _init() -> int:\n\treturn 1\n",
+      "godot": "Constructor cannot return a value.",
+      "expect": "error"
+    },
+    {
+      "name": "property-two-setters",
+      "source": "extends Node\nvar x = 1:\n\tset(v):\n\t\tpass\n\tset(v):\n\t\tpass\n",
+      "godot": "Properties can only have one setter.",
+      "expect": "error"
+    },
+    {
+      "name": "property-bad-accessor",
+      "source": "extends Node\nvar x = 1:\n\tfoo:\n\t\tpass\n",
+      "godot": "Expected \"get\" or \"set\" for property declaration.",
+      "expect": "error"
+    },
+    {
+      "name": "break-outside-loop",
+      "source": "extends Node\nfunc f() -> void:\n\tbreak\n",
+      "godot": "Cannot use \"break\" outside of a loop.",
+      "expect": "error"
+    },
+    {
+      "name": "continue-outside-loop",
+      "source": "extends Node\nfunc f() -> void:\n\tcontinue\n",
+      "godot": "Cannot use \"continue\" outside of a loop.",
+      "expect": "error"
+    },
+    {
+      "name": "standalone-lambda",
+      "source": "extends Node\nfunc f() -> void:\n\tfunc(): pass\n",
+      "godot": "Standalone lambdas cannot be accessed. Consider assigning it to a variable.",
+      "expect": "error"
+    },
+    {
+      "name": "assert-no-paren",
+      "source": "extends Node\nfunc f() -> void:\n\tassert true\n",
+      "godot": "Expected \"(\" after \"assert\".",
+      "expect": "error"
+    },
+    {
+      "name": "if-no-colon",
+      "source": "extends Node\nfunc f() -> void:\n\tif true\n\t\tpass\n",
+      "godot": "Expected \":\" after \"if\" condition.",
+      "expect": "error"
+    },
+    {
+      "name": "if-no-cond",
+      "source": "extends Node\nfunc f() -> void:\n\tif:\n\t\tpass\n",
+      "godot": "Expected conditional expression after \"if\".",
+      "expect": "error"
+    },
+    {
+      "name": "while-no-cond",
+      "source": "extends Node\nfunc f() -> void:\n\twhile:\n\t\tpass\n",
+      "godot": "Expected conditional expression after \"while\".",
+      "expect": "error"
+    },
+    {
+      "name": "for-no-in",
+      "source": "extends Node\nfunc f() -> void:\n\tfor i []:\n\t\tpass\n",
+      "godot": "Expected \"in\" or \":\" after \"for\" variable name.",
+      "expect": "error"
+    },
+    {
+      "name": "for-no-iterable",
+      "source": "extends Node\nfunc f() -> void:\n\tfor i in:\n\t\tpass\n",
+      "godot": "Expected iterable after \"in\".",
+      "expect": "error"
+    },
+    {
+      "name": "for-redeclare",
+      "source": "extends Node\nfunc f() -> void:\n\tvar i = 1\n\tfor i in []:\n\t\tpass\n",
+      "godot": "There is already a variable named \"i\" declared in this scope.",
+      "expect": "error"
+    },
+    {
+      "name": "local-redeclare",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1\n\tvar a = 2\n\tprint(a)\n",
+      "godot": "There is already a variable named \"a\" declared in this scope.",
+      "expect": "error"
+    },
+    {
+      "name": "match-no-expr",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch:\n\t\t_: pass\n",
+      "godot": "Expected expression to test after \"match\".",
+      "expect": "error"
+    },
+    {
+      "name": "match-no-block",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch 1:\n",
+      "godot": "Expected an indented block after \"match\" statement.",
+      "expect": "error"
+    },
+    {
+      "name": "match-bind-multi-pattern",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch 1:\n\t\t1, var a: print(a)\n",
+      "godot": "Cannot use a variable bind with multiple patterns.",
+      "expect": "error"
+    },
+    {
+      "name": "match-rest-not-last",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch [1]:\n\t\t[.., 1]: pass\n",
+      "godot": "The \"..\" pattern must be the last element in the pattern array.",
+      "expect": "error"
+    },
+    {
+      "name": "match-dup-bind",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch [1, 2]:\n\t\t[var a, var a]: print(a)\n",
+      "godot": "Bind variable name \"a\" was already used in this pattern.",
+      "expect": "error"
+    },
+    {
+      "name": "pattern-guard-no-expr",
+      "source": "extends Node\nfunc f() -> void:\n\tmatch 1:\n\t\t1 when: pass\n",
+      "godot": "Expected expression for pattern guard after \"when\".",
+      "expect": "error"
+    },
+    {
+      "name": "too-many-statement-errors",
+      "source": "extends Node\nfunc f() -> void:\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n\t?\n",
+      "godot": "Expected statement, found \"?\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "assignment-in-expression",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1\n\tprint(a = 2)\n",
+      "godot": "Assignment is not allowed inside an expression.",
+      "expect": "error"
+    },
+    {
+      "name": "bad-assign-target",
+      "source": "extends Node\nfunc f() -> void:\n\t1 = 2\n",
+      "godot": "Only identifier, attribute access, and subscription access can be used as assignment target.",
+      "expect": "error"
+    },
+    {
+      "name": "ternary-question-mark",
+      "source": "extends Node\nfunc f(a, b, c) -> void:\n\ta ? b : c\n",
+      "godot": "Unexpected \"?\" in source. If you want a ternary operator, use \"truthy_value if true_condition else falsy_value\".",
+      "expect": "error"
+    },
+    {
+      "name": "ternary-no-else",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1 if true\n\tprint(a)\n",
+      "godot": "Expected \"else\" after ternary operator condition.",
+      "expect": "error"
+    },
+    {
+      "name": "yield-removed",
+      "source": "extends Node\nfunc f() -> void:\n\tyield()\n",
+      "godot": "\"yield\" was removed in Godot 4. Use \"await\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "await-nothing",
+      "source": "extends Node\nfunc f() -> void:\n\tawait\n",
+      "godot": "Expected signal or coroutine after \"await\".",
+      "expect": "error"
+    },
+    {
+      "name": "unary-no-operand",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = -\n\tprint(a)\n",
+      "godot": "Expected expression after \"-\" operator.",
+      "expect": "error"
+    },
+    {
+      "name": "binary-no-rhs",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1 +\n\tprint(a)\n",
+      "godot": "Expected expression after \"+\" operator.",
+      "expect": "error"
+    },
+    {
+      "name": "array-unclosed",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = [1, 2\n\tprint(a)\n",
+      "godot": "Expected closing \"]\" after array elements.",
+      "expect": "error"
+    },
+    {
+      "name": "dict-unclosed",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = {\"k\": 1\n\tprint(a)\n",
+      "godot": "Expected closing \"}\" after dictionary elements.",
+      "expect": "error"
+    },
+    {
+      "name": "dict-no-colon",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = {\"k\" 1}\n\tprint(a)\n",
+      "godot": "Expected \":\" or \"=\" after dictionary key.",
+      "expect": "error"
+    },
+    {
+      "name": "dict-mixed-style",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = {a = 1, \"b\": 2}\n\tprint(a)\n",
+      "godot": "Expected \"=\" after dictionary key. Mixing dictionary styles is not allowed.",
+      "expect": "error"
+    },
+    {
+      "name": "group-unclosed",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = (1\n\tprint(a)\n",
+      "godot": "Expected closing \")\" after grouping expression.",
+      "expect": "error"
+    },
+    {
+      "name": "group-empty",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = ()\n\tprint(a)\n",
+      "godot": "Expected grouping expression.",
+      "expect": "error"
+    },
+    {
+      "name": "subscript-unclosed",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = [1][0\n\tprint(a)\n",
+      "godot": "Expected \"]\" after subscription index.",
+      "expect": "error"
+    },
+    {
+      "name": "subscript-empty",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = [1][]\n\tprint(a)\n",
+      "godot": "Expected expression after \"[\".",
+      "expect": "error"
+    },
+    {
+      "name": "attribute-no-ident",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = self.\n\tprint(a)\n",
+      "godot": "Expected identifier after \".\" for attribute access.",
+      "expect": "error"
+    },
+    {
+      "name": "call-on-expression",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = (1 + 2)()\n\tprint(a)\n",
+      "godot": "Cannot call on an expression. Use \".call()\" if it's a Callable.",
+      "expect": "error"
+    },
+    {
+      "name": "as-no-type",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1 as\n\tprint(a)\n",
+      "godot": "Expected type specifier after \"as\".",
+      "expect": "error"
+    },
+    {
+      "name": "is-no-type",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1 is\n\tprint(a)\n",
+      "godot": "Expected type specifier after \"is\".",
+      "expect": "error"
+    },
+    {
+      "name": "void-not-return-type",
+      "source": "extends Node\nvar x: void\n",
+      "godot": "\"void\" is only allowed for a function return type.",
+      "expect": "error"
+    },
+    {
+      "name": "void-statement",
+      "source": "extends Node\nfunc f() -> void:\n\tvoid\n",
+      "godot": "Expected statement, found \"void\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "nested-typed-collection",
+      "source": "extends Node\nvar a: Array[Array[int]] = []\n",
+      "godot": "Nested typed collections are not supported.",
+      "expect": "error"
+    },
+    {
+      "name": "collection-no-type",
+      "source": "extends Node\nvar a: Array[] = []\n",
+      "godot": "Expected type for collection after \"[\".",
+      "expect": "error"
+    },
+    {
+      "name": "self-in-static",
+      "source": "extends Node\nstatic func f() -> void:\n\tprint(self)\n",
+      "godot": "Cannot use \"self\" inside a static function.",
+      "expect": "error"
+    },
+    {
+      "name": "super-outside-func",
+      "source": "extends Node\nvar x = super()\n",
+      "godot": "Cannot use implicit \"super\" call outside of a function.",
+      "expect": "error"
+    },
+    {
+      "name": "nodepath-bad",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = $\n\tprint(a)\n",
+      "godot": "Expected node path as string or identifier after \"$\".",
+      "expect": "error"
+    },
+    {
+      "name": "nodepath-percent-mid",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = $a/%\n\tprint(a)\n",
+      "godot": "Unexpected \"Newline\" in node path.",
+      "expect": "error"
+    },
+    {
+      "name": "preload-no-paren",
+      "source": "extends Node\nvar a = preload \"res://x.gd\"\n",
+      "godot": "Expected \"(\" after \"preload\".",
+      "expect": "error"
+    },
+    {
+      "name": "unclosed-call-args",
+      "source": "extends Node\nfunc f() -> void:\n\tprint(1\n",
+      "godot": "Expected closing \")\" after call arguments.",
+      "expect": "error"
+    },
+    {
+      "name": "stmt-after-stmt-same-line",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = 1 var b = 2\n\tprint(a, b)\n",
+      "godot": "Expected end of statement after variable declaration, found \"var\" instead.",
+      "expect": "error"
+    },
+    {
+      "name": "unknown-annotation",
+      "source": "extends Node\n@not_a_real_annotation\nfunc f() -> void:\n\tpass\n",
+      "godot": "Unrecognized annotation: \"@not_a_real_annotation\".",
+      "expect": "gap"
+    },
+    {
+      "name": "annotation-bad-target",
+      "source": "extends Node\n@onready\nfunc f() -> void:\n\tpass\n",
+      "godot": "Annotation \"@onready\" cannot be applied to a function.",
+      "expect": "gap"
+    },
+    {
+      "name": "annotation-too-many-args",
+      "source": "extends Node\n@icon(\"a\", \"b\")\n",
+      "godot": "Annotation \"@icon\" must be at the top of the script, before \"extends\" and \"class_name\".",
+      "expect": "gap"
+    },
+    {
+      "name": "annotation-standalone-dangling",
+      "source": "extends Node\nfunc f() -> void:\n\tpass\n@tool\n",
+      "godot": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".",
+      "expect": "gap"
+    },
+    {
+      "name": "tool-not-top",
+      "source": "extends Node\n@tool\n",
+      "godot": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".",
+      "expect": "gap"
+    },
+    {
+      "name": "export-untyped",
+      "source": "extends Node\n@export var x\n",
+      "godot": "Cannot use simple \"@export\" annotation with variable without type or initializer, since type can't be inferred.",
+      "expect": "gap"
+    },
+    {
+      "name": "warning-ignore-bad-name",
+      "source": "extends Node\n@warning_ignore(\"not_a_warning\")\nfunc f() -> void:\n\tpass\n",
+      "godot": "Invalid warning name: \"not_a_warning\".",
+      "expect": "gap"
+    },
+    {
+      "name": "onready-non-node",
+      "source": "extends RefCounted\n@onready var x = 1\n",
+      "godot": "\"@onready\" can only be used in classes that inherit \"Node\".",
+      "expect": "gap"
+    },
+    {
+      "name": "invalid-character",
+      "source": "extends Node\nfunc f() -> void:\n\tvar a = `\n\tprint(a)\n",
+      "godot": "Expected expression for variable initial value after \"=\".",
+      "expect": "error"
+    },
+    {
+      "name": "bad-escape",
+      "source": "extends Node\nvar s = \"bad \\q escape\"\n",
+      "godot": "Invalid escape in string.",
+      "expect": "error"
+    },
+    {
+      "name": "unterminated-string",
+      "source": "extends Node\nvar s = \"unterminated\n",
+      "godot": "Unterminated string.",
+      "expect": "error"
+    },
+    {
+      "name": "bad-number-notation",
+      "source": "extends Node\nvar n = 0x\n",
+      "godot": "Expected hexadecimal digit after \"0x\".",
+      "expect": "error"
+    },
+    {
+      "name": "double-decimal",
+      "source": "extends Node\nvar n = 1.2.3\n",
+      "godot": "Cannot use a decimal point twice in a number.",
+      "expect": "error"
+    },
+    {
+      "name": "underscore-after-dot",
+      "source": "extends Node\nvar n = 1._2\n",
+      "godot": "Unexpected underscore after decimal point.",
+      "expect": "error"
+    },
+    {
+      "name": "bad-unicode-escape",
+      "source": "extends Node\nvar s = \"\\uZZZZ\"\n",
+      "godot": "Invalid hexadecimal digit in unicode escape sequence.",
+      "expect": "error"
+    },
+    {
+      "name": "at-without-ident",
+      "source": "extends Node\n@\nfunc f() -> void:\n\tpass\n",
+      "godot": "Expected annotation identifier after \"@\".",
+      "expect": "error"
+    },
+    {
+      "name": "confusable-keyword-ident",
+      "source": "extends Node\nfunc f() -> void:\n\tvarıf = 1\n\tprint(ıf)\n",
+      "godot": "Identifier \"ıf\" is visually similar to the GDScript keyword \"if\" and thus not allowed.",
+      "expect": "error"
+    },
+    {
+      "name": "bad-indent-dedent",
+      "source": "extends Node\nfunc f() -> void:\n\t\tvar a = 1\n\tprint(a)\n",
+      "godot": "Unindent doesn't match the previous indentation level.",
+      "expect": "error"
+    },
+    {
+      "name": "valid-basic",
+      "source": "extends Node\nfunc f() -> void:\n\tprint(1)\n",
+      "godot": null,
+      "expect": "ok"
+    },
+    {
+      "name": "valid-match",
+      "source": "extends Node\nfunc f(x) -> void:\n\tmatch x:\n\t\t1: pass\n\t\t_: pass\n",
+      "godot": null,
+      "expect": "ok"
+    },
+    {
+      "name": "valid-lambda",
+      "source": "extends Node\nfunc f() -> void:\n\tvar cb = func(): pass\n\tcb.call()\n",
+      "godot": null,
+      "expect": "ok"
+    }
+  ]
+}

@@ -2976,6 +2976,7 @@ std::vector<Diagnostic> Workspace::diagnostics(const std::string &uri) const {
 	};
 	for (const auto &issue : document->syntax_errors()) add("syntax-error", issue.message, issue.range);
 	for (const auto &issue : structural_issues(*document)) add("syntax-error", issue.message, issue.range);
+	for (const auto &issue : lexical_issues(*document)) add("syntax-error", issue.message, issue.range);
 	for (const auto &record : document->classes()) {
 		if (!record.global_name.empty() && global_name_counts_.contains(record.global_name) &&
 				global_name_counts_.at(record.global_name) > 1) {

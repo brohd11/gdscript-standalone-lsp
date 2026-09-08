@@ -3,6 +3,6 @@ config_version=5
 [application]
 config/name="inference-fixture"
 
-; Warning behavior is tested independently in diagnostic_cases.json.
+; Warning behavior is tested independently in tests/diagnostics/cases.json.
 [debug]
 gdscript/warnings/enable=false

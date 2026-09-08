@@ -1,7 +1,11 @@
-Godot master warning-code coverage (2026-09-04)
-================================================
+Godot warning-name catalog
+==========================
 
-Targeted by diagnostic_zoo.gd (44 currently-producible, non-empty cases):
+The oracle reads the standalone uppercase names below to configure one warning
+at a time. This is a source-derived catalog, not a claim that every warning is
+implemented or exercised by this repository.
+
+Currently producible non-empty warning names:
 UNASSIGNED_VARIABLE
 UNASSIGNED_VARIABLE_OP_ASSIGN
 UNUSED_VARIABLE
@@ -47,10 +51,10 @@ NATIVE_METHOD_OVERRIDE
 GET_NODE_DEFAULT_WITHOUT_ONREADY
 ONREADY_WITH_EXPORT
 
-Targeted by empty.gd (1):
+Empty-file warning:
 EMPTY_FILE
 
-Present in the current source enum but currently not producible (4):
+Present in Godot's source enum but currently not producible:
 DEPRECATED_KEYWORD
 PROPERTY_USED_AS_FUNCTION
 CONSTANT_USED_AS_FUNCTION
@@ -61,8 +65,8 @@ Notes:
 - Godot docs state there are currently no deprecated GDScript keywords, so DEPRECATED_KEYWORD is never produced.
 - CONFUSABLE_IDENTIFIER depends on Unicode security support in the build.
 
-Standalone implementation status (2026-09-07)
--------------------------------------------
+Standalone implementation status
+--------------------------------
 Implemented: UNUSED_VARIABLE, UNUSED_LOCAL_CONSTANT, UNUSED_PARAMETER,
 SHADOWED_VARIABLE, SHADOWED_VARIABLE_BASE_CLASS, SHADOWED_GLOBAL_IDENTIFIER,
 UNREACHABLE_CODE, UNREACHABLE_PATTERN, STANDALONE_EXPRESSION,

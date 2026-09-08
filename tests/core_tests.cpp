@@ -738,7 +738,7 @@ int main() {
 	expect(!invalid_api_workspace.open(fixture, fixture / "missing-extension-api.json", &error),
 		"an explicitly requested missing native API is reported");
 
-	auto diagnostic_fixture = std::filesystem::weakly_canonical("tests/fixtures/diagnostics");
+	auto diagnostic_fixture = std::filesystem::weakly_canonical("tests/diagnostics/fixtures/errors");
 	Workspace diagnostic_workspace;
 	expect(diagnostic_workspace.open(diagnostic_fixture, fixture / "extension_api.json", &error),
 		"diagnostic workspace opens: " + error);
@@ -1312,7 +1312,7 @@ int main() {
 	expect(scene_resource_type.kind == TypeKind::NativeClass && scene_resource_type.name == "PackedScene",
 		"preloaded scene constants resolve as PackedScene resources");
 
-	auto downcast_fixture = std::filesystem::weakly_canonical("tests/fixtures/warnings");
+	auto downcast_fixture = std::filesystem::weakly_canonical("tests/diagnostics/fixtures/warnings");
 	Workspace downcast_workspace;
 	expect(downcast_workspace.open(downcast_fixture, fixture / "extension_api.json", &error),
 		"warning workspace opens: " + error);

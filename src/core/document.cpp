@@ -627,7 +627,9 @@ void add_parse_issue(std::vector<ParseIssue> &errors, Range range, std::string m
 
 void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue> &errors) {
 	if (ts_node_is_error(node) || ts_node_is_missing(node)) {
-		add_parse_issue(errors, node_range(node, source), "Syntax error.");
+		auto text = trim(node_text(node, source));
+		add_parse_issue(errors, node_range(node, source), text == "@" ?
+			R"(Expected annotation identifier after "@".)" : "Syntax error.");
 	}
 
 	auto type = node_type(node);
@@ -684,6 +686,28 @@ void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue
 	} else if (type == "enumerator") {
 		name = field(node, "left");
 		message = "Expected identifier for enum key.";
+	}
+	if (type == "function_definition" || type == "constructor_definition") {
+		auto parameters = field(node, "parameters");
+		auto parameter_text = node_text(parameters, source);
+		if (!ts_node_is_null(parameters) && parameter_text.starts_with("(") && !trim(parameter_text).ends_with(")")) {
+			add_parse_issue(errors, node_range(parameters, source), "Expected parameter name.");
+		}
+		auto body = field(node, "body");
+		auto function_text = trim(node_text(node, source));
+		auto annotation = first_descendant(node, "annotation");
+		bool is_abstract = !ts_node_is_null(annotation) && trim(node_text(annotation, source)).starts_with("@abstract");
+		if (ts_node_is_null(body)) {
+			if (!function_text.ends_with(":") && !is_abstract) {
+				add_parse_issue(errors, node_range(node, source),
+					R"(A function must either have a ":" followed by a body, or be marked as "@abstract".)");
+			}
+		} else if (ts_node_named_child_count(body) == 0 && function_text.ends_with(":")) {
+			add_parse_issue(errors, node_range(body, source), "Expected indented block after function declaration.");
+		}
+	}
+	if (type == "enum_definition" && !trim(node_text(node, source)).ends_with("}")) {
+		add_parse_issue(errors, node_range(node, source), R"(Expected closing "}" for enum.)");
 	}
 	if (!ts_node_is_null(name)) {
 		auto identifier = trim(node_text(name, source));
