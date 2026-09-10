@@ -151,6 +151,22 @@ DefinitionReference definition_reference_at(const Document &document, Position p
 	return result;
 }
 
+const SyntaxNode *string_literal_at(const SyntaxNode &node, size_t offset) {
+	if (offset < node.start_byte || offset >= node.end_byte) return nullptr;
+	for (const auto &child : node.children) {
+		if (auto *result = string_literal_at(child, offset)) return result;
+	}
+	return node.kind == "string" ? &node : nullptr;
+}
+
+std::optional<std::string> resource_reference_at(const Document &document, Position position) {
+	auto offset = position_to_byte(document.source(), position);
+	auto *literal = string_literal_at(document.syntax_root(), offset);
+	if (!literal) return std::nullopt;
+	auto value = unquote(document.text(*literal));
+	return value.empty() ? std::nullopt : std::optional<std::string>(std::move(value));
+}
+
 std::optional<std::pair<std::string, std::string>> terminal_subscript(std::string_view expression) {
 	if (expression.empty() || expression.back() != ']') return std::nullopt;
 	int depth = 0;
@@ -3070,6 +3086,15 @@ std::vector<Location> Workspace::definition(const std::string &uri, Position pos
 	std::vector<Location> result;
 	auto *document = find_document(uri);
 	if (!document) return result;
+	if (auto reference = resource_reference_at(*document, position)) {
+		auto resource = resolve_path_reference(std::move(*reference), document->resource_path());
+		if (!resource_exists(resource)) return result;
+		auto found = resource_uris_.find(resource);
+		auto target_uri = found == resource_uris_.end() ?
+			uri_for_path(root_ / resource.substr(6)) : found->second;
+		result.push_back({std::move(target_uri), {}});
+		return result;
+	}
 	auto reference = definition_reference_at(*document, position);
 	if (reference.name.empty()) return result;
 	if (reference.qualified) {

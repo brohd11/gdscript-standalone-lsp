@@ -616,7 +616,12 @@ int main() {
 		"const ExitCode = Types.ExitCode\n"
 		"const PhysicalBase = AliasNamespace.PhysicalBase\n"
 		"const LocalAlias = AliasNamespace.LocalAlias.ExitCode\n"
-		"const Missing = AliasNamespace.Missing\n";
+		"const Missing = AliasNamespace.Missing\n"
+		"const ScriptPath = \"res://alias_base.gd\"\n"
+		"const RelativePath = \"alias_namespace.gd\"\n"
+		"const UidPath = \"uid://fixturebase\"\n"
+		"const FilePath = \"res://project.godot\"\n"
+		"const MissingPath = \"res://missing.gd\"\n";
 	expect(workspace.update_document(consumer_uri, qualified_definition_source, 3, &error),
 		"qualified-definition overlay accepted");
 	auto definition_at = [&](size_t line, std::string_view name, size_t within) {
@@ -654,6 +659,28 @@ int main() {
 		"qualified definition resolves the final member of a deeper chain");
 	expect(definition_at(5, "Missing", 3).empty(),
 		"unresolved qualified definition does not fall back to a same-named declaration");
+	for (auto path : {std::pair{size_t{6}, std::string_view("alias_base.gd")},
+			std::pair{size_t{7}, std::string_view("alias_namespace.gd")},
+			std::pair{size_t{8}, std::string_view("fixturebase")}}) {
+		auto target = definition_at(path.first, path.second, path.second.size() / 2);
+		expect(target.size() == 1 && target.front().range.start == Position{} &&
+			target.front().range.end == Position{},
+			"resource path definition opens the target script at its start");
+	}
+	auto script_path_definition = definition_at(6, "alias_base.gd", 4);
+	expect(script_path_definition.size() == 1 && script_path_definition.front().uri.ends_with("/alias_base.gd"),
+		"res resource path definition resolves its target URI");
+	auto relative_path_definition = definition_at(7, "alias_namespace.gd", 4);
+	expect(relative_path_definition.size() == 1 && relative_path_definition.front().uri.ends_with("/alias_namespace.gd"),
+		"relative resource path definition resolves from the current script");
+	auto uid_path_definition = definition_at(8, "fixturebase", 4);
+	expect(uid_path_definition.size() == 1 && uid_path_definition.front().uri.ends_with("/base.gd"),
+		"UID resource path definition resolves its mapped script");
+	auto file_path_definition = definition_at(9, "project.godot", 4);
+	expect(file_path_definition.size() == 1 && file_path_definition.front().uri.ends_with("/project.godot"),
+		"resource path definition opens non-script project files");
+	expect(definition_at(10, "missing.gd", 4).empty(),
+		"missing resource path definition returns no location");
 	expect(workspace.close_document(consumer_uri, &error), "qualified-definition overlay closes");
 	auto symbols = workspace.document_symbols(consumer_uri);
 	expect(!symbols.empty() && symbols.front().children.size() == 3, "document symbols include members");

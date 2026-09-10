@@ -211,6 +211,12 @@ process.stdin.write(packet({
     "method": "textDocument/definition",
     "params": {"textDocument": {"uri": uri}, "position": {"line": 2, "character": 27}},
 }))
+process.stdin.write(packet({
+    "jsonrpc": "2.0",
+    "id": 75,
+    "method": "textDocument/definition",
+    "params": {"textDocument": {"uri": uri}, "position": {"line": 1, "character": 35}},
+}))
 process.stdin.write(packet({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": {}}))
 process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 process.stdin.flush()
@@ -220,6 +226,7 @@ script_signature = read_response(process.stdout, 71)["result"]
 constructor_signature = read_response(process.stdout, 72)["result"]
 closed_signature = read_response(process.stdout, 73)["result"]
 qualified_definition = read_response(process.stdout, 74)["result"]
+path_definition = read_response(process.stdout, 75)["result"]
 shutdown = read_response(process.stdout, 9)
 assert script_signature["activeSignature"] == 0
 assert script_signature["activeParameter"] == 1
@@ -237,6 +244,12 @@ assert qualified_definition[0]["uri"].endswith("/alias_base.gd")
 assert qualified_definition[0]["range"] == {
     "start": {"line": 4, "character": 5},
     "end": {"line": 4, "character": 13},
+}
+assert len(path_definition) == 1
+assert path_definition[0]["uri"].endswith("/alias_base.gd")
+assert path_definition[0]["range"] == {
+    "start": {"line": 0, "character": 0},
+    "end": {"line": 0, "character": 0},
 }
 assert completion_resolve["result"]["detail"] == "func"
 assert rich_resolved["result"]["type"]["name"] == "ChildThing"
