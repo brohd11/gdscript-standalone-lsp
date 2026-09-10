@@ -4,8 +4,15 @@ An experimental language server for Godot 4.6 GDScript. It indexes projects
 directly from disk, so the Godot editor does not need to be running.
 
 It provides completion, signature help, hover information, go to definition,
-document symbols, and diagnostics. An optional bridge can use Godot itself for
-diagnostics while keeping the rest of the language service standalone.
+document symbols, and diagnostics. 
+
+Along with the standalone nature, some custom completions are included. For example, better enum suggestions.
+
+Diagnostics are based off of Godot 4.6. Mostly non-parsable errors are targeted. An optional bridge can use Godot itself for
+diagnostics while keeping the extended completions.
+
+Completion is based off of Godot 4.6 as well. If you are on a different version, generate the extension_api via Godot and
+place the file at: `res://.godot/addons/gdscript_parser/extension_api.json`
 
 ## Install
 
