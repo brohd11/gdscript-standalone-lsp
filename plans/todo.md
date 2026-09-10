@@ -21,3 +21,6 @@ needs to go to actual definition, clicking Types.ExitCode should go to Types scr
 const Types = preload("res://addons/addon_lib/gdsh/internal/types.gd")
 const ExitCode = Types.ExitCode
 ```
+
+
+Seems a class that is missing altogether silently fails

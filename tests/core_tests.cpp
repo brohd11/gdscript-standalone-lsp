@@ -1124,7 +1124,7 @@ int main() {
 	auto *argument_script = find_item(script_completion, "accepts_base");
 	expect(argument_script && argument_script->label == "accepts_base(\xe2\x80\xa6)" &&
 		argument_script->insert_text == "accepts_base(" && argument_script->filter_text == "accepts_base" &&
-		argument_script->detail == "func",
+		argument_script->detail == "func" && argument_script->opens_call,
 		"parameterized script completion displays an ellipsis and inserts a trailing opener");
 	auto *variadic_script = find_item(script_completion, "variadic");
 	expect(variadic_script && variadic_script->label == "variadic(\xe2\x80\xa6)" &&
@@ -1137,11 +1137,13 @@ int main() {
 	auto dictionary_completion = diagnostic_workspace.completion(semantic_valid_uri, {30, 6});
 	auto *zero_argument_native = find_item(dictionary_completion, "keys");
 	expect(zero_argument_native && zero_argument_native->label == "keys()" &&
-		zero_argument_native->insert_text == "keys()", "zero-argument native completion inserts a complete call");
+		zero_argument_native->insert_text == "keys()" && !zero_argument_native->opens_call,
+		"zero-argument native completion inserts a complete call");
 	auto array_completion = diagnostic_workspace.completion(semantic_valid_uri, {51, 16});
 	auto *argument_native = find_item(array_completion, "append_array");
 	expect(argument_native && argument_native->label == "append_array(\xe2\x80\xa6)" &&
-		argument_native->insert_text == "append_array(", "parameterized native completion inserts a trailing opener");
+		argument_native->insert_text == "append_array(" && argument_native->opens_call,
+		"parameterized native completion inserts a trailing opener");
 	auto singleton_completion = diagnostic_workspace.completion(semantic_valid_uri, {32, 8});
 	expect(has_item(singleton_completion, "get_version_info"),
 		"native singleton completion retains instance members despite its class-like identifier");

@@ -270,7 +270,7 @@ void check_member_strings(Harness &harness) {
 		"member-string completion inserts a StringName outside an existing string");
 	auto in_string = harness.body("\ttarget.call(\"<caret>\")\n");
 	auto *raw_build = find_item(in_string, "build");
-	expect(raw_build && raw_build->insert_text == "build",
+	expect(raw_build && raw_build->insert_text == "build" && !raw_build->opens_call,
 		"member-string completion inserts raw text inside an existing string");
 
 	auto config = harness.workspace.completion_config();
@@ -359,7 +359,7 @@ void check_overrides(Harness &harness) {
 	auto *script = find_item(instance, "inherited_typed");
 	expect_result(script && script->label == "inherited_typed(value: int = 4, ...rest) -> String" &&
 		script->insert_text == "inherited_typed(value: int = 4, ...rest) -> String:\n\tpass" &&
-		script->origin_id.ends_with("::inherited_typed"),
+		script->origin_id.ends_with("::inherited_typed") && !script->opens_call,
 		"script overrides insert a complete inherited signature and pass body", instance);
 	auto *native = find_item(instance, "_native_virtual");
 	expect_result(native && native->label == "_native_virtual(delta: float, enabled: bool = true) -> void" &&

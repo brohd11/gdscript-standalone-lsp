@@ -471,7 +471,8 @@ while True:
         assert message["result"]["items"]
         builtin = {item["filterText"]: item for item in message["result"]["items"]}["is_instance_of"]
         assert builtin["label"] == "is_instance_of(\u2026)"
-        assert builtin["insertText"] == "is_instance_of("
+        assert builtin["insertText"] == "is_instance_of"
+        assert "insertTextFormat" not in builtin
         break
 assert not foreign_diagnostic_before_completion
 
@@ -1121,7 +1122,15 @@ def provider_position(needle):
 
 
 server, response = initialize_server(
-    {"rootUri": provider_root.as_uri()}, args=("--api", root / "extension_api.json")
+    {
+        "rootUri": provider_root.as_uri(),
+        "capabilities": {
+            "textDocument": {
+                "completion": {"completionItem": {"snippetSupport": True}}
+            }
+        },
+    },
+    args=("--api", root / "extension_api.json"),
 )
 assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
 server.stdin.write(
@@ -1186,12 +1195,17 @@ global_class_items = provider_responses[160]["items"]
 assert enum_items["State.IDLE"]["data"]["gdscriptLsp"]["provider"] == "enums"
 assert type_items["Product"]["data"]["gdscriptLsp"]["provider"] == "extendedTypeHints"
 assert constructor_items["Product.new"]["data"]["gdscriptLsp"]["provider"] == "constructors"
-assert constructor_items["Product.new"]["insertText"] == "Product.new("
+assert constructor_items["Product.new"]["insertText"] == "Product.new(${1})$0"
+assert constructor_items["Product.new"]["insertTextFormat"] == 2
 assert string_items["build"]["data"]["gdscriptLsp"]["provider"] == "memberStrings"
 assert string_items["build"]["insertText"] == "build"
+assert "insertTextFormat" not in string_items["build"]
 assert "title" in private_items and "_private" not in private_items
+assert private_items["build"]["insertText"] == "build()"
+assert "insertTextFormat" not in private_items["build"]
 assert class_items[0]["filterText"] == "new"
-assert class_items[0]["insertText"] == "new("
+assert class_items[0]["insertText"] == "new(${1})$0"
+assert class_items[0]["insertTextFormat"] == 2
 assert class_items[0]["data"]["gdscriptLsp"]["provider"] == "constructors"
 assert sum(item["filterText"] == "new" for item in class_items) == 1
 assert not {"get_class", "get_rid", "can_instantiate"} & {
@@ -1202,6 +1216,54 @@ assert not {"inherited_method", "get_class", "get_rid", "can_instantiate"} & {
     item["filterText"] for item in global_class_items
 }
 assert provider_responses[155]["items"] == []
+
+# Resolving an item preserves the insertion fields originally selected for the
+# session, even when the insertion style is subsequently reconfigured.
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 161,
+            "method": "completionItem/resolve",
+            "params": constructor_items["Product.new"],
+        }
+    )
+)
+server.stdin.flush()
+resolved_constructor = read_response(server.stdout, 161)["result"]
+assert resolved_constructor["insertText"] == "Product.new(${1})$0"
+assert resolved_constructor["insertTextFormat"] == 2
+
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeConfiguration",
+            "params": {
+                "settings": {
+                    "gdscriptLsp": {"completion": {"callableInsertStyle": "name"}}
+                }
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 162,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": provider_uri},
+                "position": provider_position("var product: Product = "),
+            },
+        }
+    )
+)
+server.stdin.flush()
+name_constructor = items_by_filter(read_response(server.stdout, 162)["result"])["Product.new"]
+assert name_constructor["insertText"] == "Product.new"
+assert "insertTextFormat" not in name_constructor
 
 class_access_source = (
     "extends CompletionProviderBase\n\n"
@@ -1297,6 +1359,53 @@ server.stdin.write(
 )
 server.stdin.flush()
 assert read_response(server.stdout, 157)["result"]["items"] == []
+stop_server(server)
+
+# Clients that deliberately auto-pair an opener inserted by completion can
+# retain the native Godot/Gote convention through initialization options.
+server, response = initialize_server(
+    {
+        "rootUri": provider_root.as_uri(),
+        "initializationOptions": {
+            "gdscriptLsp": {"completion": {"callableInsertStyle": "openParen"}}
+        },
+    },
+    args=("--api", root / "extension_api.json"),
+)
+assert response["result"]["serverInfo"]["name"] == "gdscript-lsp"
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": provider_uri,
+                    "languageId": "gdscript",
+                    "version": 1,
+                    "text": provider_source,
+                }
+            },
+        }
+    )
+)
+server.stdin.write(
+    packet(
+        {
+            "jsonrpc": "2.0",
+            "id": 163,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": provider_uri},
+                "position": provider_position("var product: Product = "),
+            },
+        }
+    )
+)
+server.stdin.flush()
+open_constructor = items_by_filter(read_response(server.stdout, 163)["result"])["Product.new"]
+assert open_constructor["insertText"] == "Product.new("
+assert "insertTextFormat" not in open_constructor
 stop_server(server)
 
 

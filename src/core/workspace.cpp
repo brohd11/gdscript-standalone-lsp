@@ -199,6 +199,7 @@ CompletionItem completion_item(std::string name, std::string detail, std::string
 	if (callable_kind(kind)) {
 		result.label = name + (has_arguments ? "(\xe2\x80\xa6)" : "()");
 		result.insert_text = name + (has_arguments ? "(" : "()");
+		result.opens_call = has_arguments;
 		result.detail = std::move(detail);
 	} else {
 		result.label = name;
@@ -2256,6 +2257,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 		item.filter_text = std::move(filter_text);
 		item.label = item.filter_text + (has_arguments ? "(\xe2\x80\xa6)" : "()");
 		item.insert_text = item.filter_text + (has_arguments ? "(" : "()");
+		item.opens_call = has_arguments;
 		item.kind = SymbolKind::Constructor;
 		item.detail = "constructor";
 		item.symbol_id = type.symbol_id + "::new";

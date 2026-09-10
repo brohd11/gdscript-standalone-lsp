@@ -201,6 +201,7 @@ struct CompletionItem {
 	std::string origin_id;
 	std::string provider;
 	std::string access_kind;
+	bool opens_call = false;
 };
 
 enum class CompletionDisposition : uint8_t {

@@ -33,6 +33,17 @@ using namespace gdscript_lsp;
 
 namespace {
 
+enum class CallableInsertStyle {
+	Auto,
+	Name,
+	OpenParen,
+};
+
+struct LspCompletionConfiguration {
+	CallableInsertStyle callable_insert_style = CallableInsertStyle::Auto;
+	bool snippet_support = false;
+};
+
 json position_json(Position value) {
 	return {{"line", value.line}, {"character", value.character}};
 }
@@ -63,15 +74,30 @@ json symbol_json(const Symbol &symbol) {
 	return result;
 }
 
-json completion_json(const CompletionItem &item) {
+json completion_json(const CompletionItem &item, const LspCompletionConfiguration &configuration) {
+	auto insert_text = item.insert_text.empty() ? item.label : item.insert_text;
+	bool snippet = false;
+	if (item.opens_call && insert_text.ends_with('(')) {
+		switch (configuration.callable_insert_style) {
+			case CallableInsertStyle::Auto:
+				if (configuration.snippet_support) {
+					insert_text += "${1})$0";
+					snippet = true;
+				} else insert_text.pop_back();
+				break;
+			case CallableInsertStyle::Name: insert_text.pop_back(); break;
+			case CallableInsertStyle::OpenParen: break;
+		}
+	}
 	json result = {
 		{"label", item.label},
 		{"kind", static_cast<int>(item.kind)},
 		{"detail", item.detail},
-		{"insertText", item.insert_text.empty() ? item.label : item.insert_text},
+		{"insertText", std::move(insert_text)},
 		{"filterText", item.filter_text.empty() ? item.label : item.filter_text},
 		{"sortText", item.sort_text}
 	};
+	if (snippet) result["insertTextFormat"] = 2;
 	if (!item.documentation.empty()) result["documentation"] = {{"kind", "markdown"}, {"value", item.documentation}};
 	if (!item.symbol_id.empty() || !item.origin_id.empty() || !item.provider.empty() || !item.access_kind.empty()) {
 		result["data"] = {{"gdscriptLsp", {
@@ -370,6 +396,19 @@ bool follows_completion_prefix(std::string_view source, Position position) {
 		completion_prefixes.find(source[offset - 2]) != std::string_view::npos;
 }
 
+bool supports_completion_snippets(const json &params) {
+	auto capabilities = params.find("capabilities");
+	if (capabilities == params.end() || !capabilities->is_object()) return false;
+	auto text_document = capabilities->find("textDocument");
+	if (text_document == capabilities->end() || !text_document->is_object()) return false;
+	auto completion = text_document->find("completion");
+	if (completion == text_document->end() || !completion->is_object()) return false;
+	auto item = completion->find("completionItem");
+	if (item == completion->end() || !item->is_object()) return false;
+	auto support = item->find("snippetSupport");
+	return support != item->end() && support->is_boolean() && support->get<bool>();
+}
+
 std::vector<std::string> merge_uris(std::vector<std::string> first, const std::vector<std::string> &second) {
 	first.insert(first.end(), second.begin(), second.end());
 	std::sort(first.begin(), first.end());
@@ -377,7 +416,8 @@ std::vector<std::string> merge_uris(std::vector<std::string> first, const std::v
 	return first;
 }
 
-void apply_configuration(Workspace &workspace, DiagnosticCoordinator &publisher, const json &settings,
+void apply_configuration(Workspace &workspace, DiagnosticCoordinator &publisher,
+		LspCompletionConfiguration &lsp_completion, const json &settings,
 		const std::optional<EngineConfiguration> &cli_engine = std::nullopt) {
 	if (!settings.is_object()) return;
 	const json *root = &settings;
@@ -406,6 +446,12 @@ void apply_configuration(Workspace &workspace, DiagnosticCoordinator &publisher,
 			}
 		}
 		workspace.set_completion_config(config);
+		if (auto style = completion->find("callableInsertStyle"); style != completion->end() && style->is_string()) {
+			auto value = style->get<std::string>();
+			if (value == "auto") lsp_completion.callable_insert_style = CallableInsertStyle::Auto;
+			else if (value == "name") lsp_completion.callable_insert_style = CallableInsertStyle::Name;
+			else if (value == "openParen") lsp_completion.callable_insert_style = CallableInsertStyle::OpenParen;
+		}
 	}
 	if (auto diagnostics = root->find("diagnostics"); diagnostics != root->end() && diagnostics->is_object()) {
 		if (!cli_engine && diagnostics->contains("engine")) publisher.configure_engine(EngineConfiguration::parse((*diagnostics)["engine"]));
@@ -476,6 +522,7 @@ int main(int argc, char **argv) {
 	std::string error;
 	std::unordered_map<std::string, std::string> buffers;
 	std::unordered_set<std::string> cancelled;
+	LspCompletionConfiguration lsp_completion;
 	bool initialized = false;
 	bool shutdown = false;
 	while (auto message = read_message()) {
@@ -500,8 +547,10 @@ int main(int argc, char **argv) {
 				respond_error(id, -32600, "initialize may only be sent once");
 				continue;
 			}
+			lsp_completion = {};
+			lsp_completion.snippet_support = supports_completion_snippets(params);
 			if (auto options = params.find("initializationOptions"); options != params.end()) {
-				try { apply_configuration(workspace, diagnostics, *options, cli_engine); }
+				try { apply_configuration(workspace, diagnostics, lsp_completion, *options, cli_engine); }
 				catch (const std::exception &error) { respond_error(id, -32602, error.what()); continue; }
 			}
 			auto selected_project = project.empty() ? project_from_initialize(params, error) : find_project_root(project);
@@ -566,7 +615,8 @@ int main(int argc, char **argv) {
 		} else if (method == "textDocument/didSave") {
 			diagnostics.saved(canonical_document_uri(params["textDocument"].value("uri", "")));
 		} else if (method == "workspace/didChangeConfiguration") {
-			try { apply_configuration(workspace, diagnostics, params.value("settings", json::object()), cli_engine); }
+			try { apply_configuration(workspace, diagnostics, lsp_completion,
+				params.value("settings", json::object()), cli_engine); }
 			catch (const std::exception &error) { send({{"jsonrpc", "2.0"}, {"method", "window/logMessage"}, {"params", {{"type", 1}, {"message", error.what()}}}}); }
 		} else if (method == "workspace/didChangeWatchedFiles") {
 			auto generation = diagnostics.begin_update();
@@ -590,7 +640,7 @@ int main(int argc, char **argv) {
 			} else {
 				auto completion = workspace.completion_result(uri, position);
 				json output = json::array();
-				for (const auto &item : completion.items) output.push_back(completion_json(item));
+				for (const auto &item : completion.items) output.push_back(completion_json(item, lsp_completion));
 				respond(id, {{"isIncomplete", completion.is_incomplete}, {"items", std::move(output)}});
 			}
 		} else if (method == "completionItem/resolve") {
@@ -602,7 +652,7 @@ int main(int argc, char **argv) {
 				}
 			}
 			if (auto resolved = workspace.resolve_completion_item(symbol_id)) {
-				auto enriched = completion_json(*resolved);
+				auto enriched = completion_json(*resolved, lsp_completion);
 				for (auto key : {"detail", "documentation"}) {
 					if (enriched.contains(key)) item[key] = enriched[key];
 				}
