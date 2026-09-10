@@ -172,12 +172,47 @@ process.stdin.write(
         }
     )
 )
+signature_source = (
+    "extends RefCounted\n\n"
+    "func sample(位置: int, label: String = \"ok\") -> void:\n\tpass\n\n"
+    "func inspect() -> void:\n"
+    "\tsample(1, \"ok\")\n"
+    "\tString(1)\n"
+)
+process.stdin.write(packet({
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {"textDocument": {
+        "uri": uri, "languageId": "gdscript", "version": 1, "text": signature_source,
+    }},
+}))
+for request_id, line, character in [(71, 6, 11), (72, 7, 9), (73, 6, 16)]:
+    process.stdin.write(packet({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "textDocument/signatureHelp",
+        "params": {"textDocument": {"uri": uri}, "position": {"line": line, "character": character}},
+    }))
 process.stdin.write(packet({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": {}}))
 process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 process.stdin.flush()
-completion_resolve = read_packet(process.stdout)
-rich_resolved = read_packet(process.stdout)
-shutdown = read_packet(process.stdout)
+completion_resolve = read_response(process.stdout, 7)
+rich_resolved = read_response(process.stdout, 8)
+script_signature = read_response(process.stdout, 71)["result"]
+constructor_signature = read_response(process.stdout, 72)["result"]
+closed_signature = read_response(process.stdout, 73)["result"]
+shutdown = read_response(process.stdout, 9)
+assert script_signature["activeSignature"] == 0
+assert script_signature["activeParameter"] == 1
+assert script_signature["signatures"][0]["activeParameter"] == 1
+assert script_signature["signatures"][0]["label"] == (
+    'func sample(位置: int, label: String = "ok") -> void'
+)
+assert script_signature["signatures"][0]["parameters"][0]["label"] == [12, 19]
+assert constructor_signature["activeSignature"] == 1
+assert constructor_signature["signatures"][1]["activeParameter"] == 0
+assert constructor_signature["signatures"][1]["label"] == "func String.new(from: int) -> String"
+assert closed_signature is None
 assert completion_resolve["result"]["detail"] == "func"
 assert rich_resolved["result"]["type"]["name"] == "ChildThing"
 assert rich_resolved["result"]["origin"]["name"] == "local"
@@ -185,6 +220,9 @@ assert rich_resolved["result"]["origin"]["symbolId"].split("@", 1)[0].endswith("
 assert rich_resolved["result"]["accessPaths"][0]["preferred"] is True
 assert initialize["result"]["capabilities"]["completionProvider"]["resolveProvider"] is True
 assert " " not in initialize["result"]["capabilities"]["completionProvider"]["triggerCharacters"]
+assert initialize["result"]["capabilities"]["signatureHelpProvider"] == {
+    "triggerCharacters": ["(", ","], "retriggerCharacters": [","],
+}
 assert shutdown["result"] is None
 assert process.wait(timeout=5) == 0
 

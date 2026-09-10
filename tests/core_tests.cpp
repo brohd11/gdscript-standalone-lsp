@@ -146,6 +146,85 @@ int main() {
 
 	auto consumer_uri = workspace.uri_for_path(fixture / "consumer.gd");
 	{
+		const std::string signature_source =
+			"extends RefCounted\n\n"
+			"class Product:\n\tfunc _init(required: int = 1) -> void:\n\t\tpass\n\n"
+			"func local(位置: int, label: String = \"ok\", ...rest) -> String:\n\treturn label\n\n"
+			"func inspect() -> void:\n"
+			"\tlocal(1, \"ok\")\n"
+			"\tnative_takes(1, \"ok\")\n"
+			"\tprint(\"value\", 2)\n"
+			"\tString(1)\n"
+			"\tProduct.new(1)\n"
+			"\tChildThing.new().label()\n"
+			"\tlocal(1, String(1))\n"
+			"\tlocal(1, \"a,b\")\n"
+			"\tlocal(\n\t\t1,\n\t\t\"ok\"\n\t)\n"
+			"\tmissing(1)\n";
+		expect(workspace.update_document(consumer_uri, signature_source, 100, &error),
+			"signature-help overlay accepted");
+		auto at = [&](std::string_view needle, size_t within) {
+			auto offset = signature_source.find(needle);
+			expect(offset != std::string::npos, "signature-help marker exists: " + std::string(needle));
+			return byte_to_position(signature_source, offset + within);
+		};
+		auto script_help = workspace.signature_help(consumer_uri, at("local(1, \"ok\")", 9));
+		expect(script_help && script_help->signatures.size() == 1 && script_help->active_signature == 0 &&
+			script_help->active_parameter == 1 && script_help->signatures.front().active_parameter == 1,
+			"script signature identifies the active second parameter");
+		if (script_help) {
+			const auto &signature = script_help->signatures.front();
+			expect(signature.label ==
+				"func local(位置: int, label: String = \"ok\", ...rest) -> String",
+				"script signature retains declaration spelling without hover provenance");
+			expect(signature.parameters.size() == 3 && signature.parameters.front().label == "位置: int" &&
+				signature.parameters.front().label_start == 11 && signature.parameters.front().label_end == 18,
+				"signature parameter labels use UTF-16 offsets");
+		}
+		auto native_help = workspace.signature_help(consumer_uri, at("native_takes(1, \"ok\")", 16));
+		expect(native_help && native_help->active_parameter == 1 &&
+			native_help->signatures.front().label ==
+				"func RefCounted.native_takes(value: int, label: String = \"ok\") -> void",
+			"native method signature retains optional parameter metadata");
+		auto utility_help = workspace.signature_help(consumer_uri, at("print(\"value\", 2)", 15));
+		expect(utility_help && utility_help->active_parameter == 1 &&
+			utility_help->signatures.front().parameters.back().label == "...args: Variant",
+			"utility signature highlights its variadic parameter");
+		auto constructor_help = workspace.signature_help(consumer_uri, at("String(1)", 8));
+		expect(constructor_help && constructor_help->signatures.size() == 2 &&
+			constructor_help->active_signature == 1 && constructor_help->active_parameter == 0 &&
+			constructor_help->signatures[1].label == "func String.new(from: int) -> String",
+			"native constructor overload follows the entered argument");
+		auto script_constructor = workspace.signature_help(consumer_uri, at("Product.new(1)", 13));
+		expect(script_constructor && script_constructor->active_parameter == 0 &&
+			script_constructor->signatures.front().label ==
+				"func Product.new(required: int = 1) -> Product",
+			"script constructor uses its _init declaration");
+		auto inherited_help = workspace.signature_help(consumer_uri,
+			at("ChildThing.new().label()", std::string_view("ChildThing.new().label(").size()));
+		expect(inherited_help && inherited_help->signatures.front().label == "func label() -> String" &&
+			!inherited_help->active_parameter,
+			"chained inherited zero-argument method exposes a signature without an active parameter");
+		auto nested_outer = workspace.signature_help(consumer_uri, at("local(1, String(1))", 9));
+		auto nested_inner = workspace.signature_help(consumer_uri,
+			at("String(1))", std::string_view("String(1").size()));
+		expect(nested_outer && nested_outer->active_parameter == 1 && nested_inner &&
+			nested_inner->signatures.size() == 2 && nested_inner->active_signature == 1,
+			"nested calls select the signature belonging to the innermost open call");
+		auto string_help = workspace.signature_help(consumer_uri, at("local(1, \"a,b\")", 12));
+		constexpr std::string_view multiline_call = "local(\n\t\t1,\n\t\t\"ok\"";
+		auto multiline_help = workspace.signature_help(consumer_uri,
+			at(multiline_call, multiline_call.find("\"ok\"")));
+		expect(string_help && string_help->active_parameter == 1 && multiline_help &&
+			multiline_help->active_parameter == 1,
+			"strings and multiline calls retain the enclosing argument index");
+		expect(!workspace.signature_help(consumer_uri, at("missing(1)", 9)),
+			"unresolved callees do not produce signature help");
+		expect(!workspace.signature_help(consumer_uri, at("local(1, \"ok\")", 14)),
+			"signature help closes after the call");
+		expect(workspace.close_document(consumer_uri, &error), "signature-help overlay closes");
+	}
+	{
 		Workspace recovery_workspace;
 		auto native_fixture = std::filesystem::weakly_canonical("tests/fixtures/native");
 		expect(recovery_workspace.open(native_fixture,

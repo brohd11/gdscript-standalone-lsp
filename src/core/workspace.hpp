@@ -53,6 +53,7 @@ public:
 		CompletionProfile profile = CompletionProfile::Full) const;
 	void set_completion_config(CompletionConfig config);
 	CompletionConfig completion_config() const;
+	std::optional<SignatureHelpResult> signature_help(const std::string &uri, Position position) const;
 	std::optional<HoverResult> hover(const std::string &uri, Position position) const;
 	std::vector<Location> definition(const std::string &uri, Position position) const;
 	std::vector<Symbol> document_symbols(const std::string &uri) const;

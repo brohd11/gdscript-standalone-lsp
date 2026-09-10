@@ -82,6 +82,29 @@ json completion_json(const CompletionItem &item) {
 	return result;
 }
 
+json signature_help_json(const SignatureHelpResult &help) {
+	json signatures = json::array();
+	for (const auto &signature : help.signatures) {
+		json parameters = json::array();
+		for (const auto &parameter : signature.parameters) {
+			json value = {{"label", json::array({parameter.label_start, parameter.label_end})}};
+			if (!parameter.documentation.empty()) {
+				value["documentation"] = {{"kind", "markdown"}, {"value", parameter.documentation}};
+			}
+			parameters.push_back(std::move(value));
+		}
+		json value = {{"label", signature.label}, {"parameters", std::move(parameters)}};
+		if (!signature.documentation.empty()) {
+			value["documentation"] = {{"kind", "markdown"}, {"value", signature.documentation}};
+		}
+		if (signature.active_parameter) value["activeParameter"] = *signature.active_parameter;
+		signatures.push_back(std::move(value));
+	}
+	json result = {{"signatures", std::move(signatures)}, {"activeSignature", help.active_signature}};
+	if (help.active_parameter) result["activeParameter"] = *help.active_parameter;
+	return result;
+}
+
 json type_json(const ResolvedType &type) {
 	json arguments = json::array();
 	for (const auto &argument : type.arguments) arguments.push_back(type_json(argument));
@@ -323,6 +346,8 @@ json initialize_result(bool space_prefix) {
 			{"textDocumentSync", {{"openClose", true}, {"change", 2}, {"save", {{"includeText", false}}}}},
 			{"completionProvider", {{"triggerCharacters", std::move(trigger_characters)},
 				{"resolveProvider", true}}},
+			{"signatureHelpProvider", {{"triggerCharacters", json::array({"(", ","})},
+				{"retriggerCharacters", json::array({","})}}},
 			{"hoverProvider", true},
 			{"definitionProvider", true},
 			{"documentSymbolProvider", true},
@@ -583,6 +608,11 @@ int main(int argc, char **argv) {
 				}
 			}
 			respond(id, std::move(item));
+		} else if (method == "textDocument/signatureHelp") {
+			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
+			auto help = workspace.signature_help(uri, parse_position(params["position"]));
+			if (!help) respond(id, nullptr);
+			else respond(id, signature_help_json(*help));
 		} else if (method == "textDocument/hover") {
 			auto uri = canonical_document_uri(params["textDocument"].value("uri", ""));
 			auto hover = workspace.hover(uri, parse_position(params["position"]));

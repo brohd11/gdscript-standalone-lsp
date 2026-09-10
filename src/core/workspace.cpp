@@ -2697,6 +2697,203 @@ CompletionConfig Workspace::completion_config() const {
 	return completion_config_;
 }
 
+std::optional<SignatureHelpResult> Workspace::signature_help(const std::string &uri, Position position) const {
+	std::shared_lock lock(mutex_);
+	auto *document = find_document(uri);
+	if (!document) return std::nullopt;
+	auto site = analyze_caret(*document, position);
+	if (!site.call || site.lexical == CaretLexicalContext::Comment) return std::nullopt;
+	auto *context = document->class_at(position);
+	const auto &call = *site.call;
+
+	struct ParameterSpec {
+		std::string name;
+		std::string type;
+		std::string default_value;
+		bool optional = false;
+		bool variadic = false;
+	};
+	struct Candidate {
+		SignatureInformation information;
+		std::vector<ParameterSpec> parameters;
+		const ClassRecord *type_context = nullptr;
+		bool variadic = false;
+		bool arity_known = true;
+	};
+	std::vector<Candidate> candidates;
+
+	auto append_candidate = [&](std::string callable_name, std::string return_type,
+			std::vector<ParameterSpec> parameters, std::string documentation,
+			const ClassRecord *type_context, bool is_static = false, bool arity_known = true) {
+		Candidate candidate;
+		candidate.type_context = type_context;
+		candidate.arity_known = arity_known;
+		candidate.parameters = std::move(parameters);
+		candidate.variadic = std::any_of(candidate.parameters.begin(), candidate.parameters.end(),
+			[](const ParameterSpec &parameter) { return parameter.variadic; });
+		candidate.information.documentation = std::move(documentation);
+		auto &label = candidate.information.label;
+		label = is_static ? "static func " : "func ";
+		label += callable_name + "(";
+		for (size_t index = 0; index < candidate.parameters.size(); ++index) {
+			if (index) label += ", ";
+			const auto &parameter = candidate.parameters[index];
+			auto byte_start = label.size();
+			auto start = byte_to_position(label, label.size()).character;
+			if (parameter.variadic) label += "...";
+			label += parameter.name.empty() ? "arg" : parameter.name;
+			if (!parameter.type.empty()) label += ": " + parameter.type;
+			if (parameter.optional && !parameter.default_value.empty()) label += " = " + parameter.default_value;
+			auto end = byte_to_position(label, label.size()).character;
+			candidate.information.parameters.push_back({label.substr(byte_start), start, end, {}});
+		}
+		label += ") -> " + (return_type.empty() ? "Variant" : return_type);
+		candidates.push_back(std::move(candidate));
+	};
+
+	auto script_parameters = [](const Symbol &function) {
+		std::vector<ParameterSpec> result;
+		for (const auto &child : function.children) {
+			if (!child.is_parameter) continue;
+			result.push_back({child.name, child.declared_type, child.initializer,
+				!child.initializer.empty(), child.is_variadic});
+		}
+		return result;
+	};
+	auto native_parameters = [](const CallableSignature &signature) {
+		std::vector<ParameterSpec> result;
+		for (const auto &argument : signature.arguments) {
+			result.push_back({argument.name, normalize_api_type(argument.type), argument.default_value,
+				argument.has_default, false});
+		}
+		if (signature.is_vararg) result.push_back({"args", "Variant", {}, false, true});
+		return result;
+	};
+	auto owner_context = [&](const Symbol &function) {
+		auto owner = symbol_owners_.find(function.id);
+		return owner == symbol_owners_.end() ? context : find_class(owner->second);
+	};
+	auto add_script = [&](const Symbol &function, std::string name = {}) {
+		append_candidate(name.empty() ? function.name : std::move(name),
+			function.declared_type.empty() ? "Variant" : function.declared_type,
+			script_parameters(function), function.documentation, owner_context(function), function.is_static);
+	};
+	auto add_native = [&](std::string name, const CallableSignature &signature, std::string documentation = {},
+			bool is_static = false, const ClassRecord *type_context = nullptr) {
+		append_candidate(std::move(name), normalize_api_type(signature.return_type), native_parameters(signature),
+			std::move(documentation), type_context, is_static, signature.arity_known);
+	};
+	auto infer = [&](std::string expression) {
+		std::vector<std::string> stack;
+		return infer_expression(std::move(expression), *document, context, position, stack);
+	};
+
+	ResolvedType constructed;
+	if (call.callee == "new" && context) {
+		constructed = {TypeKind::ScriptClass, context->symbol.name, context->symbol.id, false};
+	} else if (auto member = trailing_member(call.callee); member && member->second == "new") {
+		constructed = infer(member->first);
+	} else {
+		auto direct = infer(call.callee);
+		if (!direct.instance && direct.kind == TypeKind::Builtin) constructed = std::move(direct);
+	}
+	if (!constructed.instance && (constructed.kind == TypeKind::ScriptClass ||
+			constructed.kind == TypeKind::NativeClass || constructed.kind == TypeKind::Builtin)) {
+		auto constructor_name = constructed.name + ".new";
+		if (constructed.kind == TypeKind::ScriptClass) {
+			auto *record = find_class(constructed.symbol_id);
+			if (record) {
+				if (auto *constructor = find_member(*record, "_init")) {
+					append_candidate(constructor_name, constructed.name, script_parameters(*constructor),
+						constructor->documentation, record);
+				} else append_candidate(constructor_name, constructed.name, {}, {}, record);
+			}
+		} else if (auto *constructors = native_api_.constructors(constructed.name);
+				constructors && !constructors->empty()) {
+			for (const auto &signature : *constructors) {
+				append_candidate(constructor_name, constructed.name, native_parameters(signature), {},
+					context, false, signature.arity_known);
+			}
+		} else append_candidate(constructor_name, constructed.name, {}, {}, context);
+	}
+
+	if (candidates.empty()) {
+		auto callable = infer(call.callee);
+		auto id = callable.symbol_id;
+		if (id.starts_with("native:")) {
+			auto separator = id.rfind("::");
+			if (separator != std::string::npos) {
+				auto owner = id.substr(7, separator - 7);
+				auto name = id.substr(separator + 2);
+				if (auto *member = native_api_.find_member(owner, name); member && member->signature) {
+					add_native(member->owner + "." + member->name, *member->signature,
+						member->documentation, member->is_static);
+				}
+			}
+		} else if (id.starts_with("utility:")) {
+			auto name = id.substr(8);
+			if (auto *signature = native_api_.find_utility_function(name)) add_native(name, *signature);
+		} else if (id.starts_with("builtin:")) {
+			auto name = id.substr(8);
+			if (auto *function = find_gdscript_builtin_function(name)) {
+				add_native(std::string(function->name), function->signature);
+			}
+		} else if (auto found = symbols_.find(id); found != symbols_.end() && callable_kind(found->second->kind)) {
+			add_script(*found->second);
+		}
+		if (candidates.empty() && context && is_identifier(call.callee)) {
+			auto base = native_base(*context);
+			if (auto *member = native_api_.find_member(base, call.callee); member && member->signature) {
+				add_native(member->owner + "." + member->name, *member->signature,
+					member->documentation, member->is_static);
+			}
+		}
+	}
+	if (candidates.empty()) return std::nullopt;
+
+	const bool current_started = !call.arguments.empty() && !call.arguments.back().empty();
+	const size_t occupied_slots = call.argument_index + ((call.argument_index > 0 || current_started) ? 1 : 0);
+	auto rank = [&](const Candidate &candidate, size_t order) {
+		const auto parameter_count = candidate.parameters.size();
+		const bool flexible = candidate.variadic || !candidate.arity_known;
+		const bool lacks_active = occupied_slots > 0 && call.argument_index >= parameter_count && !flexible;
+		size_t mismatches = 0;
+		for (size_t index = 0; index < call.arguments.size(); ++index) {
+			if (call.arguments[index].empty()) continue;
+			const ParameterSpec *parameter = nullptr;
+			if (index < parameter_count) parameter = &candidate.parameters[index];
+			else if (candidate.variadic && parameter_count) parameter = &candidate.parameters.back();
+			if (!parameter || parameter->type.empty()) continue;
+			auto actual = infer(call.arguments[index]);
+			auto expected = type_from_name(parameter->type, candidate.type_context);
+			if (actual.known() && expected.known() && !is_assignable(expected, actual)) ++mismatches;
+		}
+		size_t arity_gap = 0;
+		if (!flexible && parameter_count < occupied_slots) arity_gap = occupied_slots - parameter_count + 1000;
+		else if (parameter_count > occupied_slots) arity_gap = parameter_count - occupied_slots;
+		return std::tuple{lacks_active, mismatches, arity_gap, order};
+	};
+	size_t active_signature = 0;
+	for (size_t index = 1; index < candidates.size(); ++index) {
+		if (rank(candidates[index], index) < rank(candidates[active_signature], active_signature)) {
+			active_signature = index;
+		}
+	}
+
+	SignatureHelpResult result;
+	result.active_signature = static_cast<uint32_t>(active_signature);
+	for (auto &candidate : candidates) {
+		if (call.argument_index < candidate.information.parameters.size()) {
+			candidate.information.active_parameter = static_cast<uint32_t>(call.argument_index);
+		} else if (candidate.variadic && !candidate.information.parameters.empty()) {
+			candidate.information.active_parameter = static_cast<uint32_t>(candidate.information.parameters.size() - 1);
+		}
+		result.signatures.push_back(std::move(candidate.information));
+	}
+	result.active_parameter = result.signatures[active_signature].active_parameter;
+	return result;
+}
+
 std::optional<HoverResult> Workspace::hover(const std::string &uri, Position position) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);

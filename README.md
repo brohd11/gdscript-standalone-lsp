@@ -100,7 +100,7 @@ Disable Godot Tools' headless LSP mode and point it at the adapter in VS Code's 
 
 Start the adapter before opening VS Code, or use the extension's retry action after starting it. A Godot editor can still run separately for debugging and other editor-backed features; leave its own LSP server on a different port. The adapter only exposes the capabilities advertised by this standalone server. `--project`, `--api`, and the optional `--space-prefix` completion behavior may be combined with `--tcp` as shown above.
 
-It implements incremental document synchronization, completion, completion-item resolve, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType`, `gdscript/resolveExpression`, and `gdscript/documentSymbols` requests.
+It implements incremental document synchronization, completion, completion-item resolve, signature help, hover, definition, document symbols, push and pull diagnostics, and the custom `gdscript/resolveType`, `gdscript/resolveExpression`, and `gdscript/documentSymbols` requests.
 
 Standard document symbols include best-known types in `detail` and expose each physical inner class exactly once as a separate outline root. `gdscript/documentSymbols` accepts standard document-symbol parameters and returns `{ version, symbols }`; its cached symbol tree adds declaration IDs, owners, resolved types, return types, origins, and semantic flags. The GDExtension `document_symbols()` method exposes the same rich fields.
 

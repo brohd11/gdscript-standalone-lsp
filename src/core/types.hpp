@@ -231,6 +231,26 @@ struct CompletionResult {
 	bool is_incomplete = false;
 };
 
+struct SignatureParameter {
+	std::string label;
+	uint32_t label_start = 0; // UTF-16 code units into SignatureInformation::label.
+	uint32_t label_end = 0;
+	std::string documentation;
+};
+
+struct SignatureInformation {
+	std::string label;
+	std::string documentation;
+	std::vector<SignatureParameter> parameters;
+	std::optional<uint32_t> active_parameter;
+};
+
+struct SignatureHelpResult {
+	std::vector<SignatureInformation> signatures;
+	uint32_t active_signature = 0;
+	std::optional<uint32_t> active_parameter;
+};
+
 struct Location {
 	std::string uri;
 	Range range;
