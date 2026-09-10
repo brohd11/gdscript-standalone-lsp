@@ -8,13 +8,17 @@
 #include "core/workspace.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 namespace gdscript_lsp {
 namespace {
@@ -49,6 +53,14 @@ struct Binding {
 	bool written = false;
 };
 
+enum class ConstantState {
+	Unknown,
+	Constant,
+	Runtime,
+};
+
+using ReducedValue = std::variant<std::monostate, bool, int64_t, double, std::string>;
+
 struct Value {
 	ResolvedType type;
 	std::shared_ptr<Binding> binding;
@@ -57,6 +69,9 @@ struct Value {
 	std::vector<CallableSignature> signatures;
 	bool resolved = false;
 	bool callable = false;
+	ConstantState constant = ConstantState::Unknown;
+	ReducedValue reduced;
+	bool suppress_invalid_constant = false;
 	// Script signature type names are relative to the class that declares the
 	// callable, not the class containing the call site.
 	std::string callable_context_id;
@@ -64,7 +79,8 @@ struct Value {
 	Value(ResolvedType p_type, std::vector<CallableSignature> p_signatures,
 			bool p_resolved, bool p_callable, std::string p_callable_context_id = {}) :
 			type(std::move(p_type)), signatures(std::move(p_signatures)), resolved(p_resolved),
-			callable(p_callable), callable_context_id(std::move(p_callable_context_id)) {}
+			callable(p_callable), constant(p_resolved ? ConstantState::Runtime : ConstantState::Unknown),
+			callable_context_id(std::move(p_callable_context_id)) {}
 };
 
 using Scope = std::unordered_map<std::string, Value>;
@@ -86,11 +102,111 @@ bool nullable_return_type(const ResolvedType &type) {
 
 std::optional<std::string> string_literal_value(std::string value) {
 	value = trim(value);
-	if (value.starts_with('&')) value.erase(value.begin());
+	if (value.starts_with('&') || value.starts_with('^')) value.erase(value.begin());
 	if (value.size() < 2 || (value.front() != '"' && value.front() != '\'') || value.back() != value.front()) {
 		return std::nullopt;
 	}
 	return value.substr(1, value.size() - 2);
+}
+
+std::optional<int64_t> integer_literal_value(std::string value) {
+	value.erase(std::remove(value.begin(), value.end(), '_'), value.end());
+	int base = 10;
+	size_t offset = 0;
+	if (value.starts_with("0x") || value.starts_with("0X")) { base = 16; offset = 2; }
+	else if (value.starts_with("0o") || value.starts_with("0O")) { base = 8; offset = 2; }
+	else if (value.starts_with("0b") || value.starts_with("0B")) { base = 2; offset = 2; }
+	int64_t result = 0;
+	auto [end, error] = std::from_chars(value.data() + offset, value.data() + value.size(), result, base);
+	return error == std::errc{} && end == value.data() + value.size() ?
+		std::optional<int64_t>(result) : std::nullopt;
+}
+
+ConstantState combined_constant_state(const std::vector<Value> &values) {
+	bool unknown = false;
+	for (const auto &value : values) {
+		if (value.constant == ConstantState::Runtime) return ConstantState::Runtime;
+		if (value.constant == ConstantState::Unknown) unknown = true;
+	}
+	return unknown ? ConstantState::Unknown : ConstantState::Constant;
+}
+
+std::optional<std::string> reduced_text(const Value &value, char format = 's') {
+	std::ostringstream stream;
+	if (auto item = std::get_if<std::string>(&value.reduced)) return *item;
+	if (auto item = std::get_if<int64_t>(&value.reduced)) {
+		if (format == 'x' || format == 'X') {
+			stream << std::hex;
+			if (format == 'X') stream << std::uppercase;
+		} else if (format == 'o') stream << std::oct;
+		stream << *item;
+		return stream.str();
+	}
+	if (auto item = std::get_if<double>(&value.reduced)) {
+		stream << *item;
+		return stream.str();
+	}
+	if (auto item = std::get_if<bool>(&value.reduced)) return *item ? "true" : "false";
+	return std::nullopt;
+}
+
+std::optional<std::string> format_constant_string(std::string_view pattern, const Value &argument) {
+	std::vector<const Value *> arguments;
+	if (argument.array_literal) {
+		for (const auto &element : argument.elements) arguments.push_back(&element);
+	} else {
+		arguments.push_back(&argument);
+	}
+	std::string result;
+	size_t argument_index = 0;
+	for (size_t index = 0; index < pattern.size(); ++index) {
+		if (pattern[index] != '%') {
+			result += pattern[index];
+			continue;
+		}
+		if (++index >= pattern.size()) return std::nullopt;
+		if (pattern[index] == '%') {
+			result += '%';
+			continue;
+		}
+		while (index < pattern.size() && (pattern[index] == '-' || pattern[index] == '+' ||
+				pattern[index] == '0' || pattern[index] == ' ' || pattern[index] == '.')) ++index;
+		while (index < pattern.size() && std::isdigit(static_cast<unsigned char>(pattern[index]))) ++index;
+		if (index >= pattern.size() || argument_index >= arguments.size()) return std::nullopt;
+		auto specifier = pattern[index];
+		if (specifier != 's' && specifier != 'd' && specifier != 'i' && specifier != 'o' &&
+				specifier != 'x' && specifier != 'X' && specifier != 'f') return std::nullopt;
+		auto replacement = reduced_text(*arguments[argument_index++], specifier);
+		if (!replacement) return std::nullopt;
+		result += *replacement;
+	}
+	return argument_index == arguments.size() ? std::optional<std::string>(std::move(result)) : std::nullopt;
+}
+
+bool constant_math_utility(std::string_view name) {
+	static const std::unordered_set<std::string_view> functions = {
+		"sin", "cos", "tan", "sinh", "cosh", "tanh", "asin", "acos", "atan", "atan2",
+		"asinh", "acosh", "atanh", "sqrt", "fmod", "fposmod", "posmod", "floor", "floorf",
+		"floori", "ceil", "ceilf", "ceili", "round", "roundf", "roundi", "abs", "absf", "absi",
+		"sign", "signf", "signi", "snapped", "snappedf", "snappedi", "pow", "log", "exp",
+		"is_nan", "is_inf", "is_equal_approx", "is_zero_approx", "is_finite", "ease", "step_decimals",
+		"lerp", "lerpf", "cubic_interpolate", "cubic_interpolate_angle", "cubic_interpolate_in_time",
+		"cubic_interpolate_angle_in_time", "bezier_interpolate", "bezier_derivative", "angle_difference",
+		"lerp_angle", "inverse_lerp", "remap", "smoothstep", "move_toward", "rotate_toward",
+		"deg_to_rad", "rad_to_deg", "linear_to_db", "db_to_linear", "wrap", "wrapi", "wrapf",
+		"max", "maxi", "maxf", "min", "mini", "minf", "clamp", "clampi", "clampf",
+		"nearest_po2", "pingpong",
+	};
+	return functions.contains(name);
+}
+
+bool foldable_builtin_constructor(std::string_view name) {
+	static const std::unordered_set<std::string_view> reference_backed = {
+		"Object", "Dictionary", "Array", "PackedByteArray", "PackedInt32Array", "PackedInt64Array",
+		"PackedFloat32Array", "PackedFloat64Array", "PackedStringArray", "PackedVector2Array",
+		"PackedVector3Array", "PackedColorArray", "PackedVector4Array",
+	};
+	return !reference_backed.contains(name);
 }
 
 } // namespace
@@ -102,6 +218,8 @@ public:
 			workspace(p_workspace), document(p_document), suppressions(p_suppressions) {}
 
 	std::vector<Diagnostic> run() {
+		collect_member_constants(document.syntax_root());
+		for (const auto &id : member_constant_order) resolve_member_constant(id);
 		analyze_class_container(document.syntax_root());
 		return std::move(diagnostics);
 	}
@@ -113,11 +231,90 @@ private:
 	std::vector<Scope> scopes;
 	std::vector<Diagnostic> diagnostics;
 	WarningSuppressions suppressions;
+	struct ConstantDeclaration {
+		const SyntaxNode *node = nullptr;
+		const SyntaxNode *value = nullptr;
+		const Symbol *symbol = nullptr;
+		const ClassRecord *owner = nullptr;
+	};
+	std::unordered_map<std::string, ConstantDeclaration> member_constants;
+	std::vector<std::string> member_constant_order;
+	std::unordered_map<std::string, Value> resolved_constants;
+	std::unordered_set<std::string> resolving_constants;
+	std::unordered_set<std::string> reported_constant_cycles;
 	struct FunctionBindings {
 		std::vector<std::shared_ptr<Binding>> declarations;
 		bool damaged = false;
 	};
 	std::vector<FunctionBindings> functions;
+
+	Value constant_value(ResolvedType type, ReducedValue reduced = {}) const {
+		Value result{std::move(type), {}, true, false};
+		result.constant = ConstantState::Constant;
+		result.reduced = std::move(reduced);
+		return result;
+	}
+
+	const Symbol *constant_symbol(const SyntaxNode &node, const ClassRecord *owner) const {
+		if (!owner) return nullptr;
+		auto *name = field(node, "name");
+		if (!name) return nullptr;
+		auto spelling = text(document, *name);
+		for (const auto &member : owner->members) {
+			if (member.kind == SymbolKind::Constant && member.name == spelling &&
+					member.range.start == node.range.start) return &member;
+		}
+		return nullptr;
+	}
+
+	void collect_member_constants(const SyntaxNode &container) {
+		for (const auto &node : container.children) {
+			if (node.kind == "const_statement" && !node.has_error) {
+				auto *owner = document.class_at(node.range.start);
+				auto *symbol = constant_symbol(node, owner);
+				if (auto *value = field(node, "value"); symbol && value) {
+					member_constants[symbol->id] = {&node, value, symbol, owner};
+					member_constant_order.push_back(symbol->id);
+				}
+			} else if (node.kind == "class_definition") {
+				if (auto *body = field(node, "body")) collect_member_constants(*body);
+			}
+		}
+	}
+
+	void report_invalid_constant(const SyntaxNode &node, const SyntaxNode &value) {
+		auto *name = field(node, "name");
+		if (!name) return;
+		add("invalid-constant", "Assigned value for constant \"" + text(document, *name) +
+			"\" isn't a constant expression.", value.range);
+	}
+
+	Value resolve_member_constant(const std::string &id) {
+		if (auto found = resolved_constants.find(id); found != resolved_constants.end()) return found->second;
+		auto declaration = member_constants.find(id);
+		if (declaration == member_constants.end()) return {};
+		if (!resolving_constants.insert(id).second) {
+			if (reported_constant_cycles.insert(id).second) {
+				add("invalid-constant", "Could not resolve member \"" + declaration->second.symbol->name +
+					"\": Cyclic reference.", declaration->second.value->range);
+			}
+			Value cycle;
+			cycle.constant = ConstantState::Runtime;
+			cycle.suppress_invalid_constant = true;
+			return cycle;
+		}
+		auto *saved_class = current_class;
+		current_class = declaration->second.owner;
+		auto result = require_value(evaluate(*declaration->second.value), declaration->second.value->range);
+		check_declared_assignment(*declaration->second.node, result);
+		if (result.constant == ConstantState::Runtime && !result.suppress_invalid_constant) {
+			report_invalid_constant(*declaration->second.node, *declaration->second.value);
+		}
+		current_class = saved_class;
+		resolving_constants.erase(id);
+		resolved_constants[id] = result;
+		return result;
+	}
 
 	void warn(std::string code, std::string message, Range range) {
 		auto level = workspace.warning_policy_.level(code, document.resource_path());
@@ -198,12 +395,16 @@ private:
 		return result;
 	}
 
-	Value symbol_value(const Symbol &symbol, Position position) const {
+	Value symbol_value(const Symbol &symbol, Position position) {
+		if (symbol.kind == SymbolKind::Constant) {
+			if (member_constants.contains(symbol.id)) return resolve_member_constant(symbol.id);
+		}
 		Value result;
 		result.resolved = true;
 		if (symbol.kind == SymbolKind::Method || symbol.kind == SymbolKind::Constructor) {
 			result.type = {TypeKind::Callable, "Callable", symbol.id};
 			result.callable = true;
+			result.constant = ConstantState::Runtime;
 			result.signatures.push_back(script_signature(symbol));
 			if (auto owner = workspace.symbol_owners_.find(symbol.id); owner != workspace.symbol_owners_.end()) {
 				result.callable_context_id = owner->second;
@@ -212,6 +413,15 @@ private:
 		}
 		std::vector<std::string> stack;
 		result.type = workspace.type_of_symbol(symbol, document, position, stack);
+		if (symbol.kind == SymbolKind::Constant || symbol.kind == SymbolKind::Enum ||
+				symbol.kind == SymbolKind::Class) {
+			result.constant = ConstantState::Constant;
+			if (symbol.kind == SymbolKind::Constant) {
+				if (auto value = string_literal_value(symbol.initializer)) result.reduced = *value;
+			}
+		} else {
+			result.constant = ConstantState::Runtime;
+		}
 		return result;
 	}
 
@@ -223,10 +433,10 @@ private:
 				if (found->second.binding && read) found->second.binding->read = true;
 				if (call_target && !found->second.callable) {
 					if (auto *utility = workspace.native_api_.find_utility_function(name)) {
-						return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
+						return {{TypeKind::Callable, "Callable", "utility:" + std::string(name)}, {*utility}, true, true};
 					}
 					if (auto *builtin = find_gdscript_builtin_function(name)) {
-						return {{TypeKind::Callable, "Callable"}, {builtin->signature}, true, true};
+						return {{TypeKind::Callable, "Callable", "builtin:" + std::string(name)}, {builtin->signature}, true, true};
 					}
 				}
 				return found->second;
@@ -275,10 +485,10 @@ private:
 			return {{TypeKind::NativeClass, *singleton, "native:" + *singleton, true}, {}, true, false};
 		}
 		if (auto *utility = workspace.native_api_.find_utility_function(name)) {
-			return {{TypeKind::Callable, "Callable"}, {*utility}, true, true};
+			return {{TypeKind::Callable, "Callable", "utility:" + std::string(name)}, {*utility}, true, true};
 		}
 		if (auto *builtin = find_gdscript_builtin_function(name)) {
-			return {{TypeKind::Callable, "Callable"}, {builtin->signature}, true, true};
+			return {{TypeKind::Callable, "Callable", "builtin:" + std::string(name)}, {builtin->signature}, true, true};
 		}
 		if (name == "range") {
 			return {{TypeKind::Callable, "Callable"}, {
@@ -294,13 +504,15 @@ private:
 			return {{TypeKind::Callable, "Callable"}, {{"Variant", {{"path", "String", false}}, false}}, true, true};
 		}
 		if (workspace.native_api_.is_global_enum(name)) {
-			return {{TypeKind::Enum, std::string(name), "global:" + std::string(name), false}, {}, true, false};
+			return constant_value({TypeKind::Enum, std::string(name), "global:" + std::string(name), false});
 		}
 		if (auto enumeration = workspace.native_api_.global_enum_for_value(name)) {
-			return {{TypeKind::Enum, *enumeration, "global:" + *enumeration, false}, {}, true, false};
+			auto result = constant_value({TypeKind::Enum, *enumeration, "global:" + *enumeration, false});
+			if (auto value = workspace.native_api_.global_enum_value(name)) result.reduced = *value;
+			return result;
 		}
 		if (workspace.native_api_.has_global_symbol(name) || name == "PI" || name == "TAU" || name == "INF" || name == "NAN") {
-			return {{TypeKind::Builtin, "float"}, {}, true, false};
+			return constant_value({TypeKind::Builtin, "float"});
 		}
 		auto type = workspace.type_from_name(std::string(name), current_class);
 		if (type.known()) {
@@ -319,6 +531,7 @@ private:
 			}
 			type.instance = false;
 			Value result{type, {}, true, false};
+			result.constant = ConstantState::Constant;
 			if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
 				if (auto *constructors = workspace.native_api_.constructors(type.name)) {
 					result.signatures = *constructors;
@@ -354,6 +567,11 @@ private:
 				ResolvedType{TypeKind::Builtin, "int"} : workspace.type_from_name(member.type, current_class);
 			if (!result.type.known()) result.type = {TypeKind::Variant, "Variant"};
 		}
+		if (member.kind == SymbolKind::Constant || member.kind == SymbolKind::Enum) {
+			result.constant = ConstantState::Constant;
+		} else {
+			result.constant = ConstantState::Runtime;
+		}
 		return result;
 	}
 
@@ -367,8 +585,11 @@ private:
 	Value member_value(const Value &receiver, std::string_view name, Range range,
 			MemberAccessKind access = MemberAccessKind::Property) {
 		if (!receiver.resolved || !receiver.type.known()) return {};
-		if (receiver.type.kind == TypeKind::Variant || (receiver.type.kind == TypeKind::Builtin && receiver.type.name == "Dictionary"))
-			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+		if (receiver.type.kind == TypeKind::Variant || (receiver.type.kind == TypeKind::Builtin && receiver.type.name == "Dictionary")) {
+			Value result{{TypeKind::Variant, "Variant"}, {}, true, false};
+			result.constant = receiver.constant;
+			return result;
+		}
 		if (name == "new" && !receiver.type.instance &&
 			(receiver.type.kind == TypeKind::ScriptClass || receiver.type.kind == TypeKind::NativeClass)) {
 			Value result{{TypeKind::Callable, "Callable"}, {}, true, true};
@@ -395,7 +616,9 @@ private:
 						auto method = member->kind == SymbolKind::Method || member->kind == SymbolKind::Function ||
 							member->kind == SymbolKind::Constructor;
 						add_instance_member_access(name, receiver.type, range, method);
-						return {};
+						Value result;
+						result.constant = ConstantState::Runtime;
+						return result;
 					}
 					return symbol_value(*member, range.start);
 				}
@@ -404,9 +627,13 @@ private:
 				if (!native.empty()) if (auto *member = workspace.native_api_.find_member(native, name)) {
 					if (!receiver.type.instance && !is_type_level_member(*member)) {
 						add_instance_member_access(name, receiver.type, range, member->signature.has_value());
-						return {};
+						Value result;
+						result.constant = ConstantState::Runtime;
+						return result;
 					}
-					return native_member_value(*member);
+					auto result = native_member_value(*member);
+					if (!result.callable && result.constant != ConstantState::Constant) result.constant = receiver.constant;
+					return result;
 				}
 			}
 		} else if (receiver.type.kind == TypeKind::NativeClass || receiver.type.kind == TypeKind::Builtin ||
@@ -415,21 +642,25 @@ private:
 				if (!receiver.type.instance && receiver.type.kind == TypeKind::NativeClass &&
 						!is_type_level_member(*member)) {
 					add_instance_member_access(name, receiver.type, range, member->signature.has_value());
-					return {};
+					Value result;
+					result.constant = ConstantState::Runtime;
+					return result;
 				}
-				return native_member_value(*member);
+				auto result = native_member_value(*member);
+				if (!result.callable && result.constant != ConstantState::Constant) result.constant = receiver.constant;
+				return result;
 			}
 		} else if (receiver.type.kind == TypeKind::Enum) {
 			if (receiver.type.symbol_id.starts_with("global:") && workspace.native_api_.global_enum_has_value(
 					receiver.type.symbol_id.substr(7), name)) {
-				return {receiver.type, {}, true, false};
+				return constant_value(receiver.type);
 			}
 			if (receiver.type.symbol_id.starts_with("nativeenum:")) {
 				auto qualified = receiver.type.symbol_id.substr(11);
 				auto separator = qualified.rfind('.');
 				if (separator != std::string::npos && workspace.native_api_.enum_has_value(
 						qualified.substr(0, separator), qualified.substr(separator + 1), name)) {
-					return {receiver.type, {}, true, false};
+					return constant_value(receiver.type);
 				}
 			}
 			for (const auto &[id, record] : workspace.classes_) {
@@ -522,13 +753,41 @@ private:
 			return {};
 		}
 		target.instance = true;
-		return {target, {}, true, false};
+		Value result{target, {}, true, false};
+		result.constant = source.constant;
+		result.reduced = source.reduced;
+		return result;
 	}
 
 	std::vector<const SyntaxNode *> argument_nodes(const SyntaxNode *arguments) const {
 		std::vector<const SyntaxNode *> result;
 		if (!arguments) return result;
 		for (const auto &child : arguments->children) if (child.kind != "comment") result.push_back(&child);
+		return result;
+	}
+
+	Value call_result(const Value &callee, const std::vector<Value> &arguments, ResolvedType type) const {
+		Value result{std::move(type), {}, true, false};
+		result.suppress_invalid_constant = std::any_of(arguments.begin(), arguments.end(),
+			[](const Value &argument) { return argument.suppress_invalid_constant; });
+		if (combined_constant_state(arguments) != ConstantState::Constant) return result;
+		bool constant_call = false;
+		if (callee.type.symbol_id.starts_with("utility:")) {
+			constant_call = constant_math_utility(callee.type.symbol_id.substr(8));
+		} else if (callee.type.symbol_id.starts_with("builtin:")) {
+			constant_call = true; // char(), is_instance_of(), and len() are constant in Godot 4.6.
+		} else if (callee.callable && callee.type.kind == TypeKind::Builtin && !callee.type.instance) {
+			constant_call = foldable_builtin_constructor(callee.type.name);
+		}
+		if (!constant_call) return result;
+		result.constant = ConstantState::Constant;
+		if (callee.type.kind == TypeKind::Builtin &&
+				(callee.type.name == "String" || callee.type.name == "StringName" || callee.type.name == "NodePath")) {
+			if (arguments.empty()) result.reduced = std::string{};
+			else if (arguments.size() == 1) {
+				if (auto value = std::get_if<std::string>(&arguments.front().reduced)) result.reduced = *value;
+			}
+		}
 		return result;
 	}
 
@@ -572,7 +831,7 @@ private:
 			if (compatible) {
 				auto result_type = workspace.type_from_name(signature->return_type, signature_context);
 				// An unavailable return type stays unknown rather than becoming dynamic.
-				return {result_type, {}, true, false};
+				return call_result(callee, values, std::move(result_type));
 			}
 		}
 		for (auto *signature : arity_matches) {
@@ -597,7 +856,7 @@ private:
 			}
 			auto result_type = workspace.type_from_name(signature->return_type, signature_context);
 			// An unavailable return type stays unknown rather than becoming dynamic.
-			return {result_type, {}, true, false};
+			return call_result(callee, values, std::move(result_type));
 		}
 		auto *signature = arity_matches.front();
 		for (size_t index = 0; index < values.size() && index < signature->arguments.size(); ++index) {
@@ -610,35 +869,83 @@ private:
 			}
 		}
 		auto result_type = workspace.type_from_name(signature->return_type, signature_context);
-		return {result_type, {}, true, false};
+		return call_result(callee, values, std::move(result_type));
 	}
 
 	Value unary_result(const SyntaxNode &node, Value value) {
 		const auto &operand = node.children.back();
 		if (!value.resolved || !value.type.known()) return {};
 		auto op = trim(std::string_view(document.source()).substr(node.start_byte, operand.start_byte - node.start_byte));
-		if (op == "!" || op == "not") return {{TypeKind::Builtin, "bool"}, {}, true, false};
+		auto finish = [&](Value result) {
+			result.constant = value.constant;
+			result.suppress_invalid_constant = value.suppress_invalid_constant;
+			if (value.constant == ConstantState::Constant) {
+				if (auto integer = std::get_if<int64_t>(&value.reduced)) {
+					if (op == "-") result.reduced = -*integer;
+					else if (op == "+") result.reduced = *integer;
+					else if (op == "~") result.reduced = ~*integer;
+				} else if (auto number = std::get_if<double>(&value.reduced)) {
+					if (op == "-") result.reduced = -*number;
+					else if (op == "+") result.reduced = *number;
+				} else if (auto boolean = std::get_if<bool>(&value.reduced); boolean && (op == "!" || op == "not")) {
+					result.reduced = !*boolean;
+				}
+			}
+			return result;
+		};
+		if (op == "!" || op == "not") return finish({{TypeKind::Builtin, "bool"}, {}, true, false});
 		if (value.type.kind == TypeKind::Variant) return value;
-		if (op == "+" || op == "-") op = "unary" + op;
+		auto native_op = op;
+		if (native_op == "+" || native_op == "-") native_op = "unary" + native_op;
 		auto name = value.type.kind == TypeKind::Enum ? "int" : value.type.name;
 		if (auto native = workspace.native_api_.find_class(name); native && native->operators_known) {
-			for (const auto &entry : native->operators) if (entry.name == op && entry.right_type.empty())
-				return {workspace.type_from_name(entry.return_type, current_class), {}, true, false};
-			add("invalid-operator", "Invalid operand for unary operator \"" + op + "\".", node.range);
+			for (const auto &entry : native->operators) if (entry.name == native_op && entry.right_type.empty())
+				return finish({workspace.type_from_name(entry.return_type, current_class), {}, true, false});
+			add("invalid-operator", "Invalid operand for unary operator \"" + native_op + "\".", node.range);
 			return {};
 		}
-		return value;
+		return finish(value);
 	}
 
 	Value binary_result(const SyntaxNode &node, Value left_value, Value right_value) {
 		auto op = operation(node);
 		if (node.kind == "augmented_assignment" && op.ends_with('=')) op.pop_back();
 		if (!left_value.resolved || !right_value.resolved || !left_value.type.known() || !right_value.type.known()) return {};
+		auto finish = [&](Value result) {
+			result.constant = combined_constant_state({left_value, right_value});
+			result.suppress_invalid_constant = left_value.suppress_invalid_constant || right_value.suppress_invalid_constant;
+			if (result.constant != ConstantState::Constant) return result;
+			if (auto left = std::get_if<std::string>(&left_value.reduced)) {
+				if (auto right = std::get_if<std::string>(&right_value.reduced); right && op == "+") {
+					result.reduced = *left + *right;
+				} else if (op == "%") {
+					if (auto formatted = format_constant_string(*left, right_value)) result.reduced = *formatted;
+				}
+				return result;
+			}
+			if (auto left = std::get_if<int64_t>(&left_value.reduced)) {
+				if (auto right = std::get_if<int64_t>(&right_value.reduced)) {
+					if (op == "+") result.reduced = *left + *right;
+					else if (op == "-") result.reduced = *left - *right;
+					else if (op == "*") result.reduced = *left * *right;
+					else if (op == "/" && *right) result.reduced = *left / *right;
+					else if (op == "%" && *right) result.reduced = *left % *right;
+				}
+			} else if (auto left = std::get_if<double>(&left_value.reduced)) {
+				if (auto right = std::get_if<double>(&right_value.reduced)) {
+					if (op == "+") result.reduced = *left + *right;
+					else if (op == "-") result.reduced = *left - *right;
+					else if (op == "*") result.reduced = *left * *right;
+					else if (op == "/" && *right != 0.0) result.reduced = *left / *right;
+				}
+			}
+			return result;
+		};
 		if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
 			op == "is" || op == "is not" || op == "in" || op == "not in" || op == "and" || op == "or" || op == "&&" || op == "||")
-			return {{TypeKind::Builtin, "bool"}, {}, true, false};
+			return finish({{TypeKind::Builtin, "bool"}, {}, true, false});
 		if (left_value.type.kind == TypeKind::Variant || right_value.type.kind == TypeKind::Variant)
-			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+			return finish({{TypeKind::Variant, "Variant"}, {}, true, false});
 		auto left_name = left_value.type.kind == TypeKind::Enum ? "int" : left_value.type.name;
 		auto right_name = right_value.type.kind == TypeKind::Enum ? "int" : right_value.type.name;
 		if (right_value.type.kind == TypeKind::NativeClass || right_value.type.kind == TypeKind::ScriptClass) right_name = "Object";
@@ -646,16 +953,16 @@ private:
 		if (native && native->operators_known) {
 			const NativeOperator *wildcard = nullptr;
 			for (const auto &entry : native->operators) if (entry.name == op) {
-				if (entry.right_type == right_name) return {workspace.type_from_name(entry.return_type, current_class), {}, true, false};
+				if (entry.right_type == right_name) return finish({workspace.type_from_name(entry.return_type, current_class), {}, true, false});
 				if (entry.right_type == "Variant") wildcard = &entry;
 			}
-			if (wildcard) return {workspace.type_from_name(wildcard->return_type, current_class), {}, true, false};
+			if (wildcard) return finish({workspace.type_from_name(wildcard->return_type, current_class), {}, true, false});
 			add("invalid-operator", "Invalid operands \"" + left_value.type.display() + "\" and \"" + right_value.type.display() + "\" for operator \"" + op + "\".", node.range);
 			return {};
 		}
 		// Old reduced snapshots do not contain operator tables. Keep completion-era
 		// inference, but do not manufacture incompatibility diagnostics.
-		if (left_value.type.name == right_value.type.name) return left_value;
+		if (left_value.type.name == right_value.type.name) return finish(left_value);
 		return {};
 	}
 
@@ -727,30 +1034,79 @@ private:
 		return apply_attribute_nodes(evaluate(node, false, !suffix.empty()), suffix);
 	}
 
+	Value preload_value(const SyntaxNode *arguments, Range call_range) {
+		auto nodes = argument_nodes(arguments);
+		if (nodes.size() != 1) {
+			add("argument-count", "No callable overload accepts " + std::to_string(nodes.size()) + " argument(s).", call_range);
+			Value result;
+			result.constant = ConstantState::Runtime;
+			return result;
+		}
+		auto path_value = require_value(evaluate(*nodes.front()), nodes.front()->range);
+		auto path = std::get_if<std::string>(&path_value.reduced);
+		if (path_value.constant != ConstantState::Constant || !path) {
+			add("invalid-preload", "Preloaded path must be a constant string.", nodes.front()->range);
+			Value result;
+			// Godot still treats a preload with a constant non-String operand as a
+			// constant expression, while a runtime path remains nonconstant.
+			result.constant = path_value.constant == ConstantState::Constant ?
+				ConstantState::Constant : ConstantState::Runtime;
+			return result;
+		}
+		auto normalized = workspace.resolve_path_reference(*path,
+			current_class ? current_class->symbol.id : document.resource_path());
+		if (!workspace.resource_exists(normalized)) {
+			add("missing-preload", "Preload file \"" + normalized + "\" does not exist.", nodes.front()->range);
+			return constant_value(ResolvedType::unknown(normalized));
+		}
+		return constant_value(workspace.type_for_resource_path(normalized, current_class));
+	}
+
 	Value evaluate(const SyntaxNode &node, bool call_target = false, bool allow_pseudo_type = false) {
 		if (node.kind == "identifier" || node.kind == "name") return resolve_name(text(document, node), node.range.start,
 			call_target, node.range, true, allow_pseudo_type);
-		if (node.kind == "integer") return {{TypeKind::Builtin, "int"}, {}, true, false};
-		if (node.kind == "float") return {{TypeKind::Builtin, "float"}, {}, true, false};
-		if (node.kind == "string") return {{TypeKind::Builtin, "String"}, {}, true, false};
-		if (node.kind == "string_name") return {{TypeKind::Builtin, "StringName"}, {}, true, false};
-		if (node.kind == "node_path") return {{TypeKind::Builtin, "NodePath"}, {}, true, false};
-		if (node.kind == "true" || node.kind == "false") return {{TypeKind::Builtin, "bool"}, {}, true, false};
-		if (node.kind == "null") return {{TypeKind::Variant, "Variant"}, {}, true, false};
+		if (node.kind == "integer") return constant_value({TypeKind::Builtin, "int"},
+			integer_literal_value(text(document, node)).value_or(0));
+		if (node.kind == "float") {
+			auto value = text(document, node);
+			value.erase(std::remove(value.begin(), value.end(), '_'), value.end());
+			return constant_value({TypeKind::Builtin, "float"}, std::strtod(value.c_str(), nullptr));
+		}
+		if (node.kind == "string") return constant_value({TypeKind::Builtin, "String"},
+			string_literal_value(text(document, node)).value_or(std::string{}));
+		if (node.kind == "string_name") return constant_value({TypeKind::Builtin, "StringName"},
+			string_literal_value(text(document, node)).value_or(std::string{}));
+		if (node.kind == "node_path") return constant_value({TypeKind::Builtin, "NodePath"},
+			string_literal_value(text(document, node)).value_or(std::string{}));
+		if (node.kind == "true" || node.kind == "false") return constant_value({TypeKind::Builtin, "bool"}, node.kind == "true");
+		if (node.kind == "null") return constant_value({TypeKind::Variant, "Variant"});
 		if (node.kind == "get_node") return {{TypeKind::Variant, "Variant"}, {}, true, false};
 		if (node.kind == "array") {
 			Value result{{TypeKind::Builtin, "Array"}, {}, true, false};
 			result.array_literal = true;
 			for (const auto &child : node.children) if (child.kind != "comment") result.elements.push_back(require_value(evaluate(child), child.range));
+			result.constant = combined_constant_state(result.elements);
+			result.suppress_invalid_constant = std::any_of(result.elements.begin(), result.elements.end(),
+				[](const Value &value) { return value.suppress_invalid_constant; });
 			return result;
 		}
 		if (node.kind == "dictionary") {
-			for (const auto &child : node.children) evaluate(child);
-			return {{TypeKind::Builtin, "Dictionary"}, {}, true, false};
+			std::vector<Value> values;
+			for (const auto &child : node.children) values.push_back(evaluate(child));
+			Value result{{TypeKind::Builtin, "Dictionary"}, {}, true, false};
+			result.constant = combined_constant_state(values);
+			result.suppress_invalid_constant = std::any_of(values.begin(), values.end(),
+				[](const Value &value) { return value.suppress_invalid_constant; });
+			return result;
 		}
 		if (node.kind == "pair") {
-			for (const auto &child : node.children) require_value(evaluate(child), child.range);
-			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+			std::vector<Value> values;
+			for (const auto &child : node.children) values.push_back(require_value(evaluate(child), child.range));
+			Value result{{TypeKind::Variant, "Variant"}, {}, true, false};
+			result.constant = combined_constant_state(values);
+			result.suppress_invalid_constant = std::any_of(values.begin(), values.end(),
+				[](const Value &value) { return value.suppress_invalid_constant; });
+			return result;
 		}
 		if (node.kind == "parenthesized_expression") return node.children.empty() ? Value{} :
 			evaluate(node.children.front(), call_target, allow_pseudo_type);
@@ -769,14 +1125,17 @@ private:
 			return binary_result(node, std::move(left_value), std::move(right_value));
 		}
 		if (node.kind == "conditional_expression") {
-			if (auto *condition = field(node, "condition")) require_value(evaluate(*condition), condition->range);
+			auto condition = field(node, "condition") ? require_value(evaluate(*field(node, "condition")), field(node, "condition")->range) : Value{};
 			auto left = field(node, "left") ? require_value(evaluate(*field(node, "left")), field(node, "left")->range) : Value{};
 			auto right = field(node, "right") ? require_value(evaluate(*field(node, "right")), field(node, "right")->range) : Value{};
 			auto aligned = left.type.known() && right.type.known() && left.type.kind == right.type.kind &&
 				left.type.name == right.type.name && left.type.instance == right.type.instance &&
 				(left.type.symbol_id.empty() || right.type.symbol_id.empty() || left.type.symbol_id == right.type.symbol_id);
-			return aligned ? left :
-				Value{{TypeKind::Variant, "Variant"}, {}, true, false};
+			Value result = aligned ? left : Value{{TypeKind::Variant, "Variant"}, {}, true, false};
+			result.constant = combined_constant_state({condition, left, right});
+			result.suppress_invalid_constant = condition.suppress_invalid_constant ||
+				left.suppress_invalid_constant || right.suppress_invalid_constant;
+			return result;
 		}
 		if (node.kind == "assignment" || node.kind == "augmented_assignment") {
 			auto left = field(node, "left"), right = field(node, "right");
@@ -795,24 +1154,34 @@ private:
 		}
 		if (node.kind == "subscript") {
 			auto base = node.children.empty() ? Value{} : evaluate(node.children.front(), false, true);
-			if (auto *arguments = field(node, "arguments")) for (const auto &child : arguments->children) require_value(evaluate(child), child.range);
+			std::vector<Value> parts{base};
+			if (auto *arguments = field(node, "arguments")) for (const auto &child : arguments->children) parts.push_back(require_value(evaluate(child), child.range));
+			Value result;
 			if (base.type.kind == TypeKind::Builtin && base.type.name == "Array" && !base.type.arguments.empty()) {
-				return {base.type.arguments.front(), {}, true, false};
+				result = {base.type.arguments.front(), {}, true, false};
+			} else if (base.type.kind == TypeKind::Builtin && base.type.name == "String") {
+				result = {{TypeKind::Builtin, "String"}, {}, true, false};
+			} else {
+				result = {{TypeKind::Variant, "Variant"}, {}, true, false};
 			}
-			if (base.type.kind == TypeKind::Builtin && base.type.name == "String") return {{TypeKind::Builtin, "String"}, {}, true, false};
-			return {{TypeKind::Variant, "Variant"}, {}, true, false};
+			result.constant = combined_constant_state(parts);
+			return result;
 		}
 		if (node.kind == "call") {
 			const SyntaxNode *callee_node = nullptr;
 			for (const auto &child : node.children) if (child.field != "arguments") { callee_node = &child; break; }
 			if (callee_node && callee_node->kind == "identifier" && text(document, *callee_node) == "yield") return {};
+			if (callee_node && callee_node->kind == "identifier" && text(document, *callee_node) == "preload") {
+				return preload_value(field(node, "arguments"), node.range);
+			}
 			auto callee = callee_node ? evaluate(*callee_node, callee_node->kind == "identifier", true) : Value{};
 			auto result = call_value(std::move(callee), field(node, "arguments"), node.range);
-			if (callee_node && callee_node->kind == "identifier" &&
-					(text(document, *callee_node) == "load" || text(document, *callee_node) == "preload")) {
+			if (callee_node && callee_node->kind == "identifier" && text(document, *callee_node) == "load") {
 				auto nodes = argument_nodes(field(node, "arguments"));
 				if (nodes.size() == 1) if (auto path = string_literal_value(text(document, *nodes.front()))) {
-					return {workspace.type_for_resource_path(*path, current_class), {}, true, false};
+					auto loaded = Value{workspace.type_for_resource_path(*path, current_class), {}, true, false};
+					loaded.constant = ConstantState::Runtime;
+					return loaded;
 				}
 			}
 			return result;
@@ -963,7 +1332,17 @@ private:
 		} else if (node.kind == "const_statement" && initializer.type.known()) {
 			type = initializer.type;
 		}
-		declare(*name_node, {type, {}, type.known(), false}, node.kind == "const_statement" ? "unused-local-constant" : "unused-variable");
+		Value binding{type, {}, type.known(), false};
+		if (node.kind == "const_statement") {
+			binding.constant = initializer.constant;
+			binding.reduced = initializer.reduced;
+			binding.elements = initializer.elements;
+			binding.array_literal = initializer.array_literal;
+			binding.suppress_invalid_constant = initializer.suppress_invalid_constant;
+		} else {
+			binding.constant = ConstantState::Runtime;
+		}
+		declare(*name_node, std::move(binding), node.kind == "const_statement" ? "unused-local-constant" : "unused-variable");
 	}
 
 	void check_declared_assignment(const SyntaxNode &node, const Value &initializer) {
@@ -1043,6 +1422,10 @@ private:
 			Value initializer;
 			if (auto *value = field(node, "value")) initializer = require_value(evaluate(*value), value->range);
 			check_declared_assignment(node, initializer);
+			if (node.kind == "const_statement" && initializer.constant == ConstantState::Runtime &&
+					!initializer.suppress_invalid_constant) {
+				if (auto *value = field(node, "value")) report_invalid_constant(node, *value);
+			}
 			bind_local(node, initializer);
 			return;
 		}
@@ -1153,6 +1536,7 @@ private:
 			} else if (node.kind == "variable_statement" || node.kind == "const_statement" ||
 				node.kind == "export_variable_statement" || node.kind == "onready_variable_statement") {
 				if (node.has_error) continue;
+				if (node.kind == "const_statement") continue; // Resolved by the member-constant prepass.
 				auto *saved = current_class;
 				current_class = document.class_at(node.range.start);
 				Value initializer;

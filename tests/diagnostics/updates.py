@@ -105,6 +105,24 @@ def main():
             completion = take(lambda m: m.get('id') == 52)['result']
             items = completion['items'] if isinstance(completion, dict) else completion
             assert any(item.get('filterText', item['label']) == '位置' for item in items), items
+
+            dependency = directory / 'dependency.gd'
+            preload_source = ('extends RefCounted\n'
+                              'const ROOT = "res://"\n'
+                              'const FILE = "dependency.gd"\n'
+                              'const Dependency = preload(ROOT + FILE)\n'
+                              'func test() -> void:\n'
+                              '    Dependency.available()\n')
+            send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': 5},
+                                            'contentChanges': [{'text': preload_source}]})
+            verify(['missing-preload'], 1)
+            dependency.write_text('extends RefCounted\nstatic func available() -> void:\n    pass\n')
+            send('workspace/didChangeWatchedFiles', {'changes': [{'uri': dependency.as_uri(), 'type': 1}]})
+            verify([])
+            dependency.unlink()
+            send('workspace/didChangeWatchedFiles', {'changes': [{'uri': dependency.as_uri(), 'type': 3}]})
+            verify(['missing-preload'], 1)
+
             send('shutdown', {}, 99)
             take(lambda m: m.get('id') == 99)
             send('exit', {})

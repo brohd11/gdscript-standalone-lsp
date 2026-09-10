@@ -41,8 +41,10 @@ declaration-backed detail and documentation.
 Diagnostics cover syntax and structural errors, duplicate declarations,
 inheritance failures, unknown or invalid types, typed assignments and returns,
 known members and calls, argument count and types, invalid operators and casts,
-typed array operations, and invalid control flow. The lexical pass also checks
-string escapes and indentation.
+typed array operations, invalid constant expressions, missing or nonconstant
+`preload()` paths, and invalid control flow. Constant preload paths may be built
+from other string constants, concatenation, formatting, and safe `String()`
+construction. The lexical pass also checks string escapes and indentation.
 
 The server avoids speculative errors for dynamic `Variant`, `Dictionary`, node
 paths, and unresolved expressions. File-watch notifications and a portable disk

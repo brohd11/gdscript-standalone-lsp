@@ -121,6 +121,7 @@ private:
 	void scan_uid_files();
 	std::string resource_path(const std::filesystem::path &path) const;
 	std::string resolve_path_reference(std::string reference, std::string_view owner_resource) const;
+	bool resource_exists(std::string_view resource) const;
 	const Document *find_document(const std::string &uri) const;
 	const ClassRecord *find_class(std::string_view id) const;
 	const Symbol *find_member(const ClassRecord &record, std::string_view name) const;

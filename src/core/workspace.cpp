@@ -313,6 +313,94 @@ std::vector<std::string> quoted_script_paths(std::string_view source) {
 	return result;
 }
 
+const SyntaxNode *syntax_field(const SyntaxNode &node, std::string_view name) {
+	for (const auto &child : node.children) if (child.field == name) return &child;
+	return nullptr;
+}
+
+std::vector<std::string> reduced_preload_paths(const Document &document) {
+	std::unordered_map<std::string, const SyntaxNode *> constants;
+	std::unordered_set<std::string> ambiguous;
+	std::function<void(const SyntaxNode &)> collect_constants = [&](const SyntaxNode &node) {
+		if (node.kind == "const_statement") {
+			auto *name = syntax_field(node, "name"), *value = syntax_field(node, "value");
+			if (name && value) {
+				auto spelling = trim(document.text(*name));
+				if (constants.contains(spelling)) ambiguous.insert(spelling);
+				else constants[spelling] = value;
+			}
+		}
+		for (const auto &child : node.children) collect_constants(child);
+	};
+	collect_constants(document.syntax_root());
+	for (const auto &name : ambiguous) constants.erase(name);
+
+	std::unordered_set<const SyntaxNode *> reducing;
+	std::function<std::optional<std::string>(const SyntaxNode &)> reduce = [&](const SyntaxNode &node)
+			-> std::optional<std::string> {
+		if (node.kind == "string") return unquote(document.text(node));
+		if (node.kind == "parenthesized_expression" && !node.children.empty()) return reduce(node.children.front());
+		if (node.kind == "identifier" || node.kind == "name") {
+			auto found = constants.find(trim(document.text(node)));
+			if (found == constants.end() || !reducing.insert(found->second).second) return std::nullopt;
+			auto value = reduce(*found->second);
+			reducing.erase(found->second);
+			return value;
+		}
+		if (node.kind == "binary_operator") {
+			auto *left_node = syntax_field(node, "left"), *right_node = syntax_field(node, "right");
+			if (!left_node || !right_node) return std::nullopt;
+			auto left = reduce(*left_node), right = reduce(*right_node);
+			if (!left || !right) return std::nullopt;
+			auto op = trim(std::string_view(document.source()).substr(left_node->end_byte,
+				right_node->start_byte - left_node->end_byte));
+			if (op == "+") return *left + *right;
+			if (op == "%") {
+				auto marker = left->find("%s");
+				if (marker == std::string::npos || left->find('%', marker + 2) != std::string::npos) return std::nullopt;
+				left->replace(marker, 2, *right);
+				return left;
+			}
+			return std::nullopt;
+		}
+		if (node.kind == "call") {
+			const SyntaxNode *callee = nullptr;
+			for (const auto &child : node.children) if (child.field != "arguments") { callee = &child; break; }
+			if (!callee || callee->kind != "identifier" || trim(document.text(*callee)) != "String") return std::nullopt;
+			auto *arguments = syntax_field(node, "arguments");
+			if (!arguments) return std::string{};
+			const SyntaxNode *argument = nullptr;
+			for (const auto &child : arguments->children) if (child.kind != "comment") {
+				if (argument) return std::nullopt;
+				argument = &child;
+			}
+			return argument ? reduce(*argument) : std::optional<std::string>(std::string{});
+		}
+		return std::nullopt;
+	};
+
+	std::vector<std::string> result;
+	std::function<void(const SyntaxNode &)> collect_preloads = [&](const SyntaxNode &node) {
+		if (node.kind == "call") {
+			const SyntaxNode *callee = nullptr;
+			for (const auto &child : node.children) if (child.field != "arguments") { callee = &child; break; }
+			if (callee && callee->kind == "identifier" && trim(document.text(*callee)) == "preload") {
+				if (auto *arguments = syntax_field(node, "arguments")) {
+					const SyntaxNode *argument = nullptr;
+					for (const auto &child : arguments->children) if (child.kind != "comment") {
+						if (argument) { argument = nullptr; break; }
+						argument = &child;
+					}
+					if (argument) if (auto path = reduce(*argument)) result.push_back(std::move(*path));
+				}
+			}
+		}
+		for (const auto &child : node.children) collect_preloads(child);
+	};
+	collect_preloads(document.syntax_root());
+	return result;
+}
+
 } // namespace
 
 bool Workspace::open(const std::filesystem::path &root, const std::filesystem::path &api_path, std::string *error) {
@@ -551,7 +639,11 @@ std::unordered_set<std::string> Workspace::dependencies_for_document(const std::
 			resource.resize(script_end + 3);
 			if (auto found = resource_uris_.find(resource); found != resource_uris_.end()) return found->second;
 		}
-		return {};
+		if (!resource.starts_with("res://")) return {};
+		auto path = (root_ / resource.substr(6)).lexically_normal();
+		auto relative = path.lexically_relative(root_.lexically_normal());
+		if (relative.empty() || relative == ".." || (!relative.empty() && *relative.begin() == "..")) return {};
+		return file_uri_for_path(path);
 	};
 	auto add = [&](const std::string &target) {
 		if (!target.empty() && target != uri) result.insert(target);
@@ -573,6 +665,9 @@ std::unordered_set<std::string> Workspace::dependencies_for_document(const std::
 		}
 	}
 	for (auto path : quoted_script_paths(document.source())) {
+		add(dependency_uri(resolve_path_reference(std::move(path), document.resource_path())));
+	}
+	for (auto path : reduced_preload_paths(document)) {
 		add(dependency_uri(resolve_path_reference(std::move(path), document.resource_path())));
 	}
 	return result;
@@ -871,6 +966,16 @@ std::string Workspace::resolve_path_reference(std::string reference, std::string
 	return "res://" + (base / reference).lexically_normal().generic_string();
 }
 
+bool Workspace::resource_exists(std::string_view resource) const {
+	if (!resource.starts_with("res://")) return false;
+	if (resource_uris_.contains(std::string(resource))) return true;
+	auto path = (root_ / resource.substr(6)).lexically_normal();
+	auto relative = path.lexically_relative(root_.lexically_normal());
+	if (relative.empty() || relative == ".." || (!relative.empty() && *relative.begin() == "..")) return false;
+	std::error_code error;
+	return std::filesystem::is_regular_file(path, error) && !error;
+}
+
 const Document *Workspace::find_document(const std::string &uri) const {
 	auto found = documents_.find(uri);
 	return found == documents_.end() ? nullptr : found->second.get();
@@ -1159,6 +1264,7 @@ std::optional<std::string> Workspace::invalid_type_message(std::string_view name
 
 ResolvedType Workspace::type_for_resource_path(std::string resource, const ClassRecord *context) const {
 	resource = resolve_path_reference(std::move(resource), context ? context->symbol.id : "res://");
+	if (!resource_exists(resource)) return ResolvedType::unknown(resource);
 	auto extension = std::filesystem::path(resource).extension().string();
 	if (extension == ".gd") {
 		auto *record = find_class(resource);

@@ -2304,6 +2304,70 @@
       }],
       "warnings": false,
       "godot_pattern": "Unexpected standalone annotation"
+    },
+    {
+      "name": "constant_preload_paths",
+      "source": "extends RefCounted\nconst PLUS = preload(ROOT + NAME + EXTENSION)\nconst FORMAT = preload(\"res://%s.gd\" % NAME)\nconst CONSTRUCTOR = preload(String(ROOT + NAME + EXTENSION))\nconst ROOT = \"res://\"\nconst NAME = \"dependency\"\nconst EXTENSION = \".gd\"\n",
+      "files": {"dependency.gd": "extends RefCounted\n"},
+      "expected": [],
+      "warnings": false,
+      "godot_pattern": null
+    },
+    {
+      "name": "missing_preload_no_member_cascade",
+      "source": "extends RefCounted\nconst Missing = preload(\"res://missing.gd\")\nvar Dynamic = load(\"res://also_missing.gd\")\nfunc test() -> void:\n    Missing.register_plugin(self)\n",
+      "expected": [{
+        "code": "missing-preload",
+        "message": "Preload file \"res://missing.gd\" does not exist.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 24}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Preload file.*does not exist"
+    },
+    {
+      "name": "invalid_constant_expressions",
+      "source": "extends RefCounted\nclass Holder:\n    var value = 1\nstatic var runtime_value = 1\nconst MEMBER = {\"value\": Holder.value}\nconst STATIC_VALUE = runtime_value\nconst CALL = make_value()\nconst OBJECT = Holder.new()\nstatic func make_value() -> int:\n    return 1\nfunc local() -> void:\n    const LOCAL = make_value()\n",
+      "expected": [
+        {"code": "invalid-constant", "severity": 1, "range": {"start": {"line": 4, "character": 15}}},
+        {"code": "instance-member-access", "severity": 1, "range": {"start": {"line": 4, "character": 32}}},
+        {"code": "invalid-constant", "severity": 1, "range": {"start": {"line": 5, "character": 21}}},
+        {"code": "invalid-constant", "severity": 1, "range": {"start": {"line": 6, "character": 13}}},
+        {"code": "invalid-constant", "severity": 1, "range": {"start": {"line": 7, "character": 15}}},
+        {"code": "invalid-constant", "severity": 1, "range": {"start": {"line": 11, "character": 18}}}
+      ],
+      "warnings": false,
+      "godot_pattern": "isn't a constant expression"
+    },
+    {
+      "name": "preload_method_is_not_constant",
+      "source": "extends RefCounted\nconst ROOT = \"res://dependency.gd\"\nconst SCRIPT = preload(ROOT.to_lower())\n",
+      "files": {"dependency.gd": "extends RefCounted\n"},
+      "expected": [{
+        "code": "invalid-constant",
+        "message": "Assigned value for constant \"SCRIPT\" isn't a constant expression.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 15}}
+      }, {
+        "code": "invalid-preload",
+        "message": "Preloaded path must be a constant string.",
+        "severity": 1,
+        "range": {"start": {"line": 2, "character": 23}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Preloaded path must be a constant string"
+    },
+    {
+      "name": "constant_cycle",
+      "source": "extends RefCounted\nconst A = B\nconst B = A\n",
+      "expected": [{
+        "code": "invalid-constant",
+        "message": "Could not resolve member \"A\": Cyclic reference.",
+        "severity": 1,
+        "range": {"start": {"line": 1, "character": 10}}
+      }],
+      "warnings": false,
+      "godot_pattern": "Cyclic reference"
     }
   ]
 }
