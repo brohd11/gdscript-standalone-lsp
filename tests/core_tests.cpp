@@ -594,6 +594,67 @@ int main() {
 
 	auto definitions = workspace.definition(consumer_uri, {2, 15});
 	expect(definitions.size() == 1 && definitions.front().uri.ends_with("/child.gd"), "global class definition resolves");
+	auto definition_in_chain = [&](std::string_view expression, std::string_view name) {
+		auto expression_at = chain_source.find(expression);
+		auto name_at = expression.rfind(name);
+		return workspace.definition(inferred_uri,
+			byte_to_position(chain_source, expression_at + name_at + name.size() / 2));
+	};
+	auto call_member_definition = definition_in_chain("Namespace.Factory.make().product_member", "product_member");
+	expect(call_member_definition.size() == 1 && call_member_definition.front().uri.ends_with("/return_factory.gd") &&
+		call_member_definition.front().range.start == Position{3, 5} &&
+		call_member_definition.front().range.end == Position{3, 19},
+		"qualified definition preserves calls in the receiver expression");
+	auto subscript_member_definition = definition_in_chain("products[0].product_member", "product_member");
+	expect(subscript_member_definition.size() == 1 && subscript_member_definition.front().uri.ends_with("/return_factory.gd") &&
+		subscript_member_definition.front().range.start == Position{3, 5} &&
+		subscript_member_definition.front().range.end == Position{3, 19},
+		"qualified definition preserves subscripts in the receiver expression");
+	const std::string qualified_definition_source =
+		"extends RefCounted\n"
+		"const Types = preload(\"res://alias_base.gd\")\n"
+		"const ExitCode = Types.ExitCode\n"
+		"const PhysicalBase = AliasNamespace.PhysicalBase\n"
+		"const LocalAlias = AliasNamespace.LocalAlias.ExitCode\n"
+		"const Missing = AliasNamespace.Missing\n";
+	expect(workspace.update_document(consumer_uri, qualified_definition_source, 3, &error),
+		"qualified-definition overlay accepted");
+	auto definition_at = [&](size_t line, std::string_view name, size_t within) {
+		auto line_start = size_t{0};
+		for (size_t current = 0; current < line; ++current) line_start = qualified_definition_source.find('\n', line_start) + 1;
+		auto line_end = qualified_definition_source.find('\n', line_start);
+		auto start = qualified_definition_source.rfind(name, line_end);
+		return workspace.definition(consumer_uri,
+			byte_to_position(qualified_definition_source, start + within));
+	};
+	auto range_is = [](const Range &range, Position start, Position end) {
+		return range.start == start && range.end == end;
+	};
+	for (auto within : {size_t{0}, size_t{4}, std::string_view("ExitCode").size()}) {
+		auto target = definition_at(2, "ExitCode", within);
+		expect(target.size() == 1 && target.front().uri.ends_with("/alias_base.gd") &&
+			range_is(target.front().range, {4, 5}, {4, 13}),
+			"qualified preload member definition resolves from any identifier position");
+	}
+	auto receiver_definition = definition_at(2, "Types", 2);
+	expect(receiver_definition.size() == 1 && receiver_definition.front().uri == consumer_uri &&
+		range_is(receiver_definition.front().range, {1, 6}, {1, 11}),
+		"qualified definition resolves only through the clicked receiver prefix");
+	auto global_member_definition = definition_at(3, "PhysicalBase", 4);
+	expect(global_member_definition.size() == 1 && global_member_definition.front().uri.ends_with("/alias_namespace.gd") &&
+		range_is(global_member_definition.front().range, {6, 6}, {6, 18}),
+		"qualified global-class member definition bypasses a same-named declaration");
+	auto intermediate_definition = definition_at(4, "LocalAlias", 4);
+	expect(intermediate_definition.size() == 1 && intermediate_definition.front().uri.ends_with("/alias_namespace.gd") &&
+		range_is(intermediate_definition.front().range, {3, 6}, {3, 16}),
+		"qualified definition resolves an intermediate member prefix");
+	auto final_definition = definition_at(4, "ExitCode", 4);
+	expect(final_definition.size() == 1 && final_definition.front().uri.ends_with("/alias_base.gd") &&
+		range_is(final_definition.front().range, {4, 5}, {4, 13}),
+		"qualified definition resolves the final member of a deeper chain");
+	expect(definition_at(5, "Missing", 3).empty(),
+		"unresolved qualified definition does not fall back to a same-named declaration");
+	expect(workspace.close_document(consumer_uri, &error), "qualified-definition overlay closes");
 	auto symbols = workspace.document_symbols(consumer_uri);
 	expect(!symbols.empty() && symbols.front().children.size() == 3, "document symbols include members");
 	auto consumer_outline = workspace.document_outline(consumer_uri);

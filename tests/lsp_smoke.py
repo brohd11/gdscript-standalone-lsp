@@ -193,6 +193,24 @@ for request_id, line, character in [(71, 6, 11), (72, 7, 9), (73, 6, 16)]:
         "method": "textDocument/signatureHelp",
         "params": {"textDocument": {"uri": uri}, "position": {"line": line, "character": character}},
     }))
+definition_source = (
+    "extends RefCounted\n"
+    'const Types = preload("res://alias_base.gd")\n'
+    "const ExitCode = Types.ExitCode\n"
+)
+process.stdin.write(packet({
+    "jsonrpc": "2.0",
+    "method": "textDocument/didOpen",
+    "params": {"textDocument": {
+        "uri": uri, "languageId": "gdscript", "version": 2, "text": definition_source,
+    }},
+}))
+process.stdin.write(packet({
+    "jsonrpc": "2.0",
+    "id": 74,
+    "method": "textDocument/definition",
+    "params": {"textDocument": {"uri": uri}, "position": {"line": 2, "character": 27}},
+}))
 process.stdin.write(packet({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": {}}))
 process.stdin.write(packet({"jsonrpc": "2.0", "method": "exit", "params": {}}))
 process.stdin.flush()
@@ -201,6 +219,7 @@ rich_resolved = read_response(process.stdout, 8)
 script_signature = read_response(process.stdout, 71)["result"]
 constructor_signature = read_response(process.stdout, 72)["result"]
 closed_signature = read_response(process.stdout, 73)["result"]
+qualified_definition = read_response(process.stdout, 74)["result"]
 shutdown = read_response(process.stdout, 9)
 assert script_signature["activeSignature"] == 0
 assert script_signature["activeParameter"] == 1
@@ -213,6 +232,12 @@ assert constructor_signature["activeSignature"] == 1
 assert constructor_signature["signatures"][1]["activeParameter"] == 0
 assert constructor_signature["signatures"][1]["label"] == "func String.new(from: int) -> String"
 assert closed_signature is None
+assert len(qualified_definition) == 1
+assert qualified_definition[0]["uri"].endswith("/alias_base.gd")
+assert qualified_definition[0]["range"] == {
+    "start": {"line": 4, "character": 5},
+    "end": {"line": 4, "character": 13},
+}
 assert completion_resolve["result"]["detail"] == "func"
 assert rich_resolved["result"]["type"]["name"] == "ChildThing"
 assert rich_resolved["result"]["origin"]["name"] == "local"

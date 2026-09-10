@@ -159,6 +159,8 @@ private:
 		std::string_view name, Position position) const;
 	ResolvedType completion_receiver_type(const Document &document, Position position,
 		const CaretContext &caret) const;
+	ResolvedExpression resolve_expression_locked(const Document &document, Position position,
+		std::string expression) const;
 	std::vector<CompletionItem> semantic_completion_locked(const Document &document, Position position,
 		const CaretContext &caret) const;
 };

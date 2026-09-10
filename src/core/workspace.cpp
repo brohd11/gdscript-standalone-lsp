@@ -119,6 +119,38 @@ std::optional<std::pair<std::string, std::string>> trailing_member(std::string_v
 	return std::pair{std::move(receiver), std::move(member)};
 }
 
+struct DefinitionReference {
+	std::string name;
+	std::string expression;
+	bool qualified = false;
+};
+
+DefinitionReference definition_reference_at(const Document &document, Position position) {
+	auto &source = document.source();
+	auto offset = position_to_byte(source, position);
+	if (offset == source.size() || !identifier_byte(source[offset])) {
+		if (offset == 0 || !identifier_byte(source[offset - 1])) return {};
+		--offset;
+	}
+	auto start = offset;
+	while (start > 0 && identifier_byte(source[start - 1])) --start;
+	auto end = offset;
+	while (end < source.size() && identifier_byte(source[end])) ++end;
+	auto name = source.substr(start, end - start);
+	if (!is_identifier(name)) return {};
+
+	DefinitionReference result;
+	result.name = std::string(name);
+	auto caret = analyze_caret(document, byte_to_position(source, end));
+	if (caret.lexical == CaretLexicalContext::Code && caret.member_access) {
+		result.qualified = true;
+		if (caret.member_receiver && caret.member_prefix == result.name) {
+			result.expression = *caret.member_receiver + "." + result.name;
+		}
+	}
+	return result;
+}
+
 std::optional<std::pair<std::string, std::string>> terminal_subscript(std::string_view expression) {
 	if (expression.empty() || expression.back() != ']') return std::nullopt;
 	int depth = 0;
@@ -1986,21 +2018,26 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 	return paths;
 }
 
+ResolvedExpression Workspace::resolve_expression_locked(const Document &document, Position position,
+		std::string expression) const {
+	if (expression.empty()) expression = identifier_at(document.source(), position);
+	auto source_expression = expression;
+	std::vector<std::string> stack;
+	auto *context = document.class_at(position);
+	auto type = infer_expression(std::move(expression), document, context, position, stack);
+	auto origin_id = type.declaration_id;
+	if (origin_id.empty() && (type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum ||
+			type.kind == TypeKind::NativeClass)) origin_id = type.symbol_id;
+	auto provenance = access_provenance(source_expression, type, document, context, position);
+	return {type, symbol_origin(origin_id), access_paths_for_type(type, context, provenance)};
+}
+
 ResolvedExpression Workspace::resolve_expression(const std::string &uri, Position position,
 		std::string expression) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);
 	if (!document) return {ResolvedType::unknown("document not indexed"), std::nullopt, {}};
-	if (expression.empty()) expression = identifier_at(document->source(), position);
-	auto source_expression = expression;
-	std::vector<std::string> stack;
-	auto *context = document->class_at(position);
-	auto type = infer_expression(std::move(expression), *document, context, position, stack);
-	auto origin_id = type.declaration_id;
-	if (origin_id.empty() && (type.kind == TypeKind::ScriptClass || type.kind == TypeKind::Enum ||
-			type.kind == TypeKind::NativeClass)) origin_id = type.symbol_id;
-	auto provenance = access_provenance(source_expression, type, *document, context, position);
-	return {type, symbol_origin(origin_id), access_paths_for_type(type, context, provenance)};
+	return resolve_expression_locked(*document, position, std::move(expression));
 }
 
 std::optional<CompletionItem> Workspace::resolve_completion_item(std::string_view symbol_id) const {
@@ -3033,15 +3070,23 @@ std::vector<Location> Workspace::definition(const std::string &uri, Position pos
 	std::vector<Location> result;
 	auto *document = find_document(uri);
 	if (!document) return result;
-	auto name = identifier_at(document->source(), position);
-	if (name.empty()) return result;
-	if (auto *symbol = resolve_identifier(*document, document->class_at(position), name, position)) {
+	auto reference = definition_reference_at(*document, position);
+	if (reference.name.empty()) return result;
+	if (reference.qualified) {
+		if (reference.expression.empty()) return result;
+		auto resolved = resolve_expression_locked(*document, position, std::move(reference.expression));
+		if (resolved.origin && resolved.origin->valid && !resolved.origin->uri.empty()) {
+			result.push_back({resolved.origin->uri, resolved.origin->range});
+		}
+		return result;
+	}
+	if (auto *symbol = resolve_identifier(*document, document->class_at(position), reference.name, position)) {
 		result.push_back({symbol->uri, symbol->selection_range});
-	} else if (global_classes_.contains(name)) {
-		auto *record = find_class(global_classes_.at(name));
+	} else if (global_classes_.contains(reference.name)) {
+		auto *record = find_class(global_classes_.at(reference.name));
 		if (record) result.push_back({record->symbol.uri, record->symbol.selection_range});
-	} else if (autoloads_.contains(name)) {
-		auto id = resolve_path_reference(autoloads_.at(name), document->resource_path());
+	} else if (autoloads_.contains(reference.name)) {
+		auto id = resolve_path_reference(autoloads_.at(reference.name), document->resource_path());
 		if (auto *record = find_class(id)) result.push_back({record->symbol.uri, record->symbol.selection_range});
 	}
 	return result;
