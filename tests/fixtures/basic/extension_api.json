@@ -6,6 +6,10 @@
   },
   "builtin_classes": [
     {
+      "name": "Nil",
+      "constructors": [{}, {"arguments": [{"name": "from", "type": "Variant"}]}]
+    },
+    {
       "name": "String",
       "methods": [
         {"name": "length", "return_type": "int"},

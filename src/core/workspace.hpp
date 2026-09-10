@@ -135,7 +135,7 @@ private:
 	std::optional<std::string> invalid_type_message(std::string_view name, const ClassRecord *context) const;
 	std::optional<SymbolOrigin> symbol_origin(std::string_view id) const;
 	std::vector<AccessPath> access_paths_for_type(const ResolvedType &type, const ClassRecord *context,
-		const AccessProvenance &provenance = {}) const;
+		const AccessProvenance &provenance = {}, bool compact = true) const;
 	AccessProvenance access_provenance(std::string expression, const ResolvedType &type,
 		const Document &document, const ClassRecord *context, Position position, size_t depth = 0) const;
 	std::string expression_type_access(std::string expression, const ResolvedType &type,

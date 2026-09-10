@@ -312,6 +312,7 @@ native_override_completion = read_response(process.stdout, 20)
 read_response(process.stdout, 3)
 native_items = {item["filterText"]: item for item in native_completion["result"]["items"]}
 assert {"queue_free", "print_tree"} <= native_items.keys()
+assert "Nil" not in native_items
 native_override_items = {item["filterText"]: item for item in native_override_completion["result"]["items"]}
 assert {"_ready", "_process"} <= native_override_items.keys()
 assert native_override_items["_process"]["data"]["gdscriptLsp"]["provider"] == "overrides"

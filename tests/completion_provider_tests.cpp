@@ -163,8 +163,11 @@ void check_extended_types(Harness &harness) {
 			has_item(result, test.expected), "extended type completion handles " + std::string(test.name), result);
 	}
 	auto native = harness.probe(prelude + "var reference: <caret>\n");
-	expect_result(has_item(native, "RefCounted"),
-		"native API classes remain available in type-hint completion", native);
+	expect_result(has_item(native, "RefCounted") && has_item(native, "String") && !has_item(native, "Nil"),
+		"valid native API classes remain available in type hints without the Nil metadata sentinel", native);
+	auto ordinary = harness.body("\t<caret>\n", CompletionProfile::Full);
+	expect_result(has_item(ordinary, "String") && !has_item(ordinary, "Nil"),
+		"ordinary semantic completion excludes the Nil metadata sentinel", ordinary);
 
 	auto qualified = harness.probe(prelude + "var value: Product.<caret>\n");
 	expect(has_item(qualified, "Nested") && !has_item(qualified, "title"),
@@ -184,14 +187,14 @@ void check_extended_types(Harness &harness) {
 
 void check_constructors(Harness &harness) {
 	auto parameterized = harness.body("\tvar product: Product = <caret>\n");
-	auto *product = find_item(parameterized, "ProductAlias.new");
+	auto *product = find_item(parameterized, "Product.new");
 	expect_result(parameterized.disposition == CompletionDisposition::Augment && parameterized.provider == "constructors" && product,
 		"parameterized script constructor retains insertion and origin", parameterized);
 	if (product) {
-		expect(product->label.starts_with("ProductAlias.new(") && product->label.ends_with(')') &&
-			product->label != "ProductAlias.new()",
+		expect(product->label.starts_with("Product.new(") && product->label.ends_with(')') &&
+			product->label != "Product.new()",
 			"parameterized constructor uses the compact ellipsis label");
-		expect(product->insert_text == "ProductAlias.new(",
+		expect(product->insert_text == "Product.new(",
 			"parameterized constructor inserts an opening parenthesis");
 		expect(product->origin_id.ends_with("::_init"),
 			"parameterized constructor points to its _init declaration");
@@ -203,12 +206,29 @@ void check_constructors(Harness &harness) {
 	auto native = harness.body("\tvar reference: RefCounted = <caret>\n");
 	expect(has_item(native, "RefCounted.new"), "native class expected types offer constructors");
 	auto alias = harness.body("\tvar product: ProductAlias = <caret>\n");
-	expect(has_item(alias, "ProductAlias.new") || has_item(alias, "Product.new"),
-		"script aliases retain a usable constructor path");
+	expect(has_item(alias, "Product.new") && !has_item(alias, "ProductAlias.new"),
+		"constructor completion chooses the shortest valid local spelling");
 	auto argument = harness.body("\taccepts_product(<caret>)\n");
-	expect_result(has_item(argument, "ProductAlias.new"), "script constructor is offered for a callable argument", argument);
+	expect_result(has_item(argument, "Product.new"), "script constructor is offered for a callable argument", argument);
 	auto comparison = harness.body("\tif target == <caret>\n");
-	expect_result(has_item(comparison, "ProductAlias.new"), "script constructor is offered for an object comparison", comparison);
+	expect_result(has_item(comparison, "Product.new"), "script constructor is offered for an object comparison", comparison);
+	auto self_preload = harness.probe(
+		"extends CompletionProviderBase\n\n"
+		"const PE_STRIP_CAST_SCRIPT = preload(\"res://main.gd\")\n\n"
+		"class Cache:\n"
+		"\tfunc _init() -> void: pass\n\n"
+		"var cache: Cache = <caret>\n");
+	auto *cache = find_item(self_preload, "Cache.new");
+	expect_result(cache && cache->label == "Cache.new()" && cache->insert_text == "Cache.new()" &&
+		!has_item(self_preload, "PE_STRIP_CAST_SCRIPT.Cache.new"),
+		"a self-preload alias does not outrank its directly visible inner class", self_preload);
+	auto foreign = harness.probe(
+		"extends CompletionProviderBase\n\n"
+		"const External = preload(\"res://constructor_source.gd\")\n\n"
+		"func inspect() -> void:\n"
+		"\tExternal.accept(<caret>)\n");
+	expect_result(has_item(foreign, "External.Product.new") && !has_item(foreign, "Product.new"),
+		"foreign constructor types keep the shortest caller-valid qualified path", foreign);
 	auto member = harness.body("\tvar product: Product = Product.<caret>\n");
 	auto *member_item = find_item(member, "new");
 	expect_result(member.disposition == CompletionDisposition::Augment && member.provider == "constructors" &&

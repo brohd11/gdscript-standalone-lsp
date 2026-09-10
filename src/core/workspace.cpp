@@ -1902,10 +1902,11 @@ AccessProvenance Workspace::access_provenance(std::string expression, const Reso
 }
 
 std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &type,
-		const ClassRecord *context, const AccessProvenance &provenance) const {
+		const ClassRecord *context, const AccessProvenance &provenance, bool compact) const {
 	auto cache_key = (context ? context->symbol.id : std::string{}) + "\n" +
 		std::to_string(static_cast<int>(type.kind)) + "\n" + type.name + "\n" + type.symbol_id + "\n" +
-		provenance.declaration_access + "\n" + provenance.declaration_context_id + "\n" + provenance.receiver_access;
+		provenance.declaration_access + "\n" + provenance.declaration_context_id + "\n" + provenance.receiver_access +
+		(compact ? "\ncompact" : "\nall");
 	{
 		std::lock_guard cache_lock(access_path_cache_mutex_);
 		if (auto found = access_path_cache_.find(cache_key); found != access_path_cache_.end()) return found->second;
@@ -1918,13 +1919,13 @@ std::vector<AccessPath> Workspace::access_paths_for_type(const ResolvedType &typ
 			(!candidate.symbol_id.empty() || candidate.name == type.name);
 	};
 	auto add = [&](std::string text, AccessPathKind kind, bool verify = true) {
-		if (text.empty() || filled_kinds.contains(kind) || !seen.insert(text).second) return;
+		if (text.empty() || (compact && filled_kinds.contains(kind)) || !seen.insert(text).second) return;
 		if (verify && context && !same_type(type_from_name(text, context))) {
 			seen.erase(text);
 			return;
 		}
 		paths.push_back({std::move(text), kind, false});
-		filled_kinds.insert(kind);
+		if (compact) filled_kinds.insert(kind);
 	};
 	if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
 		add(type.name, AccessPathKind::Native, false);
@@ -2257,6 +2258,7 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 		}
 		std::sort(native_names.begin(), native_names.end());
 		for (const auto &name : native_names) {
+			if (name == "Nil") continue;
 			if (names.insert(name).second) {
 				result.push_back(completion_item(name, "class", {}, SymbolKind::Class,
 					false, "native:" + name));
@@ -2795,17 +2797,26 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			std::vector<std::string> natives;
 			for (const auto &[name, record] : native_api_.classes()) { (void)record; natives.push_back(name); }
 			std::sort(natives.begin(), natives.end());
-			for (auto &name : natives) if (names.insert(name).second) add_type(std::move(name));
+			for (auto &name : natives) if (name != "Nil" && names.insert(name).second) add_type(std::move(name));
 		}
 		if (!additions.empty()) augment_provider = "extendedTypeHints";
 	}
 
 	if (completion_config_.constructors && expected && expected->type.instance &&
 			(expected->type.kind == TypeKind::ScriptClass || expected->type.kind == TypeKind::NativeClass)) {
-		auto paths = access_paths_for_type(expected->type, context, expected->provenance);
-		auto access = !paths.empty() ? paths.front().text :
+		// Access paths exposed by rich resolution remain compact and alias-first.
+		// Constructors are insertion candidates, so inspect every verified spelling
+		// and prefer the least qualification available at the caller instead.
+		auto paths = access_paths_for_type(expected->type, context, expected->provenance, false);
+		auto closest = std::min_element(paths.begin(), paths.end(), [](const AccessPath &left, const AccessPath &right) {
+			auto distance = [](const AccessPath &path) {
+				return std::tuple{std::count(path.text.begin(), path.text.end(), '.'), path.text.size()};
+			};
+			return distance(left) < distance(right);
+		});
+		auto access = closest != paths.end() ? closest->text :
 			(expected->access.empty() ? expected->type.name : expected->access);
-		auto access_kind = paths.empty() ? "local" : std::string(access_path_kind_name(paths.front().kind));
+		auto access_kind = closest == paths.end() ? "local" : std::string(access_path_kind_name(closest->kind));
 		if (auto item = constructor_completion_item(expected->type, access + ".new", std::move(access_kind))) {
 			additions.insert(additions.begin(), std::move(*item));
 		}
