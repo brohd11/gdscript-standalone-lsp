@@ -123,13 +123,17 @@ int main() {
 			("gdscript-lsp-future-annotations-" + std::to_string(
 				std::chrono::steady_clock::now().time_since_epoch().count()));
 		std::filesystem::create_directories(future_fixture);
+		// Workspace::open canonicalizes its root; queries must use the same path
+		// even when the platform's temporary directory is reached through a symlink.
+		future_fixture = std::filesystem::weakly_canonical(future_fixture);
 		{
 			std::ofstream stream(future_fixture / "project.godot");
 			stream << "[application]\nconfig/name=\"Future annotations\"\n";
 		}
 		{
 			std::ofstream stream(future_fixture / "extension_api.json");
-			stream << R"({"header":{"version_major":4,"version_minor":7,"version_patch":0}})";
+			stream << R"({"header":{"version_major":4,"version_minor":7,"version_patch":0},
+				"classes":[{"name":"Object"},{"name":"RefCounted","inherits":"Object"}]})";
 		}
 		{
 			std::ofstream stream(future_fixture / "future.gd");
@@ -139,8 +143,21 @@ int main() {
 		expect(future_workspace.open(future_fixture, future_fixture / "extension_api.json", &error),
 			"future annotation workspace opens: " + error);
 		auto future_uri = future_workspace.uri_for_path(future_fixture / "future.gd");
-		expect(future_workspace.diagnostics(future_uri).empty(),
-			"future targets accept unknown annotations while still validating known definitions");
+		expect(!future_workspace.document_symbols(future_uri).empty(),
+			"future annotation fixture URI resolves to the indexed script");
+		auto future_diagnostics = future_workspace.diagnostics(future_uri);
+		for (const auto &diagnostic : future_diagnostics) {
+			std::cerr << "Future annotation diagnostic: " << diagnostic.code << ": " << diagnostic.message << '\n';
+		}
+		expect(future_diagnostics.empty(),
+			"future targets accept unknown annotations");
+		expect(future_workspace.update_document(future_uri,
+			"@annotation_added_after_4_6\n@export\nfunc test() -> void:\n\tpass\n", 1, &error),
+			"future annotation fixture accepts an invalid known annotation");
+		future_diagnostics = future_workspace.diagnostics(future_uri);
+		expect(future_diagnostics.size() == 1 && future_diagnostics.front().code == "syntax-error" &&
+			future_diagnostics.front().message.find("\"@export\" cannot be applied to a function") != std::string::npos,
+			"future targets still validate known annotation definitions");
 		std::filesystem::remove_all(future_fixture);
 	}
 
