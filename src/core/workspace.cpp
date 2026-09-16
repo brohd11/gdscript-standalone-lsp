@@ -3365,6 +3365,13 @@ std::optional<std::pair<std::string, int64_t>> Workspace::document_text(const st
 	return std::pair{document->source(), document->version()};
 }
 
+std::shared_ptr<const Document> Workspace::document_snapshot(const std::string &uri) const {
+	std::shared_lock lock(mutex_, std::try_to_lock);
+	if (!lock.owns_lock()) return nullptr;
+	auto found = documents_.find(uri);
+	return found == documents_.end() ? nullptr : found->second;
+}
+
 int64_t Workspace::document_version(const std::string &uri) const {
 	std::shared_lock lock(mutex_);
 	auto *document = find_document(uri);

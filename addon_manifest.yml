@@ -26,10 +26,10 @@ YAMLParser:
 
 godot-gdscript-lsp:
     path: addons/addon_lib/gdscript_lsp
-    version: "0.1.0"
+    version: "0.1.2-beta"
     is_dependency: true
-    tag: "v0.1.0"
-    url: https://github.com/brohd11/godot-gdscript-lsp/releases/download/v0.1.0/gdscript-lsp-v0.1.0.zip
+    tag: "v0.1.2-beta"
+    url: https://github.com/brohd11/godot-gdscript-lsp/releases/download/v0.1.2-beta/gdscript-lsp-v0.1.2-beta.zip
 
 EditorNodeRef:
     kind: clone
@@ -58,3 +58,27 @@ godot-script-dock:
     version: "0.2.0"
     tag: "main"
     url: https://github.com/brohd11/godot-script-dock.git
+
+github.com/brohd11/godot-util-r:
+    name: "UtilRuntime"
+    path: addons/addon_lib/util_r
+    version: "0.1.0"
+    is_dependency: true
+    tag: "v0.1.0"
+    url: https://github.com/brohd11/godot-util-r/archive/refs/tags/v0.1.0.zip
+
+github.com/brohd11/godot-singleton:
+    name: "Singletons"
+    path: addons/addon_lib/singleton
+    version: "0.9.0"
+    is_dependency: true
+    tag: "v0.9.0"
+    url: https://github.com/brohd11/godot-singleton/archive/refs/tags/v0.9.0.zip
+
+github.com/brohd11/godot-gdscript-parser:
+    name: "GDScriptParser"
+    kind: clone
+    path: addons/addon_lib/gdscript_parser
+    version: "0.1.0"
+    tag: "main"
+    url: https://github.com/brohd11/godot-gdscript-parser.git

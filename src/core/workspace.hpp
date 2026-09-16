@@ -72,6 +72,11 @@ public:
 	std::vector<std::string> affected_documents(const std::vector<std::string> &changed_uris) const;
 	int64_t document_version(const std::string &uri) const;
 	std::optional<std::pair<std::string, int64_t>> document_text(const std::string &uri) const;
+	// The indexed document itself, shared rather than copied, for consumers that want a read-only
+	// structural view of a file without registering it as an open editor buffer. Returns null when
+	// the uri is unknown, and also when the workspace is mid-update: callers are on the main thread
+	// and must never block behind an index batch, so this try-locks and gives up rather than wait.
+	std::shared_ptr<const Document> document_snapshot(const std::string &uri) const;
 
 	const NativeApi &native_api() const { return native_api_; }
 	const IndexStats &stats() const { return stats_; }
