@@ -8,7 +8,6 @@
 /dist/
 /.sconsign.dblite
 *.os
-/addons/gdscript_lsp/bin/
 __pycache__/
 *.pyc
 

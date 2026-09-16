@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 
@@ -885,22 +886,41 @@ struct Document::Impl {
 	}
 };
 
-Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version) :
+Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version, Analysis analysis) :
 		impl_(std::make_unique<Impl>()), uri_(std::move(uri)), resource_path_(std::move(resource_path)),
 		source_(std::move(source)), version_(version) {
 	parse();
+	if (analysis == Analysis::Eager) analyze();
 }
 
 Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version,
-		const Document &previous) :
+		const Document &previous, Analysis analysis) :
 		impl_(std::make_unique<Impl>()), uri_(std::move(uri)), resource_path_(std::move(resource_path)),
 		source_(std::move(source)), version_(version) {
 	parse(&previous);
+	if (analysis == Analysis::Eager) analyze();
 }
 
 Document::~Document() = default;
 Document::Document(Document &&) noexcept = default;
 Document &Document::operator=(Document &&) noexcept = default;
+
+const TSTree *Document::concrete_tree() const { return impl_->tree; }
+
+Document::Document(const Document &other, bool) :
+		impl_(std::make_unique<Impl>()), uri_(other.uri_), resource_path_(other.resource_path_),
+		source_(other.source_), version_(other.version_), classes_(other.classes_),
+		syntax_errors_(other.syntax_errors_), syntax_root_(other.syntax_root_),
+		used_incremental_parse_(other.used_incremental_parse_), edit_(other.edit_),
+		changed_ranges_(other.changed_ranges_), analyzed_(other.analyzed_) {
+	if (other.impl_->tree) impl_->tree = ts_tree_copy(other.impl_->tree);
+}
+
+std::shared_ptr<Document> Document::clone_for_workspace() const {
+	auto result = std::shared_ptr<Document>(new Document(*this, true));
+	if (!result->analyzed_) result->analyze();
+	return result;
+}
 
 void Document::parse(const Document *previous) {
 	impl_->parser = ts_parser_new();
@@ -909,12 +929,32 @@ void Document::parse(const Document *previous) {
 	if (previous && previous->impl_ && previous->impl_->tree) {
 		edited_tree = ts_tree_copy(previous->impl_->tree);
 		auto edit = replacement_edit(previous->source_, source_);
+		edit_ = edit;
 		ts_tree_edit(edited_tree, &edit);
 		used_incremental_parse_ = true;
 	}
 	impl_->tree = ts_parser_parse_string(impl_->parser, edited_tree, source_.data(), static_cast<uint32_t>(source_.size()));
-	if (edited_tree) ts_tree_delete(edited_tree);
+	if (edited_tree) {
+		if (impl_->tree) {
+			uint32_t count = 0;
+			auto *ranges = ts_tree_get_changed_ranges(edited_tree, impl_->tree, &count);
+			if (count) changed_ranges_.assign(ranges, ranges + count);
+			std::free(ranges);
+		}
+		ts_tree_delete(edited_tree);
+	}
+	// Editor clients can defer language analysis until workspace ingestion.
+}
+
+void Document::analyze() {
+	analyzed_ = true;
 	if (!impl_->tree) return;
+	// Bounded recovery may parse damaged function fragments. A workspace clone
+	// owns its parser as well as its tree; never share a parser across threads.
+	if (!impl_->parser) {
+		impl_->parser = ts_parser_new();
+		ts_parser_set_language(impl_->parser, tree_sitter_gdscript());
+	}
 	auto root = ts_tree_root_node(impl_->tree);
 	syntax_root_ = syntax_node(root, source_);
 	collect_errors(root, source_, syntax_errors_);

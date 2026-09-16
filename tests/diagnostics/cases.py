@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-API = ROOT / 'addons/gdscript_lsp/data/godot-4.6-extension-api.json'
+API = ROOT / 'data/godot-4.6-extension-api.json'
 
 
 def packet(value):

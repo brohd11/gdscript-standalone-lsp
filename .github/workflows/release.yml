@@ -27,6 +27,9 @@ jobs:
           - runner: macos-15
             target: macos-arm64
             arch: arm64
+          - runner: macos-15-intel
+            target: macos-x64
+            arch: x86_64
           - runner: ubuntu-22.04
             target: linux-x64
             arch: x86_64
@@ -78,7 +81,7 @@ jobs:
           python -c 'import os, platform; assert platform.machine() == os.environ["EXPECTED_ARCH"], platform.machine()'
           options=()
           case "$RUNNER_OS" in
-            macOS) options+=(-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0) ;;
+            macOS) options+=(-DCMAKE_OSX_ARCHITECTURES="$EXPECTED_ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0) ;;
             Windows) options+=(-A x64) ;;
           esac
           cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON "${options[@]}"
@@ -164,6 +167,7 @@ jobs:
         run: |
           archives=(
             "gdscript-lsp-macos-arm64.tar.gz"
+            "gdscript-lsp-macos-x64.tar.gz"
             "gdscript-lsp-linux-x64.tar.gz"
             "gdscript-lsp-windows-x64.zip"
           )
@@ -195,9 +199,9 @@ jobs:
           fi
 
           gh release upload "$RELEASE_TAG" "${archives[@]}" SHA256SUMS --clobber
-          # Confirm all four uploads exist before making the draft public.
+          # Confirm all five uploads exist before making the draft public.
           gh release view "$RELEASE_TAG" --json assets |
-            jq -e --arg mac "${archives[0]}" --arg linux "${archives[1]}" \
-              --arg windows "${archives[2]}" \
-              '([.assets[] | select(.size > 0) | .name] | sort) == ([$mac, $linux, $windows, "SHA256SUMS"] | sort)'
+            jq -e --arg mac "${archives[0]}" --arg intel "${archives[1]}" --arg linux "${archives[2]}" \
+              --arg windows "${archives[3]}" \
+              '([.assets[] | select(.size > 0) | .name] | sort) == ([$mac, $intel, $linux, $windows, "SHA256SUMS"] | sort)'
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"

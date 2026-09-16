@@ -15,7 +15,7 @@ set -eu
 
 REPO="brohd11/gdscript-standalone-lsp"
 BINARY="gdscript-lsp"
-SUPPORTED="macos-arm64 linux-x64"
+SUPPORTED="macos-arm64 macos-x64 linux-x64"
 
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 VERSION="${VERSION:-latest}"

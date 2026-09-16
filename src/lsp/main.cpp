@@ -325,7 +325,8 @@ std::filesystem::path discover_api(const std::filesystem::path &project, const s
 	}
 	for (const auto &candidate : {
 		project / ".godot/addons/gdscript_parser/extension_api.json",
-		project / "addons/gdscript_lsp/data/godot-4.6-extension-api.json"}) {
+		project / "addons/addon_lib/gdscript_lsp/data/godot-4.6-extension-api.json",
+		project / "data/godot-4.6-extension-api.json"}) {
 		if (std::filesystem::exists(candidate)) return candidate;
 	}
 	std::error_code error;
@@ -354,7 +355,7 @@ std::filesystem::path discover_api(const std::filesystem::path &project, const s
 	executable = std::filesystem::weakly_canonical(executable, error);
 	if (error) return {};
 	for (const auto &candidate : {
-		executable.parent_path().parent_path() / "addons/gdscript_lsp/data/godot-4.6-extension-api.json",
+		executable.parent_path().parent_path() / "data/godot-4.6-extension-api.json",
 		executable.parent_path().parent_path() / "share/gdscript-lsp/godot-4.6-extension-api.json"}) {
 		if (std::filesystem::exists(candidate)) return candidate;
 	}

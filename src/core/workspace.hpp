@@ -46,6 +46,8 @@ public:
 	bool update_document(const std::string &uri, std::string text, int64_t version, std::string *error = nullptr,
 		UpdateImpact *impact = nullptr);
 	bool close_document(const std::string &uri, std::string *error = nullptr);
+	bool update_document(const Document &snapshot, std::string *error = nullptr,
+		UpdateImpact *impact = nullptr);
 	bool refresh_file(const std::string &uri, std::string *error = nullptr);
 
 	std::vector<CompletionItem> completion(const std::string &uri, Position position) const;
@@ -78,6 +80,9 @@ public:
 	std::filesystem::path path_for_uri(const std::string &uri) const;
 
 private:
+	bool validate_document_uri(const std::string &uri, std::string *error) const;
+	bool update_document_locked(std::shared_ptr<Document> replacement,
+		UpdateImpact *impact);
 	friend class SemanticAnalyzer;
 	friend class SemanticAnalyzerImpl;
 	friend class AnnotationAnalyzerImpl;

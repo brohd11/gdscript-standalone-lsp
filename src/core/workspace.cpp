@@ -481,7 +481,8 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 	} else {
 		for (const auto &candidate : {
 				root_ / ".godot/addons/gdscript_parser/extension_api.json",
-				root_ / "addons/gdscript_lsp/data/godot-4.6-extension-api.json"}) {
+				root_ / "addons/addon_lib/gdscript_lsp/data/godot-4.6-extension-api.json",
+				root_ / "data/godot-4.6-extension-api.json"}) {
 			if (std::filesystem::exists(candidate)) {
 				metadata = candidate;
 				break;
@@ -836,10 +837,7 @@ void Workspace::rebuild_registry() {
 	}
 }
 
-bool Workspace::update_document(const std::string &uri, std::string text, int64_t version, std::string *error,
-		UpdateImpact *impact) {
-	std::unique_lock lock(mutex_);
-	if (impact) *impact = {};
+bool Workspace::validate_document_uri(const std::string &uri, std::string *error) const {
 	auto path = path_for_uri(uri);
 	if (path.empty()) {
 		if (error) *error = "invalid file URI";
@@ -850,15 +848,36 @@ bool Workspace::update_document(const std::string &uri, std::string text, int64_
 		if (error) *error = "document is outside workspace";
 		return false;
 	}
+	return true;
+}
+
+bool Workspace::update_document(const std::string &uri, std::string text, int64_t version, std::string *error,
+		UpdateImpact *impact) {
+	std::unique_lock lock(mutex_);
+	if (impact) *impact = {};
+	if (!validate_document_uri(uri, error)) return false;
+	auto previous = documents_.find(uri);
+	auto replacement = previous == documents_.end()
+		? std::make_shared<Document>(uri, resource_path(path_for_uri(uri)), std::move(text), version)
+		: std::make_shared<Document>(uri, resource_path(path_for_uri(uri)), std::move(text), version, *previous->second);
+	return update_document_locked(std::move(replacement), impact);
+}
+
+bool Workspace::update_document(const Document &snapshot, std::string *error, UpdateImpact *impact) {
+	std::unique_lock lock(mutex_);
+	if (impact) *impact = {};
+	if (!validate_document_uri(snapshot.uri(), error)) return false;
+	return update_document_locked(snapshot.clone_for_workspace(), impact);
+}
+
+bool Workspace::update_document_locked(std::shared_ptr<Document> replacement,
+		UpdateImpact *impact) {
+	if (impact) *impact = {};
+	const auto &uri = replacement->uri();
+	auto path = path_for_uri(uri);
 	if (!disk_sources_.contains(uri)) disk_sources_[uri] = read_file(path);
 	auto previous = documents_.find(uri);
 	auto old_affected = affected_documents_locked({uri});
-	std::shared_ptr<Document> replacement;
-	if (previous == documents_.end()) {
-		replacement = std::make_shared<Document>(uri, resource_path(path), std::move(text), version);
-	} else {
-		replacement = std::make_shared<Document>(uri, resource_path(path), std::move(text), version, *previous->second);
-	}
 	if (impact) impact->incremental_parse = replacement->used_incremental_parse();
 
 	if (previous == documents_.end() || document_topology(*previous->second) != document_topology(*replacement)) {

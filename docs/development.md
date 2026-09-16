@@ -48,8 +48,9 @@ normal builds do not require the tree-sitter generator.
   resolver, type inference, and query API.
 - `src/lsp` implements LSP 3.17 JSON-RPC over standard input and output, plus
   loopback TCP adapters for POSIX and Windows.
-- `src/gdextension` wraps the shared `Workspace` API with godot-cpp.
-- `addons/gdscript_lsp/data` contains the reduced Godot 4.6 native class
+- The separate [Godot consumer](https://github.com/brohd11/godot-gdscript-lsp)
+  owns godot-cpp bindings, structural projections, and CodeEdit integration.
+- `data` contains the reduced Godot 4.6 native class
   baseline.
 
 Indexing uses several passes: scripts are parsed, global/path/UID class

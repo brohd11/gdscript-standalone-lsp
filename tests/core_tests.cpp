@@ -113,7 +113,7 @@ int main() {
 		expect(build_annotation_registry({}).target_version() == GodotVersion{4, 6, 3},
 			"missing API version defaults to the 4.6.3 annotation baseline");
 		NativeApi complete_api;
-		expect(complete_api.load("addons/gdscript_lsp/data/godot-4.6-extension-api.json", &error),
+		expect(complete_api.load("data/godot-4.6-extension-api.json", &error),
 			"complete native API loads for annotation constants: " + error);
 		expect(complete_api.global_enum_value("PROPERTY_HINT_RANGE") == 1,
 			"native enum numeric values are retained for annotation constants");
@@ -228,7 +228,7 @@ int main() {
 		Workspace recovery_workspace;
 		auto native_fixture = std::filesystem::weakly_canonical("tests/fixtures/native");
 		expect(recovery_workspace.open(native_fixture,
-			std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json"), &error),
+			std::filesystem::weakly_canonical("data/godot-4.6-extension-api.json"), &error),
 			"function recovery workspace opens: " + error);
 		auto recovery_uri = recovery_workspace.uri_for_path(native_fixture / "function_recovery.gd");
 		int64_t version = 1;
@@ -1289,7 +1289,7 @@ int main() {
 	}
 	Workspace warning_workspace;
 	expect(warning_workspace.open(warning_fixture,
-		std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json"), &error),
+		std::filesystem::weakly_canonical("data/godot-4.6-extension-api.json"), &error),
 		"warning fixture opens: " + error);
 	auto warning_uri = warning_workspace.uri_for_path(warning_fixture / "warnings.gd");
 	auto warning_diagnostics = warning_workspace.diagnostics(warning_uri);
@@ -1347,7 +1347,7 @@ int main() {
 	// tests can keep their original res:// layout and UIDs untouched.
 	Workspace inference_workspace;
 	auto inference_fixture = std::filesystem::weakly_canonical("tests/fixtures/inference");
-	auto inference_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");
+	auto inference_api = std::filesystem::weakly_canonical("data/godot-4.6-extension-api.json");
 	expect(inference_workspace.open(inference_fixture, inference_api, &error),
 		"inference corpus workspace opens: " + error);
 	auto inference_uri = inference_workspace.uri_for_path(inference_fixture / "scenario.gd");
@@ -1451,7 +1451,7 @@ int main() {
 	// suite identical in a clean checkout and a developer's populated project.
 	Workspace repository_workspace;
 	auto repository_fixture = std::filesystem::weakly_canonical("tests/fixtures/repository_regressions");
-	auto repository_api = std::filesystem::weakly_canonical("addons/gdscript_lsp/data/godot-4.6-extension-api.json");
+	auto repository_api = std::filesystem::weakly_canonical("data/godot-4.6-extension-api.json");
 	expect(repository_workspace.open(repository_fixture, repository_api, &error),
 		"repository regression fixture opens: " + error);
 	expect(repository_workspace.stats().document_count == 5,

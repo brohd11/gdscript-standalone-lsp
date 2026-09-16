@@ -1,8 +1,10 @@
 #pragma once
 
 #include "core/types.hpp"
+#include <tree_sitter/api.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,9 +22,12 @@ struct ClassRecord {
 
 class Document {
 public:
-	Document(std::string uri, std::string resource_path, std::string source, int64_t version = -1);
+	// Deferred documents expose only source/tree/edit data until cloned for a workspace.
+	enum class Analysis { Eager, Deferred };
+	Document(std::string uri, std::string resource_path, std::string source, int64_t version = -1,
+		Analysis analysis = Analysis::Eager);
 	Document(std::string uri, std::string resource_path, std::string source, int64_t version,
-		const Document &previous);
+		const Document &previous, Analysis analysis = Analysis::Eager);
 	~Document();
 	Document(Document &&) noexcept;
 	Document &operator=(Document &&) noexcept;
@@ -38,6 +43,13 @@ public:
 	const std::vector<ParseIssue> &syntax_errors() const { return syntax_errors_; }
 	const SyntaxNode &syntax_root() const { return syntax_root_; }
 	bool used_incremental_parse() const { return used_incremental_parse_; }
+	// Borrowed tree: valid while this document lives. Never edit it in place.
+	const TSTree *concrete_tree() const;
+	const std::optional<TSInputEdit> &edit() const { return edit_; }
+	const std::vector<TSRange> &changed_ranges() const { return changed_ranges_; }
+	// Copies the concrete tree without reparsing the document and completes deferred
+	// analysis (including bounded error recovery) into independent semantic records.
+	std::shared_ptr<Document> clone_for_workspace() const;
 	std::string_view text(const SyntaxNode &node) const;
 
 	const ClassRecord *class_at(Position position) const;
@@ -56,8 +68,13 @@ private:
 	std::vector<ParseIssue> syntax_errors_;
 	SyntaxNode syntax_root_;
 	bool used_incremental_parse_ = false;
+	std::optional<TSInputEdit> edit_;
+	std::vector<TSRange> changed_ranges_;
+	bool analyzed_ = false;
+	Document(const Document &other, bool);
 
 	void parse(const Document *previous = nullptr);
+	void analyze();
 };
 
 } // namespace gdscript_lsp

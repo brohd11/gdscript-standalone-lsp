@@ -300,6 +300,40 @@ int main() {
 	expect(workspace.update_document(base_uri, original, 19, &error, &impact), "fixture restoration succeeds");
 	expect(impact.full_rebuild, "removing a member declaration retains the full rebuild fallback");
 
+	Document snapshot(base_uri, "res://base.gd", original + "\nvar snapshot_only: int\n", 20);
+	auto clone = snapshot.clone_for_workspace();
+	expect(clone->concrete_tree() != nullptr && clone->concrete_tree() != snapshot.concrete_tree(),
+		"workspace clone owns an independent tree handle");
+	expect(document_shape(*clone) == document_shape(snapshot), "snapshot clone preserves all syntax records");
+	clone->classes().front().base_class_id = "modified";
+	expect(snapshot.classes().front().base_class_id.empty(), "semantic records are isolated from syntax snapshot");
+	expect(workspace.update_document(snapshot, &error, &impact), "workspace accepts a parsed snapshot");
+	expect(workspace.document_version(base_uri) == 20, "snapshot ingestion preserves document revision");
+	expect(snapshot.classes().front().base_class_id.empty(), "workspace resolution leaves snapshot unchanged");
+	Document edited(base_uri, "res://base.gd", original + "\nvar renamed_snapshot: int\n", 21, snapshot);
+	expect(edited.edit().has_value() && edited.used_incremental_parse(), "snapshot exposes text edit metadata");
+	expect(snapshot.source().find("snapshot_only") != std::string::npos,
+		"incremental parsing leaves the previous snapshot alive and unchanged");
+
+	Document deferred(base_uri, "res://base.gd", original, 22, Document::Analysis::Deferred);
+	expect(deferred.concrete_tree() && deferred.classes().empty(), "deferred document only parses concrete syntax");
+	auto analyzed = deferred.clone_for_workspace();
+	Document eager(base_uri, "res://base.gd", original, 22);
+	expect(document_shape(*analyzed) == document_shape(eager), "deferred analysis matches eager analysis without reparsing");
+	expect(deferred.classes().empty(), "workspace ingestion does not analyze editor snapshot in place");
+
+	for (const auto &source : edits) {
+		Document delayed(uri, resource, source, 23, Document::Analysis::Deferred);
+		Document expected(uri, resource, source, 23);
+		expect(document_shape(*delayed.clone_for_workspace()) == document_shape(expected),
+			"deferred broken-syntax recovery matches eager analysis");
+	}
+
+	expect(!workspace.update_document("untitled:editor", "var invalid = 1", 1, &error, &impact) &&
+		error == "invalid file URI", "invalid update URI is rejected before parsing");
+	Document outside("untitled:editor", "res://invalid.gd", "var invalid = 1", 1, Document::Analysis::Deferred);
+	expect(!workspace.update_document(outside, &error, &impact), "workspace rejects non-file syntax snapshots");
+
 	if (failures == 0) std::cout << "incremental update tests passed\n";
 	return failures == 0 ? 0 : 1;
 }

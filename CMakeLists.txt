@@ -107,7 +107,7 @@ else()
 endif()
 
 set(GDSCRIPT_LSP_API_SOURCE
-  "${CMAKE_CURRENT_SOURCE_DIR}/addons/gdscript_lsp/data/godot-4.6-extension-api.json"
+  "${CMAKE_CURRENT_SOURCE_DIR}/data/godot-4.6-extension-api.json"
 )
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/share/gdscript-lsp")
 configure_file(

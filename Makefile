@@ -3,7 +3,6 @@ CC ?= cc
 AR ?= ar
 DEPS_DIR ?= .deps
 BUILD_DIR ?= build
-SCONS ?= python3 $(DEPS_DIR)/scons/scripts/scons.py
 GODOT ?= godot
 PREFIX ?= /usr/local
 
@@ -26,7 +25,7 @@ DEPFILES := $(CORE_OBJ:.o=.d) $(LSP_OBJ:.o=.d) $(BUILD_DIR)/tests/core_tests.d \
 
 -include $(DEPFILES)
 
-.PHONY: all deps test benchmark-completion test-conformance test-diagnostics test-engine-bridge test-engine-bridge-godot gdextension test-gdextension install clean dump-tree
+.PHONY: all deps test benchmark-completion test-conformance test-diagnostics test-engine-bridge test-engine-bridge-godot install clean dump-tree
 all: $(BUILD_DIR)/gdscript-lsp
 
 deps:
@@ -85,18 +84,10 @@ test-conformance: $(BUILD_DIR)/gdscript-lsp
 	python3 tests/diagnostics/oracle.py $(BUILD_DIR)/gdscript-lsp "$(GODOT)"
 	python3 tests/diagnostics/parse_errors.py $(BUILD_DIR)/gdscript-lsp --godot "$(GODOT)"
 
-gdextension: deps
-	@tools/fetch_gdextension_dependencies.sh "$(DEPS_DIR)"
-	$(SCONS) platform=linux target=template_debug
-
-test-gdextension: gdextension
-	@mkdir -p /tmp/gdscript-lsp-xdg
-	XDG_DATA_HOME=/tmp/gdscript-lsp-xdg $(GODOT) --headless --path . --script res://tests/gdextension_smoke.gd
-
 install: $(BUILD_DIR)/gdscript-lsp
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/gdscript-lsp"
 	install -m755 $(BUILD_DIR)/gdscript-lsp "$(DESTDIR)$(PREFIX)/bin/gdscript-lsp"
-	install -m644 addons/gdscript_lsp/data/godot-4.6-extension-api.json \
+	install -m644 data/godot-4.6-extension-api.json \
 		"$(DESTDIR)$(PREFIX)/share/gdscript-lsp/godot-4.6-extension-api.json"
 
 $(BUILD_DIR)/dump-tree: $(TS_OBJ) $(BUILD_DIR)/tools/dump_tree.o

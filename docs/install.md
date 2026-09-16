@@ -1,6 +1,6 @@
 # Installation
 
-Prebuilt releases are available for macOS 14 or newer on Apple Silicon,
+Prebuilt releases are available for macOS 14 or newer on Apple Silicon or Intel,
 Linux x64, and Windows x64. Each release includes checksums.
 
 ## Install script
@@ -44,3 +44,5 @@ required Godot API metadata and documentation.
 macOS packages are unsigned and are not notarized. Release packages contain the
 standalone server; build the GDExtension separately if you need the embedded
 integration. See [building from source](build.md) for local builds.
+
+macOS archives support Apple Silicon (`macos-arm64`) and Intel (`macos-x64`), both requiring macOS 14 or later. The installer selects the current architecture.

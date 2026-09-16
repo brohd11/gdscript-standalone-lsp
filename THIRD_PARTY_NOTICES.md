@@ -2,7 +2,7 @@
 
 ## Godot Engine
 
-The reduced extension API snapshot in `addons/gdscript_lsp/data` is generated
+The reduced extension API snapshot in `data` is generated
 from Godot Engine 4.6 metadata. Diagnostic messages and rule behavior are tested
 for compatibility with Godot's GDScript analyzer. The strict built-in conversion
 table is a clean C++ adaptation of `Variant::can_convert_strict` from
