@@ -118,7 +118,7 @@ configure_file(
 
 include(CTest)
 if(BUILD_TESTING)
-  foreach(test_name core caret_context completion_provider incremental_update)
+  foreach(test_name core caret_context completion_provider incremental_update large_expression)
     add_executable(${test_name}-tests "tests/${test_name}_tests.cpp")
     target_link_libraries(${test_name}-tests PRIVATE gdscript-lsp-core Threads::Threads)
     if(MSVC)

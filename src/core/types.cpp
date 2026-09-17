@@ -2,6 +2,40 @@
 
 namespace gdscript_lsp {
 
+SyntaxNode::SyntaxNode(const SyntaxNode &other) {
+	std::vector<std::pair<SyntaxNode *, const SyntaxNode *>> pending{{this, &other}};
+	while (!pending.empty()) {
+		auto [target, source] = pending.back();
+		pending.pop_back();
+		target->kind = source->kind;
+		target->field = source->field;
+		target->range = source->range;
+		target->start_byte = source->start_byte;
+		target->end_byte = source->end_byte;
+		target->has_error = source->has_error;
+		target->children.resize(source->children.size());
+		for (size_t index = 0; index < source->children.size(); ++index)
+			pending.emplace_back(&target->children[index], &source->children[index]);
+	}
+}
+
+SyntaxNode &SyntaxNode::operator=(const SyntaxNode &other) {
+	if (this != &other) *this = SyntaxNode(other);
+	return *this;
+}
+
+SyntaxNode::~SyntaxNode() {
+	if (children.empty()) return;
+	// Empty descendants before their parents, so vector destruction never
+	// recurses down the expression tree (including during move assignment).
+	std::vector<SyntaxNode *> pending{this};
+	for (size_t index = 0; index < pending.size(); ++index)
+		for (auto &child : pending[index]->children)
+			if (!child.children.empty()) pending.push_back(&child);
+	for (auto node = pending.rbegin(); node != pending.rend(); ++node) (*node)->children.clear();
+}
+
+
 ResolvedType::ResolvedType(TypeKind p_kind, std::string p_name, std::string p_symbol_id,
 		bool p_instance, std::vector<ResolvedType> p_arguments) :
 		kind(p_kind), name(std::move(p_name)), symbol_id(std::move(p_symbol_id)), instance(p_instance),

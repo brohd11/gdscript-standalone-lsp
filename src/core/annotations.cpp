@@ -2,6 +2,7 @@
 
 #include "core/document.hpp"
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 #include "core/workspace.hpp"
 
 #include <algorithm>
@@ -251,18 +252,26 @@ private:
 		analysis.issues.push_back({node.range, std::move(message)});
 	}
 
-	void collect_constants(const SyntaxNode &node, Range scope, unsigned depth, bool local) {
-		if (node.kind == "class_body" || node.kind == "body") {
-			scope = node.range;
-			++depth;
-			if (node.kind == "body") local = true;
+	void collect_constants(const SyntaxNode &root, Range initial_scope, unsigned initial_depth, bool initial_local) {
+		struct Frame { const SyntaxNode *node; Range scope; unsigned depth; bool local; };
+		std::vector<Frame> pending{{&root, initial_scope, initial_depth, initial_local}};
+		while (!pending.empty()) {
+			auto [part, scope, depth, local] = pending.back();
+			pending.pop_back();
+			const auto &node = *part;
+			if (node.kind == "class_body" || node.kind == "body") {
+				scope = node.range;
+				++depth;
+				if (node.kind == "body") local = true;
+			}
+			if (node.kind == "const_statement") {
+				auto *name = field(node, "name"), *value = field(node, "value");
+				if (name && value) constants.push_back({std::string(document.text(*name)), value, scope,
+					node.range.start, depth, local});
+			}
+			for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
+				pending.push_back({&*child, scope, depth, local});
 		}
-		if (node.kind == "const_statement") {
-			auto *name = field(node, "name"), *value = field(node, "value");
-			if (name && value) constants.push_back({std::string(document.text(*name)), value, scope,
-				node.range.start, depth, local});
-		}
-		for (const auto &child : node.children) collect_constants(child, scope, depth, local);
 	}
 
 	const SyntaxNode *next_target(const SyntaxNode &container, size_t index) const {
@@ -346,36 +355,39 @@ private:
 			return;
 		}
 
-		for (const auto &child : node.children) if (child.kind == "annotations") {
-			AnnotationTarget target = declaration_target(node, class_scope);
-			AnnotationTarget level = class_scope ? class_level | AnnotationTarget::Standalone :
-				AnnotationTarget::Statement | AnnotationTarget::Standalone;
-			for (const auto &annotation : child.children) if (annotation.kind == "annotation") {
-				std::string name;
-				for (const auto &part : annotation.children) if (part.kind == "identifier") name = document.text(part);
-				auto *definition = registry.find(name);
-				const bool script_position = root_member && source_preamble;
-				auto annotation_level = script_position ? level | AnnotationTarget::Script : level;
-				auto annotation_target = target;
-				const SyntaxNode *target_node = &node;
-				if (definition && annotation_target_has(definition->targets, AnnotationTarget::Script)) {
-					const bool pure_script = !annotation_target_has(definition->targets, AnnotationTarget::Class) &&
-						!annotation_target_has(definition->targets, AnnotationTarget::Function);
-					if (script_position && (pure_script || node.kind == "class_name_statement")) {
-						annotation_target = AnnotationTarget::Script;
-						target_node = &document.syntax_root();
-					}
-				}
-				uses.push_back(make_use(annotation, target_node, class_scope, annotation_level,
-					annotation_target, script_position));
+		walk_syntax(node, [&](const SyntaxNode &part) {
+			if (part.kind == "annotations" || part.kind == "annotation") return false;
+			if (part.kind == "class_body" || part.kind == "body" || part.kind == "match_body") {
+				collect(part, part.kind == "class_body", false);
+				return false;
 			}
-		}
-		for (const auto &child : node.children) {
-			if (child.kind == "annotations" || child.kind == "annotation") continue;
-			if (child.kind == "class_body") collect(child, true, false);
-			else if (child.kind == "body" || child.kind == "match_body") collect(child, false, false);
-			else collect(child, class_scope, false);
-		}
+
+			for (const auto &child : part.children) if (child.kind == "annotations") {
+				AnnotationTarget target = declaration_target(part, class_scope);
+				AnnotationTarget level = class_scope ? class_level | AnnotationTarget::Standalone :
+					AnnotationTarget::Statement | AnnotationTarget::Standalone;
+				for (const auto &annotation : child.children) if (annotation.kind == "annotation") {
+					std::string name;
+					for (const auto &part : annotation.children) if (part.kind == "identifier") name = document.text(part);
+					auto *definition = registry.find(name);
+					const bool script_position = root_member && source_preamble;
+					auto annotation_level = script_position ? level | AnnotationTarget::Script : level;
+					auto annotation_target = target;
+					const SyntaxNode *target_node = &part;
+					if (definition && annotation_target_has(definition->targets, AnnotationTarget::Script)) {
+						const bool pure_script = !annotation_target_has(definition->targets, AnnotationTarget::Class) &&
+							!annotation_target_has(definition->targets, AnnotationTarget::Function);
+						if (script_position && (pure_script || part.kind == "class_name_statement")) {
+							annotation_target = AnnotationTarget::Script;
+							target_node = &document.syntax_root();
+						}
+					}
+					uses.push_back(make_use(annotation, target_node, class_scope, annotation_level,
+						annotation_target, script_position));
+				}
+			}
+			return true;
+		});
 	}
 
 	ConstantValue reduce(const SyntaxNode &node) {

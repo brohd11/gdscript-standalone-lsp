@@ -1,6 +1,7 @@
 #include "core/document.hpp"
 #include "core/gdscript_api.hpp"
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 
 #include <tree_sitter/api.h>
 
@@ -113,31 +114,53 @@ TSInputEdit replacement_edit(std::string_view old_source, std::string_view new_s
 	};
 }
 
+// Keep tree-sitter traversal on the heap too: an apparently wide arithmetic
+// expression is a deeply nested left-associative tree.
+template <class Visitor>
+void walk_named(TSNode root, Visitor &&visit) {
+	std::vector<TSNode> pending{root};
+	while (!pending.empty()) {
+		auto node = pending.back();
+		pending.pop_back();
+		if (ts_node_is_null(node) || !visit(node)) continue;
+		for (uint32_t index = ts_node_named_child_count(node); index > 0; --index)
+			pending.push_back(ts_node_named_child(node, index - 1));
+	}
+}
+
 SyntaxNode syntax_node(TSNode node, std::string_view source, std::string_view field_name = {}) {
 	SyntaxNode result;
-	result.kind = ts_node_type(node);
-	result.field = field_name;
-	result.range = syntax_range(node, source);
-	result.start_byte = ts_node_start_byte(node);
-	result.end_byte = ts_node_end_byte(node);
-	result.has_error = ts_node_has_error(node);
-	for (uint32_t index = 0; index < ts_node_child_count(node); ++index) {
-		auto child = ts_node_child(node, index);
-		if (!ts_node_is_named(child)) continue;
-		const char *child_field = ts_node_field_name_for_child(node, index);
-		result.children.push_back(syntax_node(child, source, child_field ? child_field : ""));
+	struct Frame { TSNode node; SyntaxNode *output; std::string_view field; };
+	std::vector<Frame> pending{{node, &result, field_name}};
+	while (!pending.empty()) {
+		auto [current, output, name] = pending.back();
+		pending.pop_back();
+		output->kind = ts_node_type(current);
+		output->field = name;
+		output->range = syntax_range(current, source);
+		output->start_byte = ts_node_start_byte(current);
+		output->end_byte = ts_node_end_byte(current);
+		output->has_error = ts_node_has_error(current);
+		output->children.resize(ts_node_named_child_count(current));
+		size_t named_index = 0;
+		for (uint32_t index = 0; index < ts_node_child_count(current); ++index) {
+			auto child = ts_node_child(current, index);
+			if (!ts_node_is_named(child)) continue;
+			const char *child_field = ts_node_field_name_for_child(current, index);
+			pending.push_back({child, &output->children[named_index++], child_field ? child_field : ""});
+		}
 	}
 	return result;
 }
 
 TSNode first_descendant(TSNode node, std::string_view wanted) {
-	if (ts_node_is_null(node)) return {};
-	if (node_type(node) == wanted) return node;
-	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
-		auto found = first_descendant(ts_node_named_child(node, i), wanted);
-		if (!ts_node_is_null(found)) return found;
-	}
-	return {};
+	TSNode result{};
+	walk_named(node, [&](TSNode current) {
+		if (!ts_node_is_null(result)) return false;
+		if (node_type(current) == wanted) { result = current; return false; }
+		return true;
+	});
+	return result;
 }
 
 bool has_named_child(TSNode node, std::string_view wanted) {
@@ -338,19 +361,19 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 void collect_locals(TSNode node, Symbol &function, std::string_view source,
 		size_t begin = 0, size_t end = std::numeric_limits<size_t>::max()) {
 	if (ts_node_is_null(node)) return;
-	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
-		auto child = ts_node_named_child(node, i);
+	walk_named(node, [&](TSNode child) {
+		if (ts_node_eq(child, node)) return true;
 		auto child_start = static_cast<size_t>(ts_node_start_byte(child));
 		auto child_end = static_cast<size_t>(ts_node_end_byte(child));
-		if (child_end < begin || child_start >= end) continue;
+		if (child_end < begin || child_start >= end) return false;
 		auto type = node_type(child);
 		if (type == "lambda" || type == "function_definition" || type == "constructor_definition" ||
-				type == "class_definition") continue;
+				type == "class_definition") return false;
 		if ((type == "variable_statement" || type == "const_statement") && child_start >= begin) {
 			auto local = variable_symbol(child, function.uri, function.id, source, true);
 			auto malformed = local.malformed;
 			function.children.push_back(std::move(local));
-			if (malformed) continue;
+			if (malformed) return false;
 		} else if (type == "for_statement" && child_start >= begin) {
 			auto left = field(child, "left");
 			Symbol local;
@@ -373,8 +396,8 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source,
 			local.is_local = true;
 			function.children.push_back(std::move(local));
 		}
-		collect_locals(child, function, source, begin, end);
-	}
+		return true;
+	});
 }
 
 size_t line_end(std::string_view source, size_t byte) {
@@ -626,114 +649,113 @@ void add_parse_issue(std::vector<ParseIssue> &errors, Range range, std::string m
 	errors.push_back({range, std::move(message)});
 }
 
-void collect_errors(TSNode node, std::string_view source, std::vector<ParseIssue> &errors) {
-	if (ts_node_is_error(node) || ts_node_is_missing(node)) {
-		auto text = trim(node_text(node, source));
-		add_parse_issue(errors, node_range(node, source), text == "@" ?
-			R"(Expected annotation identifier after "@".)" : "Syntax error.");
-	}
+void collect_errors(TSNode root, std::string_view source, std::vector<ParseIssue> &errors) {
+	walk_named(root, [&](TSNode node) {
+		if (ts_node_is_error(node) || ts_node_is_missing(node)) {
+			auto text = trim(node_text(node, source));
+			add_parse_issue(errors, node_range(node, source), text == "@" ?
+				R"(Expected annotation identifier after "@".)" : "Syntax error.");
+		}
 
-	auto type = node_type(node);
-	bool malformed_declaration = false;
-	if (type == "variable_statement" || type == "export_variable_statement" ||
-			type == "onready_variable_statement" || type == "const_statement") {
-		auto declaration = scan_declaration(node, source);
-		malformed_declaration = declaration.malformed();
-		if (declaration.missing_type || declaration.recovered_type) {
-			auto byte = declaration.colon.value_or(declaration.end);
-			add_parse_issue(errors, {byte_to_position(source, byte),
-				byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected type after ":".)");
-		}
-		if (declaration.missing_value || declaration.recovered_value) {
-			auto byte = declaration.assignment.value_or(declaration.end);
-			add_parse_issue(errors, {byte_to_position(source, byte),
-				byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected expression after "=".)");
-		}
-	}
-	TSNode name{};
-	std::string message;
-	if (type == "variable_statement" || type == "export_variable_statement" || type == "onready_variable_statement") {
-		name = field(node, "name");
-		message = R"(Expected variable name after "var".)";
-	} else if (type == "const_statement") {
-		name = field(node, "name");
-		message = R"(Expected constant name after "const".)";
-	} else if (type == "function_definition") {
-		name = field(node, "name");
-		message = R"(Expected function name after "func".)";
-	} else if (type == "signal_statement") {
-		name = field(node, "name");
-		message = R"(Expected signal name after "signal".)";
-	} else if (type == "class_definition") {
-		name = field(node, "name");
-		message = R"(Expected identifier for the class name after "class".)";
-	} else if (type == "class_name_statement") {
-		name = field(node, "name");
-		message = R"(Expected identifier for the global class name after "class_name".)";
-	} else if (type == "enum_definition") {
-		name = field(node, "name");
-		message = R"(Expected identifier for the enum name after "enum".)";
-	} else if (type == "for_statement") {
-		name = field(node, "left");
-		message = R"(Expected loop variable name after "for".)";
-	} else if (type == "pattern_binding") {
-		name = first_descendant(node, "identifier");
-		if (ts_node_is_null(name)) name = first_descendant(node, "name");
-		message = R"(Expected bind name after "var".)";
-	} else if (type == "typed_parameter" || type == "default_parameter" ||
-			type == "typed_default_parameter" || type == "variadic_parameter" || type == "parameter") {
-		name = ts_node_named_child_count(node) ? ts_node_named_child(node, 0) : TSNode{};
-		message = "Expected parameter name.";
-	} else if (type == "enumerator") {
-		name = field(node, "left");
-		message = "Expected identifier for enum key.";
-	}
-	if (type == "function_definition" || type == "constructor_definition") {
-		auto parameters = field(node, "parameters");
-		auto parameter_text = node_text(parameters, source);
-		if (!ts_node_is_null(parameters) && parameter_text.starts_with("(") && !trim(parameter_text).ends_with(")")) {
-			add_parse_issue(errors, node_range(parameters, source), "Expected parameter name.");
-		}
-		auto body = field(node, "body");
-		auto function_text = trim(node_text(node, source));
-		auto annotation = first_descendant(node, "annotation");
-		bool is_abstract = !ts_node_is_null(annotation) && trim(node_text(annotation, source)).starts_with("@abstract");
-		if (!is_abstract) {
-			size_t cursor = ts_node_start_byte(node);
-			while (cursor > 0) {
-				auto end = cursor;
-				while (end > 0 && (source[end - 1] == '\n' || source[end - 1] == '\r')) --end;
-				auto begin = source.rfind('\n', end ? end - 1 : 0);
-				begin = begin == std::string_view::npos ? 0 : begin + 1;
-				auto line = trim(source.substr(begin, end - begin));
-				if (line.starts_with("@abstract")) { is_abstract = true; break; }
-				if (!line.empty() && !line.starts_with('@') && !line.starts_with('#')) break;
-				if (begin == 0) break;
-				cursor = begin - 1;
+		auto type = node_type(node);
+		bool malformed_declaration = false;
+		if (type == "variable_statement" || type == "export_variable_statement" ||
+				type == "onready_variable_statement" || type == "const_statement") {
+			auto declaration = scan_declaration(node, source);
+			malformed_declaration = declaration.malformed();
+			if (declaration.missing_type || declaration.recovered_type) {
+				auto byte = declaration.colon.value_or(declaration.end);
+				add_parse_issue(errors, {byte_to_position(source, byte),
+					byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected type after ":".)");
+			}
+			if (declaration.missing_value || declaration.recovered_value) {
+				auto byte = declaration.assignment.value_or(declaration.end);
+				add_parse_issue(errors, {byte_to_position(source, byte),
+					byte_to_position(source, std::min(byte + 1, source.size()))}, R"(Expected expression after "=".)");
 			}
 		}
-		if (ts_node_is_null(body)) {
-			if (!function_text.ends_with(":") && !is_abstract) {
-				add_parse_issue(errors, node_range(node, source),
-					R"(A function must either have a ":" followed by a body, or be marked as "@abstract".)");
+		TSNode name{};
+		std::string message;
+		if (type == "variable_statement" || type == "export_variable_statement" || type == "onready_variable_statement") {
+			name = field(node, "name");
+			message = R"(Expected variable name after "var".)";
+		} else if (type == "const_statement") {
+			name = field(node, "name");
+			message = R"(Expected constant name after "const".)";
+		} else if (type == "function_definition") {
+			name = field(node, "name");
+			message = R"(Expected function name after "func".)";
+		} else if (type == "signal_statement") {
+			name = field(node, "name");
+			message = R"(Expected signal name after "signal".)";
+		} else if (type == "class_definition") {
+			name = field(node, "name");
+			message = R"(Expected identifier for the class name after "class".)";
+		} else if (type == "class_name_statement") {
+			name = field(node, "name");
+			message = R"(Expected identifier for the global class name after "class_name".)";
+		} else if (type == "enum_definition") {
+			name = field(node, "name");
+			message = R"(Expected identifier for the enum name after "enum".)";
+		} else if (type == "for_statement") {
+			name = field(node, "left");
+			message = R"(Expected loop variable name after "for".)";
+		} else if (type == "pattern_binding") {
+			name = first_descendant(node, "identifier");
+			if (ts_node_is_null(name)) name = first_descendant(node, "name");
+			message = R"(Expected bind name after "var".)";
+		} else if (type == "typed_parameter" || type == "default_parameter" ||
+				type == "typed_default_parameter" || type == "variadic_parameter" || type == "parameter") {
+			name = ts_node_named_child_count(node) ? ts_node_named_child(node, 0) : TSNode{};
+			message = "Expected parameter name.";
+		} else if (type == "enumerator") {
+			name = field(node, "left");
+			message = "Expected identifier for enum key.";
+		}
+		if (type == "function_definition" || type == "constructor_definition") {
+			auto parameters = field(node, "parameters");
+			auto parameter_text = node_text(parameters, source);
+			if (!ts_node_is_null(parameters) && parameter_text.starts_with("(") && !trim(parameter_text).ends_with(")")) {
+				add_parse_issue(errors, node_range(parameters, source), "Expected parameter name.");
 			}
-		} else if (ts_node_named_child_count(body) == 0 && function_text.ends_with(":")) {
-			add_parse_issue(errors, node_range(body, source), "Expected indented block after function declaration.");
+			auto body = field(node, "body");
+			auto function_text = trim(node_text(node, source));
+			auto annotation = first_descendant(node, "annotation");
+			bool is_abstract = !ts_node_is_null(annotation) && trim(node_text(annotation, source)).starts_with("@abstract");
+			if (!is_abstract) {
+				size_t cursor = ts_node_start_byte(node);
+				while (cursor > 0) {
+					auto end = cursor;
+					while (end > 0 && (source[end - 1] == '\n' || source[end - 1] == '\r')) --end;
+					auto begin = source.rfind('\n', end ? end - 1 : 0);
+					begin = begin == std::string_view::npos ? 0 : begin + 1;
+					auto line = trim(source.substr(begin, end - begin));
+					if (line.starts_with("@abstract")) { is_abstract = true; break; }
+					if (!line.empty() && !line.starts_with('@') && !line.starts_with('#')) break;
+					if (begin == 0) break;
+					cursor = begin - 1;
+				}
+			}
+			if (ts_node_is_null(body)) {
+				if (!function_text.ends_with(":") && !is_abstract) {
+					add_parse_issue(errors, node_range(node, source),
+						R"(A function must either have a ":" followed by a body, or be marked as "@abstract".)");
+				}
+			} else if (ts_node_named_child_count(body) == 0 && function_text.ends_with(":")) {
+				add_parse_issue(errors, node_range(body, source), "Expected indented block after function declaration.");
+			}
 		}
-	}
-	if (type == "enum_definition" && !trim(node_text(node, source)).ends_with("}")) {
-		add_parse_issue(errors, node_range(node, source), R"(Expected closing "}" for enum.)");
-	}
-	if (!ts_node_is_null(name)) {
-		auto identifier = trim(node_text(name, source));
-		if (identifier.empty() || ts_node_has_error(name) || is_gdscript_reserved_identifier(identifier)) {
-			add_parse_issue(errors, node_range(name, source), std::move(message));
+		if (type == "enum_definition" && !trim(node_text(node, source)).ends_with("}")) {
+			add_parse_issue(errors, node_range(node, source), R"(Expected closing "}" for enum.)");
 		}
-	}
-	if (malformed_declaration) return;
-	for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
-		collect_errors(ts_node_named_child(node, i), source, errors);
-	}
+		if (!ts_node_is_null(name)) {
+			auto identifier = trim(node_text(name, source));
+			if (identifier.empty() || ts_node_has_error(name) || is_gdscript_reserved_identifier(identifier)) {
+				add_parse_issue(errors, node_range(name, source), std::move(message));
+			}
+		}
+		return !malformed_declaration;
+	});
 }
 
 struct BlockTree {
@@ -749,14 +771,14 @@ struct BlockTree {
 // subtrees, including their error nodes, without borrowing any header tokens.
 void collect_body_syntax(TSNode node, std::string_view source, size_t begin, size_t end,
 		std::vector<SyntaxNode> &output) {
-	if (ts_node_is_null(node) || ts_node_end_byte(node) <= begin || ts_node_start_byte(node) >= end) return;
-	if (ts_node_start_byte(node) >= begin && ts_node_end_byte(node) <= end) {
-		output.push_back(syntax_node(node, source));
-		return;
-	}
-	for (uint32_t index = 0; index < ts_node_named_child_count(node); ++index) {
-		collect_body_syntax(ts_node_named_child(node, index), source, begin, end, output);
-	}
+	walk_named(node, [&](TSNode part) {
+		if (ts_node_end_byte(part) <= begin || ts_node_start_byte(part) >= end) return false;
+		if (ts_node_start_byte(part) >= begin && ts_node_end_byte(part) <= end) {
+			output.push_back(syntax_node(part, source));
+			return false;
+		}
+		return true;
+	});
 }
 
 struct RecoveredFunction {
@@ -1169,17 +1191,16 @@ void Document::analyze() {
 	};
 	auto in_function_body = [&](Position position) {
 		bool found = false;
-		std::function<void(const SyntaxNode &)> visit = [&](const SyntaxNode &node) {
-			if (found || !node.range.contains(position)) return;
+		walk_syntax(syntax_root_, [&](const SyntaxNode &node) {
+			if (found || !node.range.contains(position)) return false;
 			if (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda") {
 				for (const auto &child : node.children) if (child.field == "body" && child.range.contains(position)) {
 					found = true;
-					return;
+					return false;
 				}
 			}
-			for (const auto &child : node.children) visit(child);
-		};
-		visit(syntax_root_);
+			return true;
+		});
 		return found;
 	};
 	// Recovery can discard the useful inner node entirely. Recover the common
@@ -1256,7 +1277,9 @@ void Document::analyze() {
 		if (end == source_.size()) break;
 		line = end + 1;
 	}
-	std::function<void(SyntaxNode &)> validate_attributes = [&](SyntaxNode &node) {
+	std::vector<SyntaxNode *> attribute_nodes;
+	walk_syntax(syntax_root_, [&](SyntaxNode &node) {
+		attribute_nodes.push_back(&node);
 		if (node.kind == "attribute") for (size_t i = 1; i < node.children.size(); ++i) {
 			const auto &previous = node.children[i - 1];
 			const auto &next = node.children[i];
@@ -1273,12 +1296,10 @@ void Document::analyze() {
 				break;
 			}
 		}
-		for (auto &child : node.children) {
-			validate_attributes(child);
-			node.has_error = node.has_error || child.has_error;
-		}
-	};
-	validate_attributes(syntax_root_);
+		return true;
+	});
+	for (auto node = attribute_nodes.rbegin(); node != attribute_nodes.rend(); ++node)
+		for (const auto &child : (*node)->children) (*node)->has_error |= child.has_error;
 	// Discard symbols which the damaged whole-document tree incorrectly emitted
 	// at class scope or inside an earlier function. The bounded declarations own
 	// every local in their lexical body.

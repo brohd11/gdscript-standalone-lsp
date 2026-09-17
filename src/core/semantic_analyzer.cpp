@@ -5,6 +5,7 @@
 #include "core/document.hpp"
 #include "core/gdscript_api.hpp"
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 #include "core/workspace.hpp"
 
 #include <algorithm>
@@ -38,11 +39,13 @@ std::string text(const Document &document, const SyntaxNode &node) {
 }
 
 const SyntaxNode *first_identifier(const SyntaxNode &node) {
-	if (node.kind == "identifier" || node.kind == "name") return &node;
-	for (const auto &child : node.children) {
-		if (auto *found = first_identifier(child)) return found;
-	}
-	return nullptr;
+	const SyntaxNode *result = nullptr;
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (result) return false;
+		if (part.kind == "identifier" || part.kind == "name") { result = &part; return false; }
+		return true;
+	});
+	return result;
 }
 
 struct Binding {
@@ -737,10 +740,9 @@ private:
 		return result;
 	}
 
-	Value cast_value(const SyntaxNode &node, std::string target_name = {}) {
+	Value cast_result(const SyntaxNode &node, Value source, std::string target_name = {}) {
 		auto left = field(node, "left"), right = field(node, "right");
 		if (!left || !right) return {};
-		auto source = require_value(evaluate(*left), left->range);
 		if (target_name.empty()) target_name = text(document, *right);
 		auto target = workspace.type_from_name(target_name, current_class);
 		if (!target.known()) {
@@ -1008,30 +1010,85 @@ private:
 		return apply_attribute_nodes(std::move(current), parts);
 	}
 
-	Value evaluate_with_attribute_suffix(const SyntaxNode &node, std::vector<const SyntaxNode *> suffix) {
-		if (node.kind == "attribute" && !node.children.empty() && (node.children.front().kind == "binary_operator" || node.children.front().kind == "unary_operator")) {
-			std::vector<const SyntaxNode *> combined;
-			for (size_t index = 1; index < node.children.size(); ++index) combined.push_back(&node.children[index]);
-			combined.insert(combined.end(), suffix.begin(), suffix.end());
-			return evaluate_with_attribute_suffix(node.children.front(), std::move(combined));
-		}
-		if (node.kind == "unary_operator" && !node.children.empty()) {
-			const auto &operand = node.children.back();
-			return unary_result(node, require_value(evaluate_with_attribute_suffix(operand, std::move(suffix)), operand.range));
-		}
-		if (node.kind == "binary_operator") {
-			if (operation(node) == "as") {
-				auto right = field(node, "right");
-				if (right && !suffix.empty()) return cast_value(node, trim(std::string_view(document.source()).substr(right->start_byte, suffix.back()->end_byte - right->start_byte)));
-				return cast_value(node);
+	// Arithmetic chains use one heap frame per operator instead of one C++
+	// call frame. Suffix repair follows the grammar's existing right-operand
+	// rules, and each operand is still evaluated exactly once in source order.
+	Value evaluate_operators(const SyntaxNode &root, bool call_target = false,
+			bool allow_pseudo_type = false, std::vector<const SyntaxNode *> suffix = {}, bool repair_suffix = false) {
+		struct Frame {
+			const SyntaxNode *node;
+			bool call_target = false;
+			bool allow_pseudo_type = false;
+			std::vector<const SyntaxNode *> suffix;
+			bool repair_suffix = false;
+			unsigned stage = 0;
+			Value left;
+		};
+		std::vector<Frame> pending;
+		pending.push_back({&root, call_target, allow_pseudo_type, std::move(suffix), repair_suffix, 0, {}});
+		Value result;
+		while (!pending.empty()) {
+			auto &frame = pending.back();
+			const auto &node = *frame.node;
+			if (frame.repair_suffix && node.kind == "attribute" && !node.children.empty() &&
+					(node.children.front().kind == "binary_operator" || node.children.front().kind == "unary_operator")) {
+				std::vector<const SyntaxNode *> combined;
+				for (size_t index = 1; index < node.children.size(); ++index) combined.push_back(&node.children[index]);
+				combined.insert(combined.end(), frame.suffix.begin(), frame.suffix.end());
+				frame.suffix = std::move(combined);
+				frame.node = &node.children.front();
+				continue;
 			}
-			auto *left = field(node, "left");
-			auto *right = field(node, "right");
-			auto left_value = left ? require_value(evaluate(*left), left->range) : Value{};
-			auto right_value = right ? evaluate_with_attribute_suffix(*right, std::move(suffix)) : Value{};
-			return binary_result(node, std::move(left_value), std::move(right_value));
+			if (node.kind == "unary_operator" || (!frame.repair_suffix && node.kind == "parenthesized_expression")) {
+				if (node.children.empty()) result = {};
+				else if (frame.stage == 0) {
+					frame.stage = 1;
+					auto *operand = node.kind == "unary_operator" ? &node.children.back() : &node.children.front();
+					auto child_target = node.kind == "parenthesized_expression" && frame.call_target;
+					auto child_pseudo = node.kind == "parenthesized_expression" && frame.allow_pseudo_type;
+					pending.push_back({operand, child_target, child_pseudo, std::move(frame.suffix), frame.repair_suffix, 0, {}});
+					continue;
+				} else if (node.kind == "unary_operator") {
+					result = unary_result(node, require_value(std::move(result), node.children.back().range));
+				}
+				pending.pop_back();
+				continue;
+			}
+			if (node.kind == "binary_operator") {
+				auto *left = field(node, "left"), *right = field(node, "right");
+				auto op = operation(node);
+				if (op == "as" && (!left || !right)) { result = {}; pending.pop_back(); continue; }
+				if (frame.stage == 0) {
+					frame.stage = 1;
+					if (left) { pending.push_back({left, false, false, {}, false, 0, {}}); continue; }
+					result = {};
+				}
+				if (frame.stage == 1) {
+					frame.left = left ? require_value(std::move(result), left->range) : Value{};
+					if (op == "as") {
+						std::string target;
+						if (frame.repair_suffix && !frame.suffix.empty())
+							target = trim(std::string_view(document.source()).substr(right->start_byte, frame.suffix.back()->end_byte - right->start_byte));
+						result = cast_result(node, std::move(frame.left), std::move(target));
+						pending.pop_back();
+						continue;
+					}
+					frame.stage = 2;
+					if (right && !frame.repair_suffix && (op == "is" || op == "is not"))
+						result = {workspace.type_from_name(text(document, *right), current_class), {}, true, false};
+					else if (right) {
+						pending.push_back({right, false, false, std::move(frame.suffix), frame.repair_suffix, 0, {}});
+						continue;
+					} else result = {};
+				}
+				if (right && !frame.repair_suffix && op != "is" && op != "is not") result = require_value(std::move(result), right->range);
+				result = binary_result(node, std::move(frame.left), std::move(result));
+			} else if (frame.repair_suffix) {
+				result = apply_attribute_nodes(evaluate(node, false, !frame.suffix.empty()), frame.suffix);
+			} else result = evaluate(node, frame.call_target, frame.allow_pseudo_type);
+			pending.pop_back();
 		}
-		return apply_attribute_nodes(evaluate(node, false, !suffix.empty()), suffix);
+		return result;
 	}
 
 	Value preload_value(const SyntaxNode *arguments, Range call_range) {
@@ -1108,22 +1165,9 @@ private:
 				[](const Value &value) { return value.suppress_invalid_constant; });
 			return result;
 		}
-		if (node.kind == "parenthesized_expression") return node.children.empty() ? Value{} :
-			evaluate(node.children.front(), call_target, allow_pseudo_type);
+		if (node.kind == "parenthesized_expression" || node.kind == "unary_operator" || node.kind == "binary_operator")
+			return evaluate_operators(node, call_target, allow_pseudo_type);
 		if (node.kind == "await_expression") return node.children.empty() ? Value{} : require_value(evaluate(node.children.front()), node.children.front().range);
-		if (node.kind == "unary_operator") {
-			if (node.children.empty()) return {};
-			return unary_result(node, require_value(evaluate(node.children.back()), node.children.back().range));
-		}
-		if (node.kind == "binary_operator") {
-			if (operation(node) == "as") return cast_value(node);
-			auto *left = field(node, "left");
-			auto *right = field(node, "right");
-			auto left_value = left ? require_value(evaluate(*left), left->range) : Value{};
-			auto right_value = right ? ((operation(node) == "is" || operation(node) == "is not") ?
-				Value{workspace.type_from_name(text(document, *right), current_class), {}, true, false} : require_value(evaluate(*right), right->range)) : Value{};
-			return binary_result(node, std::move(left_value), std::move(right_value));
-		}
 		if (node.kind == "conditional_expression") {
 			auto condition = field(node, "condition") ? require_value(evaluate(*field(node, "condition")), field(node, "condition")->range) : Value{};
 			auto left = field(node, "left") ? require_value(evaluate(*field(node, "left")), field(node, "left")->range) : Value{};
@@ -1204,7 +1248,7 @@ private:
 			if ((node.children.front().kind == "binary_operator" || node.children.front().kind == "unary_operator") && node.children.size() > 1) {
 				std::vector<const SyntaxNode *> suffix;
 				for (size_t index = 1; index < node.children.size(); ++index) suffix.push_back(&node.children[index]);
-				return evaluate_with_attribute_suffix(node.children.front(), std::move(suffix));
+				return evaluate_operators(node.children.front(), false, false, std::move(suffix), true);
 			}
 			return apply_attribute_parts(evaluate(node.children.front(), false, true), node, 1);
 		}
@@ -1362,14 +1406,20 @@ private:
 		}
 	}
 
-	void annotation_reads(const SyntaxNode &node) {
-		if (node.kind == "identifier") {
-			for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
-				auto found = scope->find(text(document, node));
-				if (found != scope->end()) { if (found->second.binding) found->second.binding->read = true; break; }
+	void annotation_reads(const SyntaxNode &root) {
+		std::vector<const SyntaxNode *> pending{&root};
+		while (!pending.empty()) {
+			const auto &node = *pending.back();
+			pending.pop_back();
+			if (node.kind == "identifier") {
+				for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
+					auto found = scope->find(text(document, node));
+					if (found != scope->end()) { if (found->second.binding) found->second.binding->read = true; break; }
+				}
 			}
+			for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
+				if (node.kind != "annotation" || child->field == "arguments") pending.push_back(&*child);
 		}
-		for (const auto &child : node.children) if (node.kind != "annotation" || child.field == "arguments") annotation_reads(child);
 	}
 
 	void analyze_block(const SyntaxNode &block, const ResolvedType &expected_return) {
@@ -1546,12 +1596,12 @@ private:
 				if (auto *type_node = field(node, "type"); type_node && !inferred_annotation(text(document, *type_node))) {
 					property_type = workspace.type_from_name(text(document, *type_node), current_class);
 				}
-				std::function<void(const SyntaxNode &)> accessors = [&](const SyntaxNode &candidate) {
+				walk_syntax(node, [&](const SyntaxNode &candidate) {
 					if (candidate.kind == "set_body") analyze_accessor(candidate, {TypeKind::Void, "void"});
 					else if (candidate.kind == "get_body") analyze_accessor(candidate, property_type);
-					else for (const auto &child : candidate.children) accessors(child);
-				};
-				accessors(node);
+					else return true;
+					return false;
+				});
 				current_class = saved;
 			}
 		}

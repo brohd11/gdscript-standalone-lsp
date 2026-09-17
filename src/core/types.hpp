@@ -180,6 +180,13 @@ struct OutlineSnapshot {
 // cheap to recover text from Document::source(), while field retains the
 // grammar role ("left", "body", "arguments", and so on).
 struct SyntaxNode {
+	SyntaxNode() = default;
+	SyntaxNode(const SyntaxNode &other);
+	SyntaxNode &operator=(const SyntaxNode &other);
+	SyntaxNode(SyntaxNode &&) noexcept = default;
+	SyntaxNode &operator=(SyntaxNode &&) noexcept = default;
+	~SyntaxNode();
+
 	std::string_view kind;
 	std::string_view field;
 	Range range;

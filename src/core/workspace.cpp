@@ -4,6 +4,7 @@
 #include "core/semantic_analyzer.hpp"
 #include "core/syntax_checks.hpp"
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 #include "core/uri.hpp"
 
 #include <algorithm>
@@ -152,11 +153,13 @@ DefinitionReference definition_reference_at(const Document &document, Position p
 }
 
 const SyntaxNode *string_literal_at(const SyntaxNode &node, size_t offset) {
-	if (offset < node.start_byte || offset >= node.end_byte) return nullptr;
-	for (const auto &child : node.children) {
-		if (auto *result = string_literal_at(child, offset)) return result;
-	}
-	return node.kind == "string" ? &node : nullptr;
+	const SyntaxNode *result = nullptr;
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (offset < part.start_byte || offset >= part.end_byte) return false;
+		if (part.kind == "string") result = &part;
+		return true;
+	});
+	return result;
 }
 
 std::optional<std::string> resource_reference_at(const Document &document, Position position) {
@@ -330,8 +333,10 @@ bool can_convert_strict(std::string_view source, std::string_view target) {
 
 void collect_identifiers(const Document &document, const SyntaxNode &node,
 		std::unordered_set<std::string> &identifiers) {
-	if (node.kind == "identifier") identifiers.insert(std::string(document.text(node)));
-	for (const auto &child : node.children) collect_identifiers(document, child, identifiers);
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (part.kind == "identifier") identifiers.insert(std::string(document.text(part)));
+		return true;
+	});
 }
 
 std::vector<std::string> quoted_script_paths(std::string_view source) {
@@ -369,7 +374,7 @@ const SyntaxNode *syntax_field(const SyntaxNode &node, std::string_view name) {
 std::vector<std::string> reduced_preload_paths(const Document &document) {
 	std::unordered_map<std::string, const SyntaxNode *> constants;
 	std::unordered_set<std::string> ambiguous;
-	std::function<void(const SyntaxNode &)> collect_constants = [&](const SyntaxNode &node) {
+	walk_syntax(document.syntax_root(), [&](const SyntaxNode &node) {
 		if (node.kind == "const_statement") {
 			auto *name = syntax_field(node, "name"), *value = syntax_field(node, "value");
 			if (name && value) {
@@ -378,9 +383,8 @@ std::vector<std::string> reduced_preload_paths(const Document &document) {
 				else constants[spelling] = value;
 			}
 		}
-		for (const auto &child : node.children) collect_constants(child);
-	};
-	collect_constants(document.syntax_root());
+		return true;
+	});
 	for (const auto &name : ambiguous) constants.erase(name);
 
 	std::unordered_set<const SyntaxNode *> reducing;
@@ -428,7 +432,7 @@ std::vector<std::string> reduced_preload_paths(const Document &document) {
 	};
 
 	std::vector<std::string> result;
-	std::function<void(const SyntaxNode &)> collect_preloads = [&](const SyntaxNode &node) {
+	walk_syntax(document.syntax_root(), [&](const SyntaxNode &node) {
 		if (node.kind == "call") {
 			const SyntaxNode *callee = nullptr;
 			for (const auto &child : node.children) if (child.field != "arguments") { callee = &child; break; }
@@ -443,9 +447,8 @@ std::vector<std::string> reduced_preload_paths(const Document &document) {
 				}
 			}
 		}
-		for (const auto &child : node.children) collect_preloads(child);
-	};
-	collect_preloads(document.syntax_root());
+		return true;
+	});
 	return result;
 }
 
@@ -1433,33 +1436,32 @@ ResolvedType Workspace::callable_return_type(const Symbol &symbol, const Documen
 	if (std::find(stack.begin(), stack.end(), marker) != stack.end()) return {TypeKind::Variant, "Variant"};
 	stack.push_back(marker);
 	const SyntaxNode *function = nullptr;
-	std::function<void(const SyntaxNode &)> find_function = [&](const SyntaxNode &node) {
-		if (function) return;
+	walk_syntax(declaration_document->syntax_root(), [&](const SyntaxNode &node) {
+		if (function) return false;
 		if ((node.kind == "function_definition" || node.kind == "constructor_definition") &&
 				node.range.start == symbol.range.start) {
 			function = &node;
-			return;
+			return false;
 		}
-		for (const auto &child : node.children) find_function(child);
-	};
-	find_function(declaration_document->syntax_root());
+		return true;
+	});
 	std::vector<ResolvedType> returns;
 	const bool recovered_range = function == nullptr;
-	std::function<void(const SyntaxNode &, bool)> collect_returns = [&](const SyntaxNode &node, bool root) {
-		if (recovered_range && (node.range.end < symbol.range.start || symbol.range.end < node.range.start)) return;
-		if (!root && (node.kind == "function_definition" || node.kind == "constructor_definition" ||
-				node.kind == "lambda" || node.kind == "class_definition")) return;
+	const auto &return_root = function ? *function : declaration_document->syntax_root();
+	walk_syntax(return_root, [&](const SyntaxNode &node) {
+		if (recovered_range && (node.range.end < symbol.range.start || symbol.range.end < node.range.start)) return false;
+		if (&node != &return_root && (node.kind == "function_definition" || node.kind == "constructor_definition" ||
+				node.kind == "lambda" || node.kind == "class_definition")) return false;
 		if (node.kind == "return_statement") {
 			if (!node.children.empty()) {
 				auto expression = std::string(declaration_document->text(node.children.front()));
 				returns.push_back(infer_expression(std::move(expression), *declaration_document,
 					declaration_context, node.children.front().range.start, stack));
 			}
-			return;
+			return false;
 		}
-		for (const auto &child : node.children) collect_returns(child, false);
-	};
-	collect_returns(function ? *function : declaration_document->syntax_root(), true);
+		return true;
+	});
 	stack.pop_back();
 	if (returns.empty()) return {TypeKind::Variant, "Variant"};
 	auto result = returns.front();

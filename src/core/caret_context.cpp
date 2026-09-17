@@ -1,6 +1,7 @@
 #include "core/caret_context.hpp"
 
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -215,12 +216,12 @@ bool identifier_token(std::string_view value) {
 }
 
 const SyntaxNode *deepest_function_at(const SyntaxNode &node, size_t offset) {
-	if (!contains_byte(node, offset)) return nullptr;
-	const SyntaxNode *result = node.kind == "function_definition" || node.kind == "constructor_definition" ||
-		node.kind == "lambda" ? &node : nullptr;
-	for (const auto &child : node.children) {
-		if (auto *nested = deepest_function_at(child, offset)) result = nested;
-	}
+	const SyntaxNode *result = nullptr;
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (!contains_byte(part, offset)) return false;
+		if (part.kind == "function_definition" || part.kind == "constructor_definition" || part.kind == "lambda") result = &part;
+		return true;
+	});
 	return result;
 }
 
@@ -553,23 +554,26 @@ bool contains_byte(const SyntaxNode &node, size_t offset) {
 	return node.start_byte <= offset && offset <= node.end_byte;
 }
 
-bool structural_conditional(const Document &document, const SyntaxNode &node, size_t offset,
+bool structural_conditional(const Document &document, const SyntaxNode &root, size_t offset,
 		CaretConditionalContext &conditional) {
-	if (!contains_byte(node, offset)) return false;
-	if (node.kind == "conditional_expression") {
-		auto *left = field(node, "left");
-		auto *condition = field(node, "condition");
-		auto *right = field(node, "right");
-		if (left) conditional.true_expression = trim(document.text(*left));
-		if (condition) conditional.condition_expression = trim(document.text(*condition));
-		if (right) conditional.false_expression = trim(document.text(*right));
-		if (left && contains_byte(*left, offset)) conditional.branch = ConditionalBranch::TrueValue;
-		else if (condition && contains_byte(*condition, offset)) conditional.branch = ConditionalBranch::Condition;
-		else if (right && contains_byte(*right, offset)) conditional.branch = ConditionalBranch::FalseValue;
-		if (conditional.branch != ConditionalBranch::None) return true;
-	}
-	for (const auto &child : node.children) if (structural_conditional(document, child, offset, conditional)) return true;
-	return false;
+	bool found = false;
+	walk_syntax(root, [&](const SyntaxNode &node) {
+		if (found || !contains_byte(node, offset)) return false;
+		if (node.kind == "conditional_expression") {
+			auto *left = field(node, "left");
+			auto *condition = field(node, "condition");
+			auto *right = field(node, "right");
+			if (left) conditional.true_expression = trim(document.text(*left));
+			if (condition) conditional.condition_expression = trim(document.text(*condition));
+			if (right) conditional.false_expression = trim(document.text(*right));
+			if (left && contains_byte(*left, offset)) conditional.branch = ConditionalBranch::TrueValue;
+			else if (condition && contains_byte(*condition, offset)) conditional.branch = ConditionalBranch::Condition;
+			else if (right && contains_byte(*right, offset)) conditional.branch = ConditionalBranch::FalseValue;
+			if (conditional.branch != ConditionalBranch::None) { found = true; return false; }
+		}
+		return true;
+	});
+	return found;
 }
 
 std::optional<CaretConditionalContext> scanned_conditional(std::string_view source,

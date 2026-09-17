@@ -1,5 +1,6 @@
 #include "core/syntax_checks.hpp"
 #include "core/text.hpp"
+#include "core/syntax_walk.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -24,16 +25,20 @@ bool has_void(std::string_view value) {
 }
 
 const SyntaxNode *first_descendant(const SyntaxNode &node, std::string_view kind) {
-	if (node.kind == kind) return &node;
-	for (const auto &child : node.children) {
-		if (auto *found = first_descendant(child, kind)) return found;
-	}
-	return nullptr;
+	const SyntaxNode *found = nullptr;
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (found) return false;
+		if (part.kind == kind) { found = &part; return false; }
+		return true;
+	});
+	return found;
 }
 
 void descendants(const SyntaxNode &node, std::string_view kind, std::vector<const SyntaxNode *> &result) {
-	if (node.kind == kind) result.push_back(&node);
-	for (const auto &child : node.children) descendants(child, kind, result);
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (part.kind == kind) result.push_back(&part);
+		return true;
+	});
 }
 
 std::string node_name(const SyntaxNode &node, const Document &document) {
@@ -58,13 +63,15 @@ bool return_has_value(const SyntaxNode &node, const Document &document) {
 	return value.size() > 6 && value.substr(6).find_first_not_of(" \t\r\n") != std::string_view::npos;
 }
 
-const SyntaxNode *return_with_value(const SyntaxNode &node, const Document &document, bool root = true) {
-	if (!root && (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda")) return nullptr;
-	if (node.kind == "return_statement" && return_has_value(node, document)) return &node;
-	for (const auto &child : node.children) {
-		if (auto *found = return_with_value(child, document, false)) return found;
-	}
-	return nullptr;
+const SyntaxNode *return_with_value(const SyntaxNode &node, const Document &document) {
+	const SyntaxNode *found = nullptr;
+	walk_syntax(node, [&](const SyntaxNode &part) {
+		if (found || (&part != &node && (part.kind == "function_definition" ||
+				part.kind == "constructor_definition" || part.kind == "lambda"))) return false;
+		if (part.kind == "return_statement" && return_has_value(part, document)) { found = &part; return false; }
+		return true;
+	});
+	return found;
 }
 
 void inspect_local_scopes(const SyntaxNode &body, const Document &document,
@@ -72,8 +79,9 @@ void inspect_local_scopes(const SyntaxNode &body, const Document &document,
 	std::unordered_set<std::string> local;
 	auto visible = enclosing;
 	auto add = [&](std::string message, Range range) { result.push_back({range, std::move(message)}); };
-	std::function<void(const SyntaxNode &, const std::unordered_set<std::string> &)> visit_statement;
-	visit_statement = [&](const SyntaxNode &node, const std::unordered_set<std::string> &scope) {
+	struct ScopeFrame { const SyntaxNode *node; std::unordered_set<std::string> scope; };
+	std::vector<ScopeFrame> pending;
+	auto visit_statement = [&](const SyntaxNode &node, const std::unordered_set<std::string> &scope) {
 		if (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda") return;
 		auto nested_scope = scope;
 		if (node.kind == "for_statement") {
@@ -85,10 +93,8 @@ void inspect_local_scopes(const SyntaxNode &body, const Document &document,
 				if (!name.empty()) nested_scope.insert(std::move(name));
 			}
 		}
-		for (const auto &child : node.children) {
-			if (child.kind == "body") inspect_local_scopes(child, document, nested_scope, result);
-			else visit_statement(child, nested_scope);
-		}
+		for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
+			pending.push_back({&*child, nested_scope});
 	};
 	for (const auto &statement : body.children) {
 		if (statement.kind == "variable_statement" || statement.kind == "const_statement") {
@@ -100,7 +106,13 @@ void inspect_local_scopes(const SyntaxNode &body, const Document &document,
 				if (!name.empty()) visible.insert(std::move(name));
 			}
 		}
-		visit_statement(statement, visible);
+		pending.push_back({&statement, visible});
+		while (!pending.empty()) {
+			auto frame = std::move(pending.back());
+			pending.pop_back();
+			if (frame.node->kind == "body") inspect_local_scopes(*frame.node, document, frame.scope, result);
+			else visit_statement(*frame.node, frame.scope);
+		}
 	}
 }
 
@@ -120,7 +132,9 @@ std::string class_body_token(const SyntaxNode &statement, const Document &docume
 
 std::vector<ParseIssue> structural_issues(const Document &document) {
 	std::vector<ParseIssue> result;
-	std::function<void(const SyntaxNode &, unsigned, std::string_view)> visit = [&](const SyntaxNode &node, unsigned loops, std::string_view parent) {
+	struct Frame { const SyntaxNode *node; unsigned loops; std::string_view parent; };
+	std::vector<Frame> pending{{&document.syntax_root(), 0, {}}};
+	auto visit = [&](const SyntaxNode &node, unsigned loops, std::string_view parent) {
 		auto add = [&](std::string message, Range range) { result.push_back({range, std::move(message)}); };
 		if (node.kind == "source" || node.kind == "class_body") {
 			const SyntaxNode *class_name = nullptr;
@@ -184,12 +198,11 @@ std::vector<ParseIssue> structural_issues(const Document &document) {
 			}
 		}
 		if (node.kind == "function_definition" && contains_kind(node, "static_keyword")) {
-			std::function<void(const SyntaxNode &, bool)> inspect_self = [&](const SyntaxNode &part, bool root) {
-				if (!root && (part.kind == "function_definition" || part.kind == "constructor_definition")) return;
+			walk_syntax(node, [&](const SyntaxNode &part) {
+				if (&part != &node && (part.kind == "function_definition" || part.kind == "constructor_definition")) return false;
 				if (part.kind == "identifier" && trim(document.text(part)) == "self") add(R"(Cannot use "self" inside a static function.)", part.range);
-				for (const auto &child : part.children) inspect_self(child, false);
-			};
-			inspect_self(node, true);
+				return true;
+			});
 		}
 		if ((node.kind == "break_statement" || node.kind == "continue_statement") && !loops) {
 			add("Cannot use \"" + std::string(node.kind == "break_statement" ? "break" : "continue") + "\" outside of a loop.", node.range);
@@ -281,29 +294,30 @@ std::vector<ParseIssue> structural_issues(const Document &document) {
 				add("The function \"yield\" was removed in Godot 4. Use \"await\" instead.", child.range);
 			}
 		}
-		for (const auto &child : node.children) {
+		for (auto child_it = node.children.rbegin(); child_it != node.children.rend(); ++child_it) {
+			const auto &child = *child_it;
 			auto child_loops = loops;
 			if ((node.kind == "for_statement" || node.kind == "while_statement") && child.field == "body") ++child_loops;
-			visit(child, child_loops, node.kind);
+			pending.push_back({&child, child_loops, node.kind});
 		}
 	};
-	visit(document.syntax_root(), 0, {});
-	std::function<void(const SyntaxNode &)> local_scopes = [&](const SyntaxNode &node) {
-		if (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda") {
+	while (!pending.empty()) {
+		auto frame = pending.back();
+		pending.pop_back();
+		visit(*frame.node, frame.loops, frame.parent);
+	}
+	walk_syntax(document.syntax_root(), [&](const SyntaxNode &node) {
+		if (node.kind == "function_definition" || node.kind == "constructor_definition" || node.kind == "lambda")
 			if (auto *body = field(node, "body")) inspect_local_scopes(*body, document, {}, result);
-			for (const auto &child : node.children) local_scopes(child);
-			return;
-		}
-		for (const auto &child : node.children) local_scopes(child);
-	};
-	local_scopes(document.syntax_root());
+		return true;
+	});
 	return result;
 }
 
 std::vector<ParseIssue> lexical_issues(const Document &document) {
 	std::vector<ParseIssue> result;
 	auto add = [&](std::string message, Range range) { result.push_back({range, std::move(message)}); };
-	std::function<void(const SyntaxNode &)> escapes = [&](const SyntaxNode &node) {
+	walk_syntax(document.syntax_root(), [&](const SyntaxNode &node) {
 		if (node.kind == "escape_sequence") {
 			auto value = document.text(node);
 			auto all_digits = [&](size_t begin, size_t count, int base) {
@@ -326,9 +340,8 @@ std::vector<ParseIssue> lexical_issues(const Document &document) {
 			else if (value.starts_with("\\o")) valid = all_digits(2, 3, 8);
 			if (!valid) add("Invalid escape in string.", node.range);
 		}
-		for (const auto &child : node.children) escapes(child);
-	};
-	escapes(document.syntax_root());
+		return true;
+	});
 
 	std::vector<std::pair<std::string, unsigned>> indents{{"", 0}};
 	auto source = std::string_view(document.source());
