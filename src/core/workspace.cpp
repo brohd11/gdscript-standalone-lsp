@@ -978,33 +978,45 @@ bool Workspace::close_document(const std::string &uri, std::string *error) {
 }
 
 bool Workspace::refresh_file(const std::string &uri, std::string *error) {
+	return refresh_files({uri}, error);
+}
+
+bool Workspace::refresh_files(const std::vector<std::string> &uris, std::string *error) {
 	std::unique_lock lock(mutex_);
-	auto path = path_for_uri(uri);
-	if (path.string().ends_with(".gd.uid")) {
-		scan_uid_files();
-		rebuild_registry();
-		return true;
+	bool changed = false, success = true, refresh_uids = false, refresh_settings = false;
+	for (const auto &uri : std::unordered_set<std::string>(uris.begin(), uris.end())) {
+		auto path = path_for_uri(uri);
+		if (path.string().ends_with(".gd.uid")) { refresh_uids = true; continue; }
+		if (path.lexically_normal() == (root_ / "project.godot").lexically_normal()) {
+			refresh_settings = true;
+			continue;
+		}
+		// A delayed disk event must not replace an editor buffer already applied to the index.
+		auto existing = documents_.find(uri);
+		if (existing != documents_.end() && existing->second->version() >= 0) continue;
+		std::error_code ec;
+		bool exists = std::filesystem::exists(path, ec);
+		if (ec) { success = false; if (error) *error = ec.message(); continue; }
+		if (!exists) {
+			changed |= documents_.erase(uri) != 0;
+			disk_sources_.erase(uri);
+			continue;
+		}
+		auto source = read_file(path);
+		if (source.empty() && std::filesystem::file_size(path, ec) != 0) {
+			if (error) *error = "cannot read file: " + path.string();
+			success = false;
+			continue;
+		}
+		if (existing != documents_.end() && existing->second->source() == source) continue;
+		disk_sources_[uri] = source;
+		documents_[uri] = std::make_shared<Document>(uri, resource_path(path), std::move(source));
+		changed = true;
 	}
-	if (path.lexically_normal() == (root_ / "project.godot").lexically_normal()) {
-		read_project_settings();
-		rebuild_registry();
-		return true;
-	}
-	if (!std::filesystem::exists(path)) {
-		documents_.erase(uri);
-		disk_sources_.erase(uri);
-		rebuild_registry();
-		return true;
-	}
-	auto source = read_file(path);
-	if (source.empty() && std::filesystem::file_size(path) != 0) {
-		if (error) *error = "cannot read file";
-		return false;
-	}
-	disk_sources_[uri] = source;
-	documents_[uri] = std::make_shared<Document>(uri, resource_path(path), std::move(source));
-	rebuild_registry();
-	return true;
+	if (refresh_uids) scan_uid_files();
+	if (refresh_settings) read_project_settings();
+	if (changed || refresh_uids || refresh_settings) rebuild_registry();
+	return success;
 }
 
 std::string Workspace::resource_path(const std::filesystem::path &path) const {

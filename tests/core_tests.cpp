@@ -1350,6 +1350,26 @@ int main() {
 	expect(diagnostic_count(warning_diagnostics, "unsafe-property-access") == 0 &&
 		diagnostic_count(warning_diagnostics, "unsafe-method-access") == 0,
 		"missing unsafe settings restore Godot's disabled defaults");
+	auto batch_a = warning_fixture / "batch_a.gd";
+	auto batch_b = warning_fixture / "batch_b.gd";
+	auto batch_a_uri = warning_workspace.uri_for_path(batch_a);
+	auto batch_b_uri = warning_workspace.uri_for_path(batch_b);
+	{ std::ofstream(batch_a) << "extends RefCounted\nconst FIRST = 1\n"; }
+	{ std::ofstream(batch_b) << "extends RefCounted\nconst SECOND = 2\n"; }
+	expect(warning_workspace.refresh_files({batch_a_uri, batch_b_uri, batch_a_uri}, &error), "batch adds both disk scripts");
+	auto batch_snapshot = warning_workspace.document_snapshot(batch_b_uri);
+	expect(warning_workspace.document_snapshot(batch_a_uri) && batch_snapshot, "batch exposes all additions");
+	expect(warning_workspace.refresh_files({batch_a_uri, batch_b_uri}, &error) &&
+		warning_workspace.document_snapshot(batch_b_uri) == batch_snapshot, "unchanged batch retains document snapshots");
+	warning_workspace.update_document(batch_a_uri, "extends RefCounted\nconst UNSAVED = 3\n", 1);
+	{ std::ofstream(batch_a) << "extends RefCounted\nconst DISK = 4\n"; }
+	std::filesystem::remove(batch_b);
+	expect(warning_workspace.refresh_files({batch_a_uri, batch_b_uri}, &error), "mixed disk batch succeeds");
+	expect(warning_workspace.document_snapshot(batch_a_uri)->source().find("UNSAVED") != std::string::npos &&
+		!warning_workspace.document_snapshot(batch_b_uri), "batch preserves unsaved buffer and applies deletion");
+	warning_workspace.close_document(batch_a_uri);
+	expect(warning_workspace.document_snapshot(batch_a_uri)->source().find("DISK") != std::string::npos,
+		"closing buffer reads saved source after skipped disk notification");
 	std::filesystem::remove_all(warning_fixture);
 
 	Workspace legacy_api_workspace;

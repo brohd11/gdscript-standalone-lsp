@@ -49,6 +49,7 @@ public:
 	bool update_document(const Document &snapshot, std::string *error = nullptr,
 		UpdateImpact *impact = nullptr);
 	bool refresh_file(const std::string &uri, std::string *error = nullptr);
+	bool refresh_files(const std::vector<std::string> &uris, std::string *error = nullptr);
 
 	std::vector<CompletionItem> completion(const std::string &uri, Position position) const;
 	CompletionResult completion_result(const std::string &uri, Position position,
