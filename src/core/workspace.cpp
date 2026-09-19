@@ -54,20 +54,11 @@ std::optional<TerminalCall> terminal_call(std::string value) {
 	if (value.empty() || value.back() != ')') return std::nullopt;
 	size_t call_open = std::string::npos;
 	int depth = 0;
-	char quote = 0;
-	bool escaped = false;
+	SourceLexicalMap lexical(value);
+	if (!lexical.code().back()) return std::nullopt;
 	for (size_t index = value.size(); index-- > 0;) {
 		auto character = value[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') {
-			quote = character;
-			continue;
-		}
+		if (!lexical.code()[index]) continue;
 		if (character == ')') {
 			++depth;
 		} else if (character == '(') {
@@ -78,7 +69,7 @@ std::optional<TerminalCall> terminal_call(std::string value) {
 			}
 		}
 	}
-	if (quote || depth != 0 || call_open == std::string::npos) return std::nullopt;
+	if (depth != 0 || call_open == std::string::npos) return std::nullopt;
 	auto callee = trim(std::string_view(value).substr(0, call_open));
 	if (callee.empty()) return std::nullopt;
 	return TerminalCall{std::move(callee),
@@ -89,21 +80,12 @@ std::optional<std::pair<std::string, std::string>> trailing_member(std::string_v
 	int parentheses = 0;
 	int brackets = 0;
 	int braces = 0;
-	char quote = 0;
-	bool escaped = false;
+	SourceLexicalMap lexical(expression);
+	if (lexical.context_at(expression.size()) != SourceLexicalKind::Code) return std::nullopt;
 	size_t separator = std::string_view::npos;
 	for (size_t index = 0; index < expression.size(); ++index) {
 		auto character = expression[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') {
-			quote = character;
-			continue;
-		}
+		if (!lexical.code()[index]) continue;
 		if (character == '(') ++parentheses;
 		else if (character == ')') --parentheses;
 		else if (character == '[') ++brackets;
@@ -113,7 +95,7 @@ std::optional<std::pair<std::string, std::string>> trailing_member(std::string_v
 		else if (character == '.' && parentheses == 0 && brackets == 0 && braces == 0) separator = index;
 		if (parentheses < 0 || brackets < 0 || braces < 0) return std::nullopt;
 	}
-	if (quote || parentheses || brackets || braces || separator == std::string_view::npos) return std::nullopt;
+	if (parentheses || brackets || braces || separator == std::string_view::npos) return std::nullopt;
 	auto receiver = trim(expression.substr(0, separator));
 	auto member = trim(expression.substr(separator + 1));
 	if (receiver.empty() || !is_identifier(member)) return std::nullopt;
@@ -173,21 +155,12 @@ std::optional<std::string> resource_reference_at(const Document &document, Posit
 std::optional<std::pair<std::string, std::string>> terminal_subscript(std::string_view expression) {
 	if (expression.empty() || expression.back() != ']') return std::nullopt;
 	int depth = 0;
-	char quote = 0;
-	bool escaped = false;
+	SourceLexicalMap lexical(expression);
+	if (lexical.context_at(expression.size()) != SourceLexicalKind::Code) return std::nullopt;
 	size_t open = std::string_view::npos;
 	for (size_t index = 0; index < expression.size(); ++index) {
 		auto character = expression[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') {
-			quote = character;
-			continue;
-		}
+		if (!lexical.code()[index]) continue;
 		if (character == '[') {
 			if (depth++ == 0) open = index;
 		} else if (character == ']') {
@@ -195,7 +168,7 @@ std::optional<std::pair<std::string, std::string>> terminal_subscript(std::strin
 			if (depth == 0 && index + 1 != expression.size()) return std::nullopt;
 		}
 	}
-	if (quote || depth || open == std::string_view::npos) return std::nullopt;
+	if (depth || open == std::string_view::npos) return std::nullopt;
 	auto receiver = trim(expression.substr(0, open));
 	auto key = trim(expression.substr(open + 1, expression.size() - open - 2));
 	return receiver.empty() ? std::nullopt :
@@ -204,11 +177,11 @@ std::optional<std::pair<std::string, std::string>> terminal_subscript(std::strin
 
 std::optional<std::string> quoted_value(std::string value) {
 	value = trim(value);
-	if (value.starts_with('&')) value.erase(value.begin());
-	if (value.size() < 2 || (value.front() != '\'' && value.front() != '"') || value.back() != value.front()) {
+	SourceLexicalMap lexical(value);
+	auto *literal = lexical.span_at(0);
+	if (!literal || literal->kind == SourceLexicalKind::Comment || !literal->closed || literal->end != value.size())
 		return std::nullopt;
-	}
-	return value.substr(1, value.size() - 2);
+	return value.substr(literal->content_begin, literal->content_end - literal->content_begin);
 }
 
 ResolvedType iterable_value_type(const ResolvedType &type) {
@@ -339,29 +312,13 @@ void collect_identifiers(const Document &document, const SyntaxNode &node,
 	});
 }
 
-std::vector<std::string> quoted_script_paths(std::string_view source) {
+std::vector<std::string> quoted_script_paths(const Document &document) {
 	std::vector<std::string> result;
-	for (size_t index = 0; index < source.size();) {
-		auto quote = source[index];
-		if (quote != '\'' && quote != '"') {
-			++index;
-			continue;
-		}
-		auto begin = ++index;
-		bool escaped = false;
-		while (index < source.size()) {
-			auto character = source[index];
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) break;
-			++index;
-		}
-		if (index >= source.size()) break;
-		auto value = std::string(source.substr(begin, index - begin));
-		if (value.starts_with("res://") || value.starts_with("uid://") || value.ends_with(".gd")) {
+	for (const auto &literal : document.lexical().spans()) {
+		if (literal.kind == SourceLexicalKind::Comment || !literal.closed) continue;
+		auto value = document.source().substr(literal.content_begin, literal.content_end - literal.content_begin);
+		if (value.starts_with("res://") || value.starts_with("uid://") || value.ends_with(".gd"))
 			result.push_back(std::move(value));
-		}
-		++index;
 	}
 	return result;
 }
@@ -716,7 +673,7 @@ std::unordered_set<std::string> Workspace::dependencies_for_document(const std::
 			add(dependency_uri(resolve_path_reference(autoload->second, document.resource_path())));
 		}
 	}
-	for (auto path : quoted_script_paths(document.source())) {
+	for (auto path : quoted_script_paths(document)) {
 		add(dependency_uri(resolve_path_reference(std::move(path), document.resource_path())));
 	}
 	for (auto path : reduced_preload_paths(document)) {
@@ -1107,24 +1064,29 @@ ResolvedType Workspace::resolve_static_reference(std::string expression, const C
 	};
 
 	bool loaded_path = false;
+	SourceLexicalMap lexical(expression);
+	auto code = lexical.masked_text(expression, 0, expression.size());
 	for (auto loader : {std::string_view("preload"), std::string_view("load")}) {
 		if (!expression.starts_with(loader)) continue;
-		auto open = expression.find('(', loader.size());
-		auto close = expression.find(')', open == std::string::npos ? 0 : open + 1);
+		auto open = code.find('(', loader.size());
+		auto close = code.find(')', open == std::string::npos ? 0 : open + 1);
 		if (open == std::string::npos || close == std::string::npos) return ResolvedType::unknown(expression);
 		auto argument = trim(std::string_view(expression).substr(open + 1, close - open - 1));
-		if (argument.size() < 2 || (argument.front() != '"' && argument.front() != '\'') || argument.back() != argument.front()) {
-			return ResolvedType::unknown(expression);
-		}
-		current = resolve_path(argument);
+		auto path = quoted_value(argument);
+		if (!path) return ResolvedType::unknown(expression);
+		current = resolve_path(*path);
 		suffix = trim(std::string_view(expression).substr(close + 1));
 		loaded_path = true;
 		break;
 	}
-	if (!loaded_path && (expression.front() == '"' || expression.front() == '\'' ||
-			expression.starts_with("uid://") || expression.starts_with("res://"))) {
-		current = resolve_path(expression);
-		loaded_path = true;
+	if (!loaded_path) {
+		if (auto path = quoted_value(expression)) {
+			current = resolve_path(*path);
+			loaded_path = true;
+		} else if (expression.starts_with("uid://") || expression.starts_with("res://")) {
+			current = resolve_path(expression);
+			loaded_path = true;
+		}
 	}
 
 	std::vector<std::string> parts;
@@ -1652,8 +1614,9 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 		auto call = trim(std::string_view(expression).substr(loader.size()));
 		if (call.size() < 4 || call.front() != '(' || call.back() != ')') continue;
 		auto argument = trim(std::string_view(call).substr(1, call.size() - 2));
-		if (argument.size() < 2 || (argument.front() != '"' && argument.front() != '\'') || argument.back() != argument.front()) continue;
-		auto id = resolve_path_reference(argument, document.resource_path());
+		auto path = quoted_value(argument);
+		if (!path) continue;
+		auto id = resolve_path_reference(*path, document.resource_path());
 		return type_for_resource_path(id, context);
 	}
 	if (auto callee = terminal_call(expression)) {
@@ -1797,7 +1760,8 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 		auto result = resolve_static_reference(expression, context, static_stack);
 		if (result.known()) return result;
 	}
-	auto cast = expression.rfind(" as ");
+	SourceLexicalMap lexical(expression);
+	auto cast = lexical.masked_text(expression, 0, expression.size()).rfind(" as ");
 	if (cast != std::string::npos) return type_from_name(expression.substr(cast + 4), context);
 	return ResolvedType::unknown(expression);
 }
@@ -1876,7 +1840,8 @@ std::string Workspace::expression_type_access(std::string expression, const Reso
 
 	// Constructors spell the instance type immediately before `.new`. Enum
 	// values similarly spell their enum type before the final member.
-	if (auto new_at = expression.find(".new("); new_at != std::string::npos) {
+	SourceLexicalMap lexical(expression);
+	if (auto new_at = lexical.masked_text(expression, 0, expression.size()).find(".new("); new_at != std::string::npos) {
 		auto candidate = trim(expression.substr(0, new_at));
 		if (same_type(type_from_name(candidate, context))) return candidate;
 	}
@@ -1913,9 +1878,9 @@ AccessProvenance Workspace::access_provenance(std::string expression, const Reso
 
 	// If the value came from a call, retain the callable's declaration spelling
 	// and translate it through the receiver spelling available to this caller.
-	auto call_open = expression.rfind('(');
-	if (call_open != std::string::npos) {
-		auto callee_text = trim(expression.substr(0, call_open));
+	auto call = terminal_call(expression);
+	if (call) {
+		auto callee_text = call->callee;
 		std::vector<std::string> stack;
 		auto callable = infer_expression(callee_text, document, context, position, stack);
 		if (auto found = symbols_.find(callable.symbol_id); found != symbols_.end() &&
@@ -2651,12 +2616,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 			else receiver_expression = "self";
 			auto receiver = infer(receiver_expression);
 			if (!(receiver.kind == TypeKind::Builtin && receiver.name == "Dictionary") && receiver.known()) {
-				auto current_argument = call->arguments.empty() ? std::string{} : call->arguments.back();
-				std::string prefix;
-				if (call->in_string) {
-					auto quote_at = current_argument.rfind(call->quote);
-					prefix = quote_at == std::string::npos ? current_argument : current_argument.substr(quote_at + 1);
-				}
+				std::string prefix = call->string_prefix;
 				auto target = receiver;
 				std::string completed_path;
 				if (spec.subpath) {

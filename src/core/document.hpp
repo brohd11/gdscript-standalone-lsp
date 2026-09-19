@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/types.hpp"
+#include "core/source_lexical.hpp"
 #include <tree_sitter/api.h>
 
 #include <memory>
@@ -37,6 +38,7 @@ public:
 	const std::string &uri() const { return uri_; }
 	const std::string &resource_path() const { return resource_path_; }
 	const std::string &source() const { return source_; }
+	const SourceLexicalMap &lexical() const { return *lexical_; }
 	int64_t version() const { return version_; }
 	const std::vector<ClassRecord> &classes() const { return classes_; }
 	std::vector<ClassRecord> &classes() { return classes_; }
@@ -63,6 +65,7 @@ private:
 	std::string uri_;
 	std::string resource_path_;
 	std::string source_;
+	std::shared_ptr<const SourceLexicalMap> lexical_;
 	int64_t version_ = -1;
 	std::vector<ClassRecord> classes_;
 	std::vector<ParseIssue> syntax_errors_;

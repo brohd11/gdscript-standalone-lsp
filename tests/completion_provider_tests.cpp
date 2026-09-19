@@ -288,6 +288,12 @@ void check_member_strings(Harness &harness) {
 	auto *quoted_build = find_item(quoted, "build");
 	expect(quoted_build && quoted_build->insert_text == "&\"build\"",
 		"member-string completion inserts a StringName outside an existing string");
+	for (const std::string literal : {"r\"", "\"\"\"", "&\""}) {
+		auto prefix_result = harness.body("\ttarget.call(" + literal + "bui<caret>" +
+			(literal == "\"\"\"" ? "\"\"\"" : "\"") + ")\n");
+		expect(has_item(prefix_result, "build"), "member-string completion recognizes literal content bounds: " + literal);
+	}
+
 	auto in_string = harness.body("\ttarget.call(\"<caret>\")\n");
 	auto *raw_build = find_item(in_string, "build");
 	expect(raw_build && raw_build->insert_text == "build" && !raw_build->opens_call,

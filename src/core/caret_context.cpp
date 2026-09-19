@@ -19,7 +19,7 @@ struct Delimiter {
 };
 
 struct ScanResult {
-	std::vector<bool> code;
+	const std::vector<bool> &code;
 	std::vector<Delimiter> stack;
 	size_t statement_start = 0;
 	CaretLexicalContext lexical = CaretLexicalContext::Code;
@@ -55,61 +55,12 @@ bool matching(char open, char close) {
 	return (open == '(' && close == ')') || (open == '[' && close == ']') || (open == '{' && close == '}');
 }
 
-ScanResult scan_to(std::string_view source, size_t offset) {
+ScanResult scan_to(std::string_view source, const SourceLexicalMap &lexical, size_t offset) {
 	offset = std::min(offset, source.size());
-	ScanResult result;
-	result.code.assign(offset, true);
-	bool comment = false;
-	char quote = 0;
-	bool triple = false;
-	bool escaped = false;
-	CaretLexicalContext string_kind = CaretLexicalContext::String;
+	ScanResult result{lexical.code(), {}, 0, CaretLexicalContext::Code, 0};
 	for (size_t index = 0; index < offset; ++index) {
+		if (!result.code[index]) continue;
 		auto character = source[index];
-		if (comment) {
-			result.code[index] = false;
-			if (character == '\n') {
-				comment = false;
-				if (result.stack.empty()) result.statement_start = index + 1;
-			}
-			continue;
-		}
-		if (quote) {
-			result.code[index] = false;
-			if (triple && character == quote && index + 2 < offset && source[index + 1] == quote &&
-					source[index + 2] == quote) {
-				result.code[index + 1] = false;
-				result.code[index + 2] = false;
-				index += 2;
-				quote = 0;
-				triple = false;
-			} else if (escaped) {
-				escaped = false;
-			} else if (character == '\\') {
-				escaped = true;
-			} else if (!triple && character == quote) {
-				quote = 0;
-			}
-			continue;
-		}
-		if (character == '#') {
-			comment = true;
-			result.code[index] = false;
-			continue;
-		}
-		if (character == '\'' || character == '"') {
-			quote = character;
-			result.code[index] = false;
-			string_kind = index > 0 && source[index - 1] == '&' ? CaretLexicalContext::StringName :
-				(index > 0 && source[index - 1] == '^' ? CaretLexicalContext::NodePath : CaretLexicalContext::String);
-			if (index + 2 < offset && source[index + 1] == quote && source[index + 2] == quote) {
-				triple = true;
-				result.code[index + 1] = false;
-				result.code[index + 2] = false;
-				index += 2;
-			}
-			continue;
-		}
 		if (character == '(' || character == '[' || character == '{') {
 			result.stack.push_back({character, index, {}});
 		} else if (character == ')' || character == ']' || character == '}') {
@@ -121,11 +72,19 @@ ScanResult scan_to(std::string_view source, size_t offset) {
 		} else if (character == ',' && !result.stack.empty() && result.stack.back().value == '(') {
 			result.stack.back().commas.push_back(index);
 		} else if (character == '\n' && result.stack.empty()) {
-			result.statement_start = index + 1;
+			auto last = index;
+			while (last > 0 && (source[last - 1] == ' ' || source[last - 1] == '\t' || source[last - 1] == '\r')) --last;
+			if (last == 0 || source[last - 1] != '\\' || !result.code[last - 1]) result.statement_start = index + 1;
 		}
 	}
-	result.quote = quote;
-	result.lexical = comment ? CaretLexicalContext::Comment : (quote ? string_kind : CaretLexicalContext::Code);
+	switch (lexical.context_at(offset)) {
+		case SourceLexicalKind::Code: result.lexical = CaretLexicalContext::Code; break;
+		case SourceLexicalKind::Comment: result.lexical = CaretLexicalContext::Comment; break;
+		case SourceLexicalKind::String: result.lexical = CaretLexicalContext::String; break;
+		case SourceLexicalKind::StringName: result.lexical = CaretLexicalContext::StringName; break;
+		case SourceLexicalKind::NodePath: result.lexical = CaretLexicalContext::NodePath; break;
+	}
+	if (auto *span = lexical.context_span(offset)) result.quote = span->quote;
 	return result;
 }
 
@@ -176,13 +135,13 @@ size_t expression_start(std::string_view source, const std::vector<bool> &code, 
 std::string masked_text(std::string_view source, const std::vector<bool> &code, size_t begin, size_t end) {
 	std::string result(source.substr(begin, end - begin));
 	for (size_t index = begin; index < end && index < code.size(); ++index) {
-		if (!code[index] && source[index] != '\n') result[index - begin] = ' ';
+		if (!code[index] && source[index] != '\n' && source[index] != '\r') result[index - begin] = ' ';
 	}
 	return result;
 }
 
-bool word_at(std::string_view source, const std::vector<bool> &code, size_t offset, std::string_view word) {
-	if (offset + word.size() > code.size() || source.substr(offset, word.size()) != word) return false;
+bool word_at(std::string_view source, const std::vector<bool> &code, size_t offset, std::string_view word, size_t limit) {
+	if (offset + word.size() > limit || offset + word.size() > code.size() || source.substr(offset, word.size()) != word) return false;
 	for (size_t index = offset; index < offset + word.size(); ++index) if (!code[index]) return false;
 	return (offset == 0 || !identifier_character(source[offset - 1])) &&
 		(offset + word.size() == source.size() || !identifier_character(source[offset + word.size()]));
@@ -361,7 +320,7 @@ std::string line_indentation(std::string_view source, size_t offset) {
 	return std::string(source.substr(begin, end - begin));
 }
 
-std::string inferred_indent_unit(std::string_view source, std::string_view current) {
+std::string inferred_indent_unit(std::string_view source, const SourceLexicalMap &lexical, std::string_view current) {
 	bool prefer_spaces = !current.empty() && current.find('\t') == std::string_view::npos;
 	if (!current.empty() && !prefer_spaces) return "\t";
 	size_t smallest_spaces = std::string_view::npos;
@@ -370,7 +329,8 @@ std::string inferred_indent_unit(std::string_view source, std::string_view curre
 		if (end == std::string_view::npos) end = source.size();
 		size_t first = line;
 		while (first < end && (source[first] == ' ' || source[first] == '\t')) ++first;
-		if (first < end && first > line) {
+		if (first < end && first > line && lexical.context_at(line) == SourceLexicalKind::Code &&
+				lexical.kind_at(first) != SourceLexicalKind::Comment) {
 			auto indentation = source.substr(line, first - line);
 			if (indentation.find('\t') != std::string_view::npos) {
 				if (!prefer_spaces) return "\t";
@@ -520,7 +480,7 @@ std::optional<CaretOperationContext> operation_at(std::string_view source, const
 			result.reset();
 			continue;
 		}
-		if (word_at(source, code, index, "and") || word_at(source, code, index, "or")) {
+		if (word_at(source, code, index, "and", end) || word_at(source, code, index, "or", end)) {
 			auto length = source.compare(index, 3, "and") == 0 ? 3U : 2U;
 			clause_start = index + length;
 			result.reset();
@@ -593,10 +553,10 @@ std::optional<CaretConditionalContext> scanned_conditional(std::string_view sour
 		else if (character == '{') ++braces;
 		else if (character == '}') --braces;
 		if (parentheses || brackets || braces) continue;
-		if (word_at(source, code, index, "if")) {
+		if (word_at(source, code, index, "if", end)) {
 			auto before = trim(masked_text(source, code, begin, index));
 			if (!before.empty() && !before.starts_with("if ") && !before.starts_with("elif ")) if_at = index;
-		} else if (if_at && word_at(source, code, index, "else")) {
+		} else if (if_at && word_at(source, code, index, "else", end)) {
 			else_at = index;
 		}
 	}
@@ -614,7 +574,7 @@ std::optional<CaretConditionalContext> scanned_conditional(std::string_view sour
 	return result;
 }
 
-std::string enclosing_match(std::string_view source, size_t offset) {
+std::string enclosing_match(std::string_view source, const SourceLexicalMap &lexical, size_t offset) {
 	auto indentation = [](std::string_view line) {
 		size_t width = 0;
 		for (auto character : line) {
@@ -633,8 +593,8 @@ std::string enclosing_match(std::string_view source, size_t offset) {
 		auto begin = end == 0 ? std::string_view::npos : source.rfind('\n', end - 1);
 		begin = begin == std::string_view::npos ? 0 : begin + 1;
 		auto line = source.substr(begin, end - begin);
-		auto clean = trim(line);
-		if (!clean.empty() && !clean.starts_with('#')) {
+		auto clean = trim(lexical.masked_text(source, begin, end));
+		if (!clean.empty()) {
 			auto line_indent = indentation(line);
 			if (line_indent < indent) {
 				if (clean.starts_with("match ") && clean.ends_with(':')) {
@@ -654,11 +614,11 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	CaretContext result;
 	auto &source = document.source();
 	result.byte_offset = position_to_byte(source, position);
-	auto scan = scan_to(source, result.byte_offset);
+	auto scan = scan_to(source, document.lexical(), result.byte_offset);
 	result.lexical = scan.lexical;
 	result.statement_start = scan.statement_start;
 	result.line_indentation = line_indentation(source, result.byte_offset);
-	result.indent_unit = inferred_indent_unit(source, result.line_indentation);
+	result.indent_unit = inferred_indent_unit(source, document.lexical(), result.line_indentation);
 
 	// Keep call information even in strings: member-string providers need the
 	// containing callable and argument index.
@@ -677,6 +637,12 @@ CaretContext analyze_caret(const Document &document, Position position) {
 		call.in_string = scan.lexical == CaretLexicalContext::String ||
 			scan.lexical == CaretLexicalContext::StringName || scan.lexical == CaretLexicalContext::NodePath;
 		call.quote = scan.quote;
+		if (call.in_string) {
+			if (auto *literal = document.lexical().context_span(result.byte_offset)) {
+				auto begin = std::min(literal->content_begin, result.byte_offset);
+				call.string_prefix = source.substr(begin, result.byte_offset - begin);
+			}
+		}
 		size_t argument_start = delimiter->offset + 1;
 		for (auto comma : delimiter->commas) {
 			call.arguments.push_back(trim(std::string_view(source).substr(argument_start, comma - argument_start)));
@@ -744,7 +710,7 @@ CaretContext analyze_caret(const Document &document, Position position) {
 	// On a match-arm line the root colon is the boundary between the pattern
 	// and its body. Keep the subject only while the caret is still in the
 	// pattern, including incomplete patterns that do not have a colon yet.
-	if (!root_colon) result.match_expression = enclosing_match(source, result.byte_offset);
+	if (!root_colon) result.match_expression = enclosing_match(source, document.lexical(), result.byte_offset);
 	if (result.lexical != CaretLexicalContext::Code) return result;
 	auto declaration = declaration_context(document, scan, result.statement_start, result.byte_offset);
 	auto previous = previous_code_nonspace(source, scan.code, result.byte_offset);

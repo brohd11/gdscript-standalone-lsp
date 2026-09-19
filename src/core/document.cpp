@@ -208,60 +208,31 @@ struct DeclarationScan {
 // node from a later line. Symbols and diagnostics must not accept that recovered
 // extent as part of the declaration. A newline is a hard boundary unless it is
 // inside a string/group or explicitly continued.
-DeclarationScan scan_declaration(TSNode node, std::string_view source) {
+DeclarationScan scan_declaration(TSNode node, std::string_view source, const SourceLexicalMap &lexical) {
 	DeclarationScan result;
 	auto start = std::min(static_cast<size_t>(ts_node_start_byte(node)), source.size());
 	auto limit = std::min(source.size(), start + 64 * 1024);
 	result.end = limit;
 	result.code_end = limit;
 	int grouping = 0;
-	char quote = 0;
-	bool triple = false;
-	bool escaped = false;
-	bool comment = false;
 	size_t last_non_space = start;
 	for (size_t index = start; index < limit; ++index) {
 		auto character = source[index];
-		if (comment) {
-			if (character != '\n') continue;
-			comment = false;
-			if (grouping == 0) {
-				result.end = index;
-				break;
+		if (!lexical.code()[index]) {
+			auto *span = lexical.span_at(index);
+			if (span->kind == SourceLexicalKind::Comment) {
+				if (grouping == 0) result.code_end = std::min(result.code_end, index);
+			} else {
+				last_non_space = span->end - 1;
 			}
-			continue;
-		}
-		if (quote) {
-			if (triple) {
-				if (character == quote && index + 2 < limit && source[index + 1] == quote &&
-						source[index + 2] == quote) {
-					quote = 0;
-					triple = false;
-					index += 2;
-				}
-				continue;
-			}
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') {
-			quote = character;
-			triple = index + 2 < limit && source[index + 1] == character && source[index + 2] == character;
-			if (triple) index += 2;
-			last_non_space = index;
-			continue;
-		}
-		if (character == '#') {
-			comment = true;
-			if (grouping == 0) result.code_end = std::min(result.code_end, index);
+			index = std::min(span->end, limit) - 1;
 			continue;
 		}
 		if (character == '(' || character == '[' || character == '{') ++grouping;
 		else if ((character == ')' || character == ']' || character == '}') && grouping > 0) --grouping;
 		if (character == '\n' || character == '\r') {
-			if (grouping == 0 && (last_non_space >= source.size() || source[last_non_space] != '\\')) {
+			if (grouping == 0 && (last_non_space >= source.size() || source[last_non_space] != '\\' ||
+					!lexical.code()[last_non_space])) {
 				result.end = index;
 				result.code_end = std::min(result.code_end, index);
 				break;
@@ -275,17 +246,9 @@ DeclarationScan scan_declaration(TSNode node, std::string_view source) {
 	auto name = field(node, "name");
 	auto cursor = ts_node_is_null(name) ? start : static_cast<size_t>(ts_node_end_byte(name));
 	int depth = 0;
-	quote = 0;
-	escaped = false;
 	for (size_t index = cursor; index < result.code_end; ++index) {
+		if (!lexical.code()[index]) continue;
 		auto character = source[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (character == quote) quote = 0;
-			continue;
-		}
-		if (character == '\'' || character == '"') { quote = character; continue; }
 		if (character == '(' || character == '[' || character == '{') { ++depth; continue; }
 		if ((character == ')' || character == ']' || character == '}') && depth > 0) { --depth; continue; }
 		if (depth != 0) continue;
@@ -330,7 +293,7 @@ DeclarationScan scan_declaration(TSNode node, std::string_view source) {
 }
 
 Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &owner_id,
-		std::string_view source, bool local) {
+		std::string_view source, const SourceLexicalMap &lexical, bool local) {
 	Symbol symbol;
 	auto name_node = field(node, "name");
 	symbol.name = trim(node_text(name_node, source));
@@ -342,7 +305,7 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	symbol.qualified_name = symbol.id;
 	symbol.uri = uri;
 	symbol.kind = node_type(node) == "const_statement" ? SymbolKind::Constant : SymbolKind::Variable;
-	auto declaration = scan_declaration(node, source);
+	auto declaration = scan_declaration(node, source, lexical);
 	symbol.range = declaration.malformed() ?
 		Range{node_range(node, source).start, byte_to_position(source, declaration.end)} : node_range(node, source);
 	symbol.selection_range = node_range(name_node, source);
@@ -358,7 +321,7 @@ Symbol variable_symbol(TSNode node, const std::string &uri, const std::string &o
 	return symbol;
 }
 
-void collect_locals(TSNode node, Symbol &function, std::string_view source,
+void collect_locals(TSNode node, Symbol &function, std::string_view source, const SourceLexicalMap &lexical,
 		size_t begin = 0, size_t end = std::numeric_limits<size_t>::max()) {
 	if (ts_node_is_null(node)) return;
 	walk_named(node, [&](TSNode child) {
@@ -370,7 +333,7 @@ void collect_locals(TSNode node, Symbol &function, std::string_view source,
 		if (type == "lambda" || type == "function_definition" || type == "constructor_definition" ||
 				type == "class_definition") return false;
 		if ((type == "variable_statement" || type == "const_statement") && child_start >= begin) {
-			auto local = variable_symbol(child, function.uri, function.id, source, true);
+			auto local = variable_symbol(child, function.uri, function.id, source, lexical, true);
 			auto malformed = local.malformed;
 			function.children.push_back(std::move(local));
 			if (malformed) return false;
@@ -413,50 +376,6 @@ size_t indentation_width(std::string_view line) {
 		else break;
 	}
 	return width;
-}
-
-std::vector<bool> source_code_mask(std::string_view source) {
-	std::vector<bool> code(source.size(), true);
-	bool comment = false;
-	char quote = 0;
-	bool triple = false;
-	bool escaped = false;
-	for (size_t index = 0; index < source.size(); ++index) {
-		auto character = source[index];
-		if (comment) {
-			code[index] = false;
-			if (character == '\n') comment = false;
-			continue;
-		}
-		if (quote) {
-			code[index] = false;
-			if (triple && character == quote && index + 2 < source.size() &&
-					source[index + 1] == quote && source[index + 2] == quote) {
-				code[index + 1] = false;
-				code[index + 2] = false;
-				index += 2;
-				quote = 0;
-				triple = false;
-			} else if (escaped) escaped = false;
-			else if (character == '\\') escaped = true;
-			else if (!triple && character == quote) quote = 0;
-			continue;
-		}
-		if (character == '#') {
-			code[index] = false;
-			comment = true;
-		} else if (character == '\'' || character == '"') {
-			code[index] = false;
-			quote = character;
-			if (index + 2 < source.size() && source[index + 1] == character && source[index + 2] == character) {
-				triple = true;
-				code[index + 1] = false;
-				code[index + 2] = false;
-				index += 2;
-			}
-		}
-	}
-	return code;
 }
 
 struct FunctionExtent {
@@ -609,7 +528,7 @@ Symbol parameter_symbol(TSNode node, const Symbol &function, std::string_view so
 	return result;
 }
 
-Symbol function_symbol(TSNode node, const std::string &uri, const std::string &owner_id, std::string_view source) {
+Symbol function_symbol(TSNode node, const std::string &uri, const std::string &owner_id, std::string_view source, const SourceLexicalMap &lexical) {
 	Symbol symbol;
 	auto name_node = field(node, "name");
 	symbol.name = node_type(node) == "constructor_definition" ? "_init" : trim(node_text(name_node, source));
@@ -635,7 +554,7 @@ Symbol function_symbol(TSNode node, const std::string &uri, const std::string &o
 		symbol.children.push_back(std::move(parameter));
 	}
 	symbol.detail += ") -> " + (symbol.declared_type.empty() ? "Variant" : symbol.declared_type);
-	collect_locals(body, symbol, source);
+	collect_locals(body, symbol, source, lexical);
 	return symbol;
 }
 
@@ -649,7 +568,7 @@ void add_parse_issue(std::vector<ParseIssue> &errors, Range range, std::string m
 	errors.push_back({range, std::move(message)});
 }
 
-void collect_errors(TSNode root, std::string_view source, std::vector<ParseIssue> &errors) {
+void collect_errors(TSNode root, std::string_view source, const SourceLexicalMap &lexical, std::vector<ParseIssue> &errors) {
 	walk_named(root, [&](TSNode node) {
 		if (ts_node_is_error(node) || ts_node_is_missing(node)) {
 			auto text = trim(node_text(node, source));
@@ -661,7 +580,7 @@ void collect_errors(TSNode root, std::string_view source, std::vector<ParseIssue
 		bool malformed_declaration = false;
 		if (type == "variable_statement" || type == "export_variable_statement" ||
 				type == "onready_variable_statement" || type == "const_statement") {
-			auto declaration = scan_declaration(node, source);
+			auto declaration = scan_declaration(node, source, lexical);
 			malformed_declaration = declaration.malformed();
 			if (declaration.missing_type || declaration.recovered_type) {
 				auto byte = declaration.colon.value_or(declaration.end);
@@ -787,7 +706,7 @@ struct RecoveredFunction {
 	std::vector<ParseIssue> errors;
 };
 
-RecoveredFunction recover_function(TSParser *parser, std::string_view source, size_t start,
+RecoveredFunction recover_function(TSParser *parser, std::string_view source, const SourceLexicalMap &lexical, size_t start,
 		const FunctionExtent &extent, const std::string &uri, const std::string &owner_id) {
 	auto point = tree_sitter_point(source, start);
 	BlockTree block(parser, source.substr(start, extent.end - start), start, point);
@@ -795,13 +714,13 @@ RecoveredFunction recover_function(TSParser *parser, std::string_view source, si
 	if (ts_node_is_null(function)) function = first_kind_between(block.root, "constructor_definition", start, extent.end + 1);
 	RecoveredFunction result;
 	if (!ts_node_is_null(function)) {
-		result.symbol = function_symbol(function, uri, owner_id, source);
+		result.symbol = function_symbol(function, uri, owner_id, source, lexical);
 		result.syntax = syntax_node(function, source);
 		if (ts_node_has_error(function) && extent.has_body_colon) {
 			// A missing control-flow colon can move earlier statements into an
 			// ERROR sibling of the body. Recover all statements in the lexical body.
 			std::erase_if(result.symbol.children, [](const Symbol &symbol) { return !symbol.is_parameter; });
-			collect_locals(function, result.symbol, source, extent.body_start, extent.end + 1);
+			collect_locals(function, result.symbol, source, lexical, extent.body_start, extent.end + 1);
 			std::erase_if(result.syntax.children, [&](const SyntaxNode &child) { return child.end_byte > extent.header_end; });
 			SyntaxNode body;
 			body.kind = "body";
@@ -824,7 +743,7 @@ RecoveredFunction recover_function(TSParser *parser, std::string_view source, si
 			header_function = first_kind_between(header.root, "constructor_definition", start, start + header_text.size() + 1);
 		}
 		if (!ts_node_is_null(header_function)) {
-			result.symbol = function_symbol(header_function, uri, owner_id, source);
+			result.symbol = function_symbol(header_function, uri, owner_id, source, lexical);
 			result.syntax = syntax_node(header_function, source);
 			std::erase_if(result.syntax.children, [](const SyntaxNode &node) { return node.field == "body"; });
 		} else {
@@ -867,7 +786,7 @@ RecoveredFunction recover_function(TSParser *parser, std::string_view source, si
 			if (!ts_node_is_null(return_type)) result.syntax.children.push_back(syntax_node(return_type, source, "return_type"));
 		}
 		result.symbol.body_recovered = true;
-		collect_locals(block.root, result.symbol, source, extent.body_start, extent.end + 1);
+		collect_locals(block.root, result.symbol, source, lexical, extent.body_start, extent.end + 1);
 		SyntaxNode body;
 		body.kind = "body";
 		body.field = "body";
@@ -882,7 +801,7 @@ RecoveredFunction recover_function(TSParser *parser, std::string_view source, si
 	result.symbol.range.end = byte_to_position(source, extent.end);
 	result.syntax.end_byte = static_cast<uint32_t>(extent.end);
 	result.syntax.range.end = result.symbol.range.end;
-	if (!ts_node_is_null(block.root)) collect_errors(block.root, source, result.errors);
+	if (!ts_node_is_null(block.root)) collect_errors(block.root, source, lexical, result.errors);
 	return result;
 }
 
@@ -910,7 +829,7 @@ struct Document::Impl {
 
 Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version, Analysis analysis) :
 		impl_(std::make_unique<Impl>()), uri_(std::move(uri)), resource_path_(std::move(resource_path)),
-		source_(std::move(source)), version_(version) {
+		source_(std::move(source)), lexical_(std::make_shared<SourceLexicalMap>(source_)), version_(version) {
 	parse();
 	if (analysis == Analysis::Eager) analyze();
 }
@@ -918,7 +837,7 @@ Document::Document(std::string uri, std::string resource_path, std::string sourc
 Document::Document(std::string uri, std::string resource_path, std::string source, int64_t version,
 		const Document &previous, Analysis analysis) :
 		impl_(std::make_unique<Impl>()), uri_(std::move(uri)), resource_path_(std::move(resource_path)),
-		source_(std::move(source)), version_(version) {
+		source_(std::move(source)), lexical_(std::make_shared<SourceLexicalMap>(source_)), version_(version) {
 	parse(&previous);
 	if (analysis == Analysis::Eager) analyze();
 }
@@ -931,7 +850,7 @@ const TSTree *Document::concrete_tree() const { return impl_->tree; }
 
 Document::Document(const Document &other, bool) :
 		impl_(std::make_unique<Impl>()), uri_(other.uri_), resource_path_(other.resource_path_),
-		source_(other.source_), version_(other.version_), classes_(other.classes_),
+		source_(other.source_), lexical_(other.lexical_), version_(other.version_), classes_(other.classes_),
 		syntax_errors_(other.syntax_errors_), syntax_root_(other.syntax_root_),
 		used_incremental_parse_(other.used_incremental_parse_), edit_(other.edit_),
 		changed_ranges_(other.changed_ranges_), analyzed_(other.analyzed_) {
@@ -979,8 +898,8 @@ void Document::analyze() {
 	}
 	auto root = ts_tree_root_node(impl_->tree);
 	syntax_root_ = syntax_node(root, source_);
-	collect_errors(root, source_, syntax_errors_);
-	auto code = source_code_mask(source_);
+	collect_errors(root, source_, lexical(), syntax_errors_);
+	const auto &code = lexical().code();
 
 	ClassRecord root_class;
 	root_class.symbol.id = resource_path_;
@@ -1010,9 +929,9 @@ void Document::analyze() {
 				record.extends_text = extends_text(child, source_);
 			} else if (type == "variable_statement" || type == "export_variable_statement" ||
 					type == "onready_variable_statement" || type == "const_statement") {
-				record.members.push_back(variable_symbol(child, uri_, owner_id, source_, false));
+				record.members.push_back(variable_symbol(child, uri_, owner_id, source_, lexical(), false));
 			} else if (type == "function_definition" || type == "constructor_definition") {
-				record.members.push_back(function_symbol(child, uri_, owner_id, source_));
+				record.members.push_back(function_symbol(child, uri_, owner_id, source_, lexical()));
 			} else if (type == "signal_statement" || type == "enum_definition") {
 				auto name_node = field(child, "name");
 				Symbol symbol;
@@ -1134,7 +1053,7 @@ void Document::analyze() {
 			while (code_end > line && std::isspace(static_cast<unsigned char>(source_[code_end - 1]))) --code_end;
 			if (owner && (!existing || existing->body_recovered || existing->range.end > end_position ||
 					existing->range.end < byte_to_position(source_, code_end))) {
-				auto recovered = recover_function(impl_->parser, source_, line, extent, uri_, owner->symbol.id);
+				auto recovered = recover_function(impl_->parser, source_, lexical(), line, extent, uri_, owner->symbol.id);
 				if (existing) *existing = std::move(recovered.symbol);
 				else owner->members.push_back(std::move(recovered.symbol));
 				if (name.empty()) std::erase_if(owner->members, [&](const Symbol &member) { return member.range.start == header_position; });

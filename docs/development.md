@@ -59,6 +59,13 @@ and inheritance edges are resolved and checked for cycles. Queries run against
 the completed graph, independent of editor-created `GDScript` resources and
 file load order.
 
+Each document version owns an immutable `SourceLexicalMap`, shared with its
+workspace clones. Diagnostics, recovery, caret analysis, and expression/path
+helpers use this scanner to distinguish code from comments and string literals,
+including ordinary and triple-quoted multiline strings, raw strings, StringNames,
+and NodePaths. Offsets refer to the original UTF-8 source. Edits rebuild the map;
+caret queries reuse it without rebuilding a string mask.
+
 During editing, damaged function blocks are reparsed within lexical boundaries.
 Recovered signatures and body syntax feed the normal symbol and semantic
 queries, while the original whole-document tree remains available for

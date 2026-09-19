@@ -348,8 +348,7 @@ std::vector<ParseIssue> lexical_issues(const Document &document) {
 	size_t offset = 0;
 	bool continuation = false;
 	int delimiters = 0;
-	char quote = 0;
-	bool triple = false;
+	const auto &lexical = document.lexical();
 	uint32_t line_number = 0;
 	while (offset < source.size()) {
 		auto end = source.find('\n', offset);
@@ -358,9 +357,21 @@ std::vector<ParseIssue> lexical_issues(const Document &document) {
 		size_t indent_bytes = 0;
 		while (indent_bytes < line.size() && (line[indent_bytes] == ' ' || line[indent_bytes] == '\t')) ++indent_bytes;
 		auto code = line.substr(indent_bytes);
-		bool ignored = code.empty() || code.front() == '#' || continuation || quote != 0;
+		auto line_context = lexical.context_at(offset);
+		bool ignored = trim(code).empty() || code.front() == '#' || continuation ||
+			(line_context != SourceLexicalKind::Code && line_context != SourceLexicalKind::Comment);
 		if (!ignored) {
-			auto plain = trim(code.substr(0, code.find('#')));
+			auto masked = lexical.masked_text(source, offset + indent_bytes, end);
+			// A literal is an operand, not whitespace. Keep a placeholder so
+			// masking cannot turn valid text into an incomplete statement.
+			for (size_t at = offset + indent_bytes; at < end;) {
+				if (!lexical.code()[at]) {
+					auto *span = lexical.span_at(at);
+					if (span->kind != SourceLexicalKind::Comment) masked[at - offset - indent_bytes] = '~';
+					at = span->end;
+				} else ++at;
+			}
+			auto plain = trim(masked);
 			if (plain == "@") {
 				add(R"(Expected annotation identifier after "@".)",
 					{{line_number, static_cast<uint32_t>(indent_bytes)}, {line_number, static_cast<uint32_t>(indent_bytes + 1)}});
@@ -368,7 +379,7 @@ std::vector<ParseIssue> lexical_issues(const Document &document) {
 			if (plain.ends_with(" is") || plain.ends_with(" is not") || plain.find(" is:") != std::string_view::npos || plain.find(" is not:") != std::string_view::npos) {
 				auto at = plain.rfind("is");
 				add(R"(Expected type specifier after "is".)",
-					{{line_number, static_cast<uint32_t>(indent_bytes + at)}, {line_number, static_cast<uint32_t>(indent_bytes + at + 2)}});
+					{byte_to_position(source, offset + indent_bytes + at), byte_to_position(source, offset + indent_bytes + at + 2)});
 			}
 		}
 		if (!ignored) {
@@ -389,30 +400,25 @@ std::vector<ParseIssue> lexical_issues(const Document &document) {
 				}
 			}
 		}
-		bool escaped = false;
-		bool comment = false;
-		for (size_t i = indent_bytes; i < line.size() && !comment; ++i) {
-			char c = line[i];
-			if (quote) {
-				if (escaped) { escaped = false; continue; }
-				if (c == '\\') { escaped = true; continue; }
-				if (triple && i + 2 < line.size() && line[i] == quote && line[i + 1] == quote && line[i + 2] == quote) {
-					quote = 0; triple = false; i += 2;
-				} else if (!triple && c == quote) quote = 0;
+		size_t meaningful_end = end;
+		for (size_t i = offset + indent_bytes; i < end; ++i) {
+			if (!lexical.code()[i]) {
+				auto *span = lexical.span_at(i);
+				if (span->kind == SourceLexicalKind::Comment) meaningful_end = std::min(meaningful_end, i);
+				i = std::min(span->end, end) - 1;
 				continue;
 			}
-			if (c == '#') { comment = true; continue; }
-			if (c == '\'' || c == '"') {
-				quote = c;
-				triple = i + 2 < line.size() && line[i + 1] == c && line[i + 2] == c;
-				if (triple) i += 2;
-			} else if (c == '(' || c == '[' || c == '{') ++delimiters;
+			char c = source[i];
+			if (c == '(' || c == '[' || c == '{') ++delimiters;
 			else if ((c == ')' || c == ']' || c == '}') && delimiters > 0) --delimiters;
 		}
-		if (quote && !triple) quote = 0;
-		auto meaningful = line.substr(0, line.find('#'));
-		while (!meaningful.empty() && (meaningful.back() == ' ' || meaningful.back() == '\t' || meaningful.back() == '\r')) meaningful.remove_suffix(1);
-		continuation = delimiters > 0 || (!meaningful.empty() && meaningful.back() == '\\') || triple;
+		while (meaningful_end > offset && (source[meaningful_end - 1] == ' ' ||
+				source[meaningful_end - 1] == '\t' || source[meaningful_end - 1] == '\r')) --meaningful_end;
+		bool explicit_continuation = meaningful_end > offset && source[meaningful_end - 1] == '\\' &&
+			lexical.code()[meaningful_end - 1];
+		auto newline_kind = lexical.kind_at(end);
+		continuation = delimiters > 0 || explicit_continuation ||
+			(newline_kind != SourceLexicalKind::Code && newline_kind != SourceLexicalKind::Comment);
 		offset = end == source.size() ? source.size() : end + 1;
 		++line_number;
 	}

@@ -2368,6 +2368,166 @@
       }],
       "warnings": false,
       "godot_pattern": "Cyclic reference"
+    },
+    {
+      "name": "lexical_hash_continuation",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif content[i] == \"#\" and i > 0 \\\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_hash_continuation_single_quote",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif content[i] == '#' and i > 0 \\\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_hash_continuation_crlf",
+      "source": "extends RefCounted\r\nstatic func test(content: String) -> String:\r\n\tvar i = 0\r\n\twhile i < content.length():\r\n\t\tif content[i] == \"#\" and i > 0 \\\r\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\r\n\t\t\treturn content.substr(0, i).strip_edges()\r\n\t\ti += 1\r\n\treturn content\r\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_hash_continuation_spaces",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n    var i = 0\n    while i < content.length():\n        if content[i] == \"#\" and i > 0 \\\n                and (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\n            return content.substr(0, i).strip_edges()\n        i += 1\n    return content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_hash_continuation_escaped_quote",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif content[i] == \"\\\"#\" and i > 0 \\\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_grouped_condition",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif (content[i] == \"#\" and i > 0\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\")):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_grouped_closing_line",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif (content[i] == \"#\" and i > 0\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\")\n\t\t):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_multiline_call",
+      "source": "extends RefCounted\nstatic func test(content: String) -> String:\n\tvar i = 0\n\twhile i < content.length():\n\t\tif content.begins_with(\n\t\t\t\t\"#\"):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += 1\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_strip_inline_comment",
+      "source": "extends RefCounted\nclass _Scan:\n\tfunc top() -> bool:\n\t\treturn true\n\tfunc feed_at(_content: String, _i: int) -> int:\n\t\treturn 1\n\nstatic func _strip_inline_comment(content: String) -> String:\n\tvar sc = _Scan.new()\n\tvar i = 0\n\twhile i < content.length():\n\t\tif sc.top() and content[i] == \"#\" and i > 0 \\\n\t\t\t\tand (content[i - 1] == \" \" or content[i - 1] == \"\\t\"):\n\t\t\treturn content.substr(0, i).strip_edges()\n\t\ti += sc.feed_at(content, i)\n\treturn content\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_is_inside_string",
+      "source": "extends RefCounted\nfunc f(path, res):\n\tprint(\"Could not instance file: %s, file is: %s\" % [path, type_string(typeof(res))])\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_ordinary_double_multiline",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = \"hello # is: ([{\nfunc fake(): pass\n       @\n  is not:\n\"\n\tprint(text)\nfunc later():\n\tpass\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_ordinary_single_multiline",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = 'hello # is: ([{\nfunc fake(): pass\n       @\n  is not:\n'\n\tprint(text)\nfunc later():\n\tpass\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_triple_double_multiline",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = \"\"\"hello # is: ([{\nfunc fake(): pass\n       @\n  is not:\n\"\"\"\n\tprint(text)\nfunc later():\n\tpass\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_triple_single_multiline",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = '''hello # is: ([{\nfunc fake(): pass\n       @\n  is not:\n'''\n\tprint(text)\nfunc later():\n\tpass\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_raw",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = r\"hello\\n# is:\"\n\tprint(text)\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_raw_multiline",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = r\"\"\"hello\n is: # [ \\q\n\"\"\"\n\tprint(text)\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_escaped_triple",
+      "source": "extends RefCounted\nfunc f():\n\tvar text = \"\"\"hello \\\"\"\" still\nworld\"\"\"\n\tprint(text)\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_comment_backslash",
+      "source": "extends RefCounted\nfunc f():\n\tif true: # \" # \\\n\t\tprint(\"ok\")\n\tprint(\"after\")\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_literal_hash_then_comment",
+      "source": "extends RefCounted\nfunc f():\n\tprint(\"#\") # )] is: \\\n\tif true:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "lexical_literal_expression_helpers",
+      "source": "extends RefCounted\nfunc make(_text: String) -> Vector2:\n\treturn Vector2.ONE\nfunc f():\n\tprint(make(\"\"\"quoted \\\" punctuation ).] #\n is: \"\"\").x)\n\tprint({\"\"\"key\n]\"\"\": Vector2.ONE}[\"\"\"key\n]\"\"\"].y)\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
     }
   ]
 }

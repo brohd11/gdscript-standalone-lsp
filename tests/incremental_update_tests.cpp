@@ -103,6 +103,9 @@ int main() {
 		"func get_nodes():\n",
 		"func get_nodes() -> Node:\n\treturn Node.new()\n",
 	};
+	edits.push_back("func f():\n\tvar s = \"first\nfunc fake(): pass\n\"\n\treturn s\n");
+	edits.push_back("func f():\n\tvar s = \"first\nfunc fake(): pass\n");
+	edits.push_back("func f():\n\tvar s = 1 # \"first\n\treturn s\n");
 	const std::string bounded_source =
 		"# 😀 shifts later source locations\nclass Holder:\n"
 		"\tfunc inspect():\n"

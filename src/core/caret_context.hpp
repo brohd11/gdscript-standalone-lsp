@@ -47,6 +47,7 @@ struct CaretCallContext {
 	size_t argument_index = 0;
 	bool in_string = false;
 	char quote = 0;
+	std::string string_prefix;
 };
 
 struct CaretOperationContext {
