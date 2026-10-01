@@ -2528,6 +2528,217 @@
       "warnings": false,
       "overlay": true,
       "godot_pattern": null
+    },
+    {
+      "name": "class_constant_global_member",
+      "source": "extends Node\nconst Alias = GlobalClass\n",
+      "expected": [{"code": "invalid-constant", "message": "Assigned value for constant \"Alias\" isn't a constant expression.", "severity": 1, "range": {"start": {"line": 1, "character": 14}, "end": {"line": 1, "character": 25}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "isn't a constant expression",
+      "files": {"global.gd": "class_name GlobalClass\nextends RefCounted\nconst NUMBER = 1\nclass Inner:\n\tpass\n", ".godot/global_script_class_cache.cfg": "list=Array[Dictionary]([{\n\"base\": &\"RefCounted\",\n\"class\": &\"GlobalClass\",\n\"icon\": \"\",\n\"is_abstract\": false,\n\"is_tool\": false,\n\"language\": &\"GDScript\",\n\"path\": \"res://global.gd\"\n}])\n"}
+    },
+    {
+      "name": "class_constant_global_local",
+      "source": "extends Node\nfunc f():\n\tconst Alias = GlobalClass\n",
+      "expected": [{"code": "invalid-constant", "message": "Assigned value for constant \"Alias\" isn't a constant expression.", "severity": 1, "range": {"start": {"line": 2, "character": 15}, "end": {"line": 2, "character": 26}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "isn't a constant expression",
+      "files": {"global.gd": "class_name GlobalClass\nextends RefCounted\nconst NUMBER = 1\nclass Inner:\n\tpass\n", ".godot/global_script_class_cache.cfg": "list=Array[Dictionary]([{\n\"base\": &\"RefCounted\",\n\"class\": &\"GlobalClass\",\n\"icon\": \"\",\n\"is_abstract\": false,\n\"is_tool\": false,\n\"language\": &\"GDScript\",\n\"path\": \"res://global.gd\"\n}])\n"}
+    },
+    {
+      "name": "class_constant_native_member",
+      "source": "extends Node\nconst Alias = Node\n",
+      "expected": [{"code": "invalid-constant", "message": "Assigned value for constant \"Alias\" isn't a constant expression.", "severity": 1, "range": {"start": {"line": 1, "character": 14}, "end": {"line": 1, "character": 18}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "isn't a constant expression"
+    },
+    {
+      "name": "class_constant_native_local",
+      "source": "extends Node\nfunc f():\n\tconst Alias = Node\n",
+      "expected": [{"code": "invalid-constant", "message": "Assigned value for constant \"Alias\" isn't a constant expression.", "severity": 1, "range": {"start": {"line": 2, "character": 15}, "end": {"line": 2, "character": 19}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "isn't a constant expression"
+    },
+    {
+      "name": "class_constant_valid_aliases",
+      "source": "extends Node\nclass Inner:\n\tpass\nconst Local = Inner\nconst Preloaded = preload(\"res://global.gd\")\nconst Nested = GlobalClass.Inner\nconst Number = GlobalClass.NUMBER\nconst Mode = Node.PROCESS_MODE_INHERIT\nfunc f():\n\tconst LocalAlias = Inner\n\tconst PreloadedAlias = Preloaded\n\tconst NestedAlias = GlobalClass.Inner\n\tprint(LocalAlias, PreloadedAlias, NestedAlias)\n\tvar runtime_class = GlobalClass\n\tprint(runtime_class.new(), Node.new())\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null,
+      "files": {"global.gd": "class_name GlobalClass\nextends RefCounted\nconst NUMBER = 1\nclass Inner:\n\tpass\n", ".godot/global_script_class_cache.cfg": "list=Array[Dictionary]([{\n\"base\": &\"RefCounted\",\n\"class\": &\"GlobalClass\",\n\"icon\": \"\",\n\"is_abstract\": false,\n\"is_tool\": false,\n\"language\": &\"GDScript\",\n\"path\": \"res://global.gd\"\n}])\n"}
+    },
+    {
+      "name": "reassignment_explicit_bool",
+      "source": "extends Node\nfunc f():\n\tvar flag: bool = false\n\tflag = Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 19}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_inferred_bool",
+      "source": "extends Node\nfunc f():\n\tvar flag := false\n\tflag = Vector2(1, 2)\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 21}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_int_string",
+      "source": "extends Node\nfunc f():\n\tvar number: int = 0\n\tnumber = \"bad\"\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"String\" to \"int\".", "severity": 1, "range": {"start": {"line": 3, "character": 10}, "end": {"line": 3, "character": 15}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_parameter",
+      "source": "extends Node\nfunc f(flag: bool):\n\tflag = Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 2, "character": 8}, "end": {"line": 2, "character": 19}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_member",
+      "source": "extends Node\nvar flag: bool = false\nfunc f():\n\tflag = Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 19}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_inferred_member",
+      "source": "extends Node\nvar flag := false\nfunc f():\n\tself.flag = Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 3, "character": 13}, "end": {"line": 3, "character": 24}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_object_property",
+      "source": "extends Node\nclass Holder:\n\tvar flag: bool = false\nfunc f(holder: Holder):\n\tholder.flag = Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"bool\".", "severity": 1, "range": {"start": {"line": 4, "character": 15}, "end": {"line": 4, "character": 26}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_native_property",
+      "source": "extends Node2D\nfunc f():\n\tself.position = \"bad\"\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"String\" to \"Vector2\".", "severity": 1, "range": {"start": {"line": 2, "character": 17}, "end": {"line": 2, "character": 22}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_compound_result",
+      "source": "extends Node\nfunc f():\n\tvar transform := Transform2D.IDENTITY\n\ttransform *= Vector2.ONE\n",
+      "expected": [{"code": "type-mismatch", "message": "Cannot assign a value of type \"Vector2\" to \"Transform2D\".", "severity": 1, "range": {"start": {"line": 3, "character": 14}, "end": {"line": 3, "character": 25}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Cannot assign|cannot be assigned"
+    },
+    {
+      "name": "reassignment_valid_conversions",
+      "source": "extends Node\nvar dynamic_member = false\nfunc f(dynamic_parameter, runtime: Variant):\n\tvar flag: bool = false\n\tflag = 2\n\tvar inferred := false\n\tinferred = 2\n\tvar dynamic_local = false\n\tdynamic_local = Vector2.ONE\n\tdynamic_member = Vector2.ONE\n\tdynamic_parameter = Vector2.ONE\n\tflag = runtime\n\tvar number: int = 2\n\tnumber += 1.5\n\tvar vector := Vector2.ONE\n\tvector *= 2.0\n\tvar base: Node = Node2D.new()\n\tvar derived: Node2D = null\n\tderived = base\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "reassignment_invalid_operator_once",
+      "source": "extends Node\nfunc f():\n\tvar number: int = 1\n\tnumber += \"bad\"\n",
+      "expected": [{"code": "invalid-operator", "message": "Invalid operands \"int\" and \"String\" for operator \"+\".", "severity": 1, "range": {"start": {"line": 3, "character": 1}, "end": {"line": 3, "character": 16}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "Invalid operands"
+    },
+    {
+      "name": "reassignment_unresolved_once",
+      "source": "extends Node\nfunc f():\n\tvar flag: bool = false\n\tflag = missing_value\n",
+      "expected": [{"code": "undefined-identifier", "message": "Identifier \"missing_value\" is not declared in the current scope.", "severity": 1, "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 21}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "not declared"
+    },
+    {
+      "name": "reassignment_array_no_duplicates",
+      "source": "extends Node\nfunc f():\n\tvar values: Array[int] = []\n\tvalues = [\"bad\"]\n\tvalues[0] = \"bad\"\n",
+      "expected": [{"code": "type-mismatch", "message": "Array element of type \"String\" is incompatible with \"int\".", "severity": 1, "range": {"start": {"line": 3, "character": 11}, "end": {"line": 3, "character": 16}}}, {"code": "type-mismatch", "message": "Assigned value is incompatible with the array element type.", "severity": 1, "range": {"start": {"line": 4, "character": 13}, "end": {"line": 4, "character": 18}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "int"
+    },
+    {
+      "name": "annotation_comment_header",
+      "source": "# https://github.com/Zylann/godot_editor_debugger_plugin\n\n@tool\n@icon(\"uid://cducmivcy7t15\")\nextends Control\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "annotation_comment_sequence",
+      "source": "## Script documentation.\n\n@tool\n# Between script annotations.\n\n@icon(\"uid://cducmivcy7t15\")\n## Before extends.\nextends Control\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "annotation_comment_script_lookahead",
+      "source": "# Leading comment.\n@abstract\n# Look ahead past this comment to the script annotation.\n@tool\n# No explicit extends.\nvar value: int = 1\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "annotation_comment_declaration",
+      "source": "extends Node\n@export\n## Exported value.\n\nvar value: int = 1\n@warning_ignore(\"unused_parameter\")\n# Before a function.\nfunc f(unused):\n\tpass\n",
+      "expected": [],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "annotation_comment_after_extends",
+      "source": "extends Node\n# A comment cannot reopen the script header.\n@tool\n",
+      "expected": [{"code": "syntax-error", "message": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".", "severity": 1, "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "must be at the top"
+    },
+    {
+      "name": "annotation_comment_after_class_name",
+      "source": "class_name Annotated\n# A comment cannot reopen the script header.\n@tool\n",
+      "expected": [{"code": "syntax-error", "message": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".", "severity": 1, "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "must be at the top"
+    },
+    {
+      "name": "annotation_comment_after_declaration",
+      "source": "var value: int = 1\n# A comment cannot reopen the script header.\n@tool\n",
+      "expected": [{"code": "syntax-error", "message": "Annotation \"@tool\" must be at the top of the script, before \"extends\" and \"class_name\".", "severity": 1, "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "must be at the top"
+    },
+    {
+      "name": "annotation_comment_duplicate",
+      "source": "@tool\n# Still a duplicate.\n@tool\nextends Node\n",
+      "expected": [{"code": "syntax-error", "message": "\"@tool\" annotation can only be used once.", "severity": 1, "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}}],
+      "warnings": false,
+      "overlay": true,
+      "godot_pattern": "can only be used once"
     }
   ]
 }

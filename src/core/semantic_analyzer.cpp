@@ -534,7 +534,11 @@ private:
 			}
 			type.instance = false;
 			Value result{type, {}, true, false};
-			result.constant = ConstantState::Constant;
+			// Bare global/native classes are runtime metatype values. Lexical
+			// inner classes and preload aliases resolve through symbol_value above
+			// and remain valid constant initializers.
+			result.constant = type.kind == TypeKind::ScriptClass || type.kind == TypeKind::NativeClass ?
+				ConstantState::Runtime : ConstantState::Constant;
 			if (type.kind == TypeKind::Builtin || type.kind == TypeKind::Callable || type.kind == TypeKind::Signal) {
 				if (auto *constructors = workspace.native_api_.constructors(type.name)) {
 					result.signatures = *constructors;
@@ -1192,8 +1196,10 @@ private:
 			auto value = right ? require_value(evaluate(*right), right->range) : Value{};
 			if (node.kind == "augmented_assignment") value = binary_result(node, target, std::move(value));
 			bool indexed = left && (left->kind == "subscript" || (left->kind == "attribute" && !left->children.empty() && left->children.back().kind == "attribute_subscript"));
-			if (right && !check_array(target.type, value, *right) && indexed &&
-				!compatible_value(target.type, value)) add("type-mismatch", "Assigned value is incompatible with the array element type.", right->range);
+			if (right && !check_array(target.type, value, *right) && !compatible_value(target.type, value)) {
+				add("type-mismatch", indexed ? "Assigned value is incompatible with the array element type." :
+					"Cannot assign a value of type \"" + value.type.display() + "\" to \"" + target.type.display() + "\".", right->range);
+			}
 			return value;
 		}
 		if (node.kind == "subscript") {

@@ -277,13 +277,15 @@ private:
 	const SyntaxNode *next_target(const SyntaxNode &container, size_t index) const {
 		for (++index; index < container.children.size(); ++index) {
 			const auto &candidate = container.children[index];
-			if (candidate.kind != "annotation") return &candidate;
+			if (candidate.kind != "annotation" && candidate.kind != "comment") return &candidate;
 		}
 		return nullptr;
 	}
 
 	bool followed_by_script_annotation(const SyntaxNode &container, size_t index) const {
-		for (++index; index < container.children.size() && container.children[index].kind == "annotation"; ++index) {
+		for (++index; index < container.children.size(); ++index) {
+			if (container.children[index].kind == "comment") continue;
+			if (container.children[index].kind != "annotation") break;
 			std::string name;
 			for (const auto &child : container.children[index].children) if (child.kind == "identifier") name = document.text(child);
 			auto *candidate = registry.find(name);
@@ -316,11 +318,12 @@ private:
 			node.kind == "body" || node.kind == "match_body";
 		if (container) {
 			uint32_t root_barrier = std::numeric_limits<uint32_t>::max();
-			if (root) for (const auto &child : node.children) if (child.kind != "annotation") {
+			if (root) for (const auto &child : node.children) if (child.kind != "annotation" && child.kind != "comment") {
 				root_barrier = child.start_byte; break;
 			}
 			for (size_t index = 0; index < node.children.size(); ++index) {
 				const auto &child = node.children[index];
+				if (child.kind == "comment") continue;
 				if (child.kind == "annotation") {
 					std::string name;
 					for (const auto &part : child.children) if (part.kind == "identifier") name = document.text(part);
