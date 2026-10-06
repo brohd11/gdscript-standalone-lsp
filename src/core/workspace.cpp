@@ -441,7 +441,7 @@ bool Workspace::open(const std::filesystem::path &root, const std::filesystem::p
 	} else {
 		for (const auto &candidate : {
 				root_ / ".godot/addons/gdscript_parser/extension_api.json",
-				root_ / "addons/addon_lib/gdscript_lsp/data/godot-4.6-extension-api.json",
+				root_ / "addons/_lib/gdscript_lsp/data/godot-4.6-extension-api.json",
 				root_ / "data/godot-4.6-extension-api.json"}) {
 			if (std::filesystem::exists(candidate)) {
 				metadata = candidate;

@@ -5,7 +5,7 @@ The Godot GDExtension and editor integration live in
 That repository pins this core as a source submodule and publishes one addon ZIP
 containing libraries for Windows/Linux x86_64 and macOS Intel/Apple Silicon.
 
-Extract the ZIP into a project to install `addons/addon_lib/gdscript_lsp`.
+Extract the ZIP into a project to install `addons/_lib/gdscript_lsp`.
 There is no editor plugin to enable and no AddonLib dependency in the service.
 AddonLib and SyntaxPlus use it as an optional parser backend; Code Completions
 owns its optional native completion provider. Without the addon those plugins

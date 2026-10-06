@@ -3,7 +3,7 @@ AddonLib:
     tag: "main"
     version: "2.1.0"
     url: https://github.com/brohd11/godot-addon-lib.git
-    path: addons/addon_lib/brohd
+    path: addons/_lib/brohd
 
 EditorConsole:
     kind: clone
@@ -22,10 +22,10 @@ CodeCompletions:
 YAMLParser:
     version: "2.1.0"
     url: https://github.com/brohd11/Godot-YAML-Parser.git
-    path: addons/addon_lib/yaml_parser
+    path: addons/_lib/yaml_parser
 
 godot-gdscript-lsp:
-    path: addons/addon_lib/gdscript_lsp
+    path: addons/_lib/gdscript_lsp
     version: "0.1.2-beta"
     is_dependency: true
     tag: "v0.1.2-beta"
@@ -36,7 +36,7 @@ EditorNodeRef:
     version: "0.3.3"
     tag: "main"
     url: https://github.com/brohd11/godot-editor-node-ref.git
-    path: addons/addon_lib/editor_node_ref
+    path: addons/_lib/editor_node_ref
 
 SyntaxPlus:
     kind: clone
@@ -61,7 +61,7 @@ godot-script-dock:
 
 github.com/brohd11/godot-util-r:
     name: "UtilRuntime"
-    path: addons/addon_lib/util_r
+    path: addons/_lib/util_r
     version: "0.1.0"
     is_dependency: true
     tag: "v0.1.0"
@@ -69,7 +69,7 @@ github.com/brohd11/godot-util-r:
 
 github.com/brohd11/godot-singleton:
     name: "Singletons"
-    path: addons/addon_lib/singleton
+    path: addons/_lib/singleton
     version: "0.9.0"
     is_dependency: true
     tag: "v0.9.0"
@@ -78,7 +78,7 @@ github.com/brohd11/godot-singleton:
 github.com/brohd11/godot-gdscript-parser:
     name: "GDScriptParser"
     kind: clone
-    path: addons/addon_lib/gdscript_parser
+    path: addons/_lib/gdscript_parser
     version: "0.1.0"
     tag: "main"
     url: https://github.com/brohd11/godot-gdscript-parser.git

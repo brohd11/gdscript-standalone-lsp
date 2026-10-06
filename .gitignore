@@ -11,7 +11,7 @@
 __pycache__/
 *.pyc
 
-/addons/addon_lib/
+/addons/_lib/
 /addons/code_completions/
 /addons/editor_console/
 /addons/script_dock/
