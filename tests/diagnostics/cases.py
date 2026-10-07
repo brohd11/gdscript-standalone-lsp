@@ -38,11 +38,11 @@ def prepare(directory, case):
     (directory / 'project.godot').write_text(project_settings(case), encoding='utf-8')
     script = directory / case.get('path', 'main.gd')
     script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(case['source'], encoding='utf-8')
+    script.write_bytes(case['source'].encode('utf-8'))
     for name, source in case.get('files', {}).items():
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source, encoding='utf-8')
+        path.write_bytes(source.encode('utf-8'))
     return script
 
 
