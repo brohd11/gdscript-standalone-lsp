@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: macos-arm64
+          - runner: ubuntu-22.04
+            target: linux-x64
+          - runner: windows-2022
+            target: windows-x64
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Select macOS toolchain
+        if: runner.os == 'macOS'
+        run: |
+          # Xcode 26 provides non-experimental C++20 std::jthread support.
+          test -d /Applications/Xcode_26.3.app/Contents/Developer
+          echo 'DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer' >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          options=()
+          if [[ "$RUNNER_OS" == Windows ]]; then options+=(-A x64); fi
+          cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON "${options[@]}"
+
+      - name: Build
+        run: cmake --build build-cmake --config Release --parallel 3
+
+      - name: Test
+        run: ctest --test-dir build-cmake -C Release --output-on-failure --timeout 300
