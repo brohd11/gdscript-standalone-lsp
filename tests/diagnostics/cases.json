@@ -2739,6 +2739,363 @@
       "warnings": false,
       "overlay": true,
       "godot_pattern": "can only be used once"
+    },
+    {
+      "name": "empty_if_blank",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"if\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .if. block."
+    },
+    {
+      "name": "empty_if_comment",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"if\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .if. block."
+    },
+    {
+      "name": "empty_if_comment_pass",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_elif_blank",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telif true:\n\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"elif\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .elif. block."
+    },
+    {
+      "name": "empty_elif_comment",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telif true:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"elif\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .elif. block."
+    },
+    {
+      "name": "empty_elif_comment_pass",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telif true:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_else_blank",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telse:\n\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"else\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .else. block."
+    },
+    {
+      "name": "empty_else_comment",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telse:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 4,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"else\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .else. block."
+    },
+    {
+      "name": "empty_else_comment_pass",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telse:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_for_blank",
+      "source": "extends Node\nfunc test():\n\tfor value in []:\n\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"for\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .for. block."
+    },
+    {
+      "name": "empty_for_comment",
+      "source": "extends Node\nfunc test():\n\tfor value in []:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"for\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .for. block."
+    },
+    {
+      "name": "empty_for_comment_pass",
+      "source": "extends Node\nfunc test():\n\tfor value in []:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_while_blank",
+      "source": "extends Node\nfunc test():\n\twhile false:\n\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"while\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .while. block."
+    },
+    {
+      "name": "empty_while_comment",
+      "source": "extends Node\nfunc test():\n\twhile false:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          },
+          "message": "Expected indented block after \"while\" block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after .while. block."
+    },
+    {
+      "name": "empty_while_comment_pass",
+      "source": "extends Node\nfunc test():\n\twhile false:\n\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_match_arm_blank",
+      "source": "extends Node\nfunc test():\n\tmatch 1:\n\t\t1:\n\t\t\t\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 2
+            }
+          },
+          "message": "Expected indented block after match pattern block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after match pattern block."
+    },
+    {
+      "name": "empty_match_arm_comment",
+      "source": "extends Node\nfunc test():\n\tmatch 1:\n\t\t1:\n\t\t\t# unfinished\n\tprint(\"after\")\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 2
+            }
+          },
+          "message": "Expected indented block after match pattern block."
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after match pattern block."
+    },
+    {
+      "name": "empty_match_arm_comment_pass",
+      "source": "extends Node\nfunc test():\n\tmatch 1:\n\t\t1:\n\t\t\tpass\n\tprint(\"after\")\n",
+      "expected": [],
+      "godot_pattern": null
+    },
+    {
+      "name": "empty_editor_interface_branch",
+      "source": "extends Control\nclass UEngine:\n\tstatic func get_editor_interface() -> EditorInterface:\n\t\treturn null\nvar _tab_panel: Control\nfunc test():\n\tvar editor_interface = UEngine.get_editor_interface()\n\tif is_instance_valid(editor_interface):\n\t\t\n\tif Engine.is_editor_hint():\n\t\tvar ed_theme = editor_interface.get_editor_theme()\n\t\t_tab_panel.add_theme_stylebox_override(&\"panel\", ed_theme.get_stylebox(&\"tabbar_background\", &\"TabContainer\"))\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 7,
+              "character": 1
+            }
+          }
+        }
+      ],
+      "overlay": true,
+      "godot_pattern": "Expected indented block after"
+    },
+    {
+      "name": "empty_if_eof",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\t# unfinished\n",
+      "expected": [
+        {
+          "code": "syntax-error",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 1
+            }
+          }
+        }
+      ],
+      "godot_pattern": "Expected indented block after"
+    },
+    {
+      "name": "await_return_values_valid",
+      "source": "extends Node\nsignal typed(value: int)\nsignal multiple(value: int, label: String)\nsignal empty\nfunc wait_typed() -> int:\n    return await typed\nfunc wait_alias() -> int:\n    var alias := typed\n    return await alias\nfunc wait_multiple() -> Array:\n    return await multiple\nfunc wait_empty() -> Variant:\n    return await empty\nfunc wait_native(line: LineEdit) -> String:\n    return await line.text_changed\nfunc wait_coroutine() -> int:\n    return await wait_typed()\nfunc wait_plain() -> int:\n    return await 42\nfunc inferred():\n    return await typed\nfunc use_inferred() -> int:\n    return await inferred()\n",
+      "expected": [],
+      "overlay": true,
+      "godot_pattern": null
+    },
+    {
+      "name": "await_return_void",
+      "source": "extends Node\nsignal finished\nfunc test() -> void:\n    return await finished\n",
+      "expected": [
+        {
+          "code": "return-value-in-void",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 4
+            }
+          }
+        }
+      ],
+      "godot_pattern": "void function cannot return a value"
+    },
+    {
+      "name": "await_return_plain_mismatch",
+      "source": "extends Node\nfunc test() -> String:\n    return await 42\n",
+      "expected": [
+        {
+          "code": "return-type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "godot_pattern": "return.*int"
+    },
+    {
+      "name": "await_return_unawaited_signal",
+      "source": "extends Node\nsignal finished(value: int)\nfunc test() -> int:\n    return finished\n",
+      "expected": [
+        {
+          "code": "return-type-mismatch",
+          "severity": 1,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 11
+            }
+          }
+        }
+      ],
+      "godot_pattern": "return.*Signal"
     }
   ]
 }

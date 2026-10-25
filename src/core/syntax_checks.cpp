@@ -136,6 +136,25 @@ std::vector<ParseIssue> structural_issues(const Document &document) {
 	std::vector<Frame> pending{{&document.syntax_root(), 0, {}}};
 	auto visit = [&](const SyntaxNode &node, unsigned loops, std::string_view parent) {
 		auto add = [&](std::string message, Range range) { result.push_back({range, std::move(message)}); };
+		// Tree-sitter accepts empty suites for recovery while the user edits.
+		// Godot requires a statement, even when the suite contains comments.
+		std::string_view block;
+		if (node.kind == "if_statement") block = "if";
+		else if (node.kind == "elif_clause") block = "elif";
+		else if (node.kind == "else_clause") block = "else";
+		else if (node.kind == "for_statement") block = "for";
+		else if (node.kind == "while_statement") block = "while";
+		else if (node.kind == "pattern_section") block = "match pattern";
+		if (!block.empty() && !node.has_error) {
+			if (auto *body = field(node, "body"); body && std::all_of(body->children.begin(), body->children.end(),
+					[](const SyntaxNode &child) { return child.kind == "comment"; })) {
+				auto range = block == "match pattern" ? prefix_range(document, node, 1) : prefix_range(document, node, block.size());
+				auto covered = std::any_of(document.syntax_errors().begin(), document.syntax_errors().end(),
+					[&](const ParseIssue &issue) { return issue.range.start <= range.end && range.start <= issue.range.end; });
+				if (!covered) add(block == "match pattern" ? "Expected indented block after match pattern block." :
+					"Expected indented block after \"" + std::string(block) + "\" block.", range);
+			}
+		}
 		if (node.kind == "source" || node.kind == "class_body") {
 			const SyntaxNode *class_name = nullptr;
 			const SyntaxNode *extends = nullptr;

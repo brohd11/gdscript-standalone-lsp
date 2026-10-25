@@ -77,6 +77,8 @@ struct ResolvedType {
 	static ResolvedType unknown(std::string reason = {});
 };
 
+ResolvedType awaited_type(const ResolvedType &operand);
+
 struct SymbolOrigin {
 	std::string symbol_id;
 	std::string uri;

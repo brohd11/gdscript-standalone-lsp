@@ -594,6 +594,78 @@
       "source": "extends Node\nfunc f() -> void:\n\tvar cb = func(): pass\n\tcb.call()\n",
       "godot": null,
       "expect": "ok"
+    },
+    {
+      "name": "empty_if_blank",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"if\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_if_comment",
+      "source": "extends Node\nfunc test():\n\tif true:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"if\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_elif_blank",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telif true:\n\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"elif\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_elif_comment",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telif true:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"elif\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_else_blank",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telse:\n\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"else\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_else_comment",
+      "source": "extends Node\nfunc test():\n\tif false:\n\t\tpass\n\telse:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"else\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_for_blank",
+      "source": "extends Node\nfunc test():\n\tfor value in []:\n\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"for\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_for_comment",
+      "source": "extends Node\nfunc test():\n\tfor value in []:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"for\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_while_blank",
+      "source": "extends Node\nfunc test():\n\twhile false:\n\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"while\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_while_comment",
+      "source": "extends Node\nfunc test():\n\twhile false:\n\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after \"while\" block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_match_arm_blank",
+      "source": "extends Node\nfunc test():\n\tmatch 1:\n\t\t1:\n\t\t\t\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after match pattern block.",
+      "expect": "error"
+    },
+    {
+      "name": "empty_match_arm_comment",
+      "source": "extends Node\nfunc test():\n\tmatch 1:\n\t\t1:\n\t\t\t# unfinished\n\tprint(\"after\")\n",
+      "godot": "Expected indented block after match pattern block.",
+      "expect": "error"
     }
   ]
 }

@@ -1765,4 +1765,63 @@ with socket.socket() as occupied:
     assert conflict.returncode == 1
     assert b"could not bind" in conflict.stderr
 
+# Same-name namespace aliases, utility completions, and await returns must also
+# work through the serialized LSP surface with the bundled native API.
+with tempfile.TemporaryDirectory(prefix="gdscript-lsp-regressions-") as temporary:
+    regression_root = pathlib.Path(temporary).resolve()
+    (regression_root / "project.godot").write_text(
+        '[application]\nconfig/name="Regressions"\n[debug]\ngdscript/warnings/enable=false\n'
+    )
+    (regression_root / "util_r.gd").write_text('const UEngine = preload("res://u_engine.gd")\n')
+    (regression_root / "u_engine.gd").write_text('static func get_editor_interface():\n    return null\n')
+    regression_source = (
+        'extends Node\n'
+        'const UtilR = preload("res://util_r.gd")\n'
+        'const UEngine = UtilR.UEngine\n'
+        'signal finished(value: int)\n'
+        'func test(value: Object) -> bool:\n'
+        '    return is_instance_valid(value)\n'
+        'func wait_value():\n'
+        '    return await finished\n'
+    )
+    regression_script = regression_root / "main.gd"
+    regression_script.write_text(regression_source)
+    regression_document = {"uri": regression_script.as_uri()}
+    regression_requests = [
+        {"id": 1, "method": "initialize", "params": {"rootUri": regression_root.as_uri()}},
+        {"id": 2, "method": "textDocument/completion", "params": {
+            "textDocument": regression_document, "position": {"line": 2, "character": len("const UEngine = UtilR.")}}},
+        {"id": 3, "method": "textDocument/completion", "params": {
+            "textDocument": regression_document, "position": {"line": 5, "character": len("    return is_instance_valid")}}},
+        {"id": 4, "method": "textDocument/signatureHelp", "params": {
+            "textDocument": regression_document, "position": {"line": 5, "character": len("    return is_instance_valid(")}}},
+        {"id": 5, "method": "textDocument/diagnostic", "params": {"textDocument": regression_document}},
+        {"id": 6, "method": "gdscript/resolveType", "params": {
+            "textDocument": regression_document, "position": {"line": 7, "character": 4}, "expression": "await finished"}},
+        {"id": 7, "method": "gdscript/resolveType", "params": {
+            "textDocument": regression_document, "position": {"line": 7, "character": 4}, "expression": "wait_value()"}},
+        {"id": 8, "method": "shutdown", "params": {}},
+        {"method": "exit", "params": {}},
+    ]
+    regression_run = subprocess.run(
+        [str(binary), "--api", str(pathlib.Path("data/godot-4.6-extension-api.json").resolve())],
+        input=b"".join(packet({"jsonrpc": "2.0", **request}) for request in regression_requests),
+        capture_output=True, timeout=20, check=True,
+    )
+    regression_stream = io.BytesIO(regression_run.stdout)
+    regression_responses = {}
+    while regression_stream.tell() < len(regression_run.stdout):
+        response = read_packet(regression_stream)
+        if "id" in response:
+            regression_responses[response["id"]] = response
+    assert "UEngine" in {item["filterText"] for item in regression_responses[2]["result"]["items"]}
+    utility = next(item for item in regression_responses[3]["result"]["items"] if item["filterText"] == "is_instance_valid")
+    # The call already has a parenthesis after the identifier at this caret.
+    assert utility["insertText"] == "is_instance_valid"
+    assert utility["data"]["gdscriptLsp"]["symbolId"] == "utility:is_instance_valid"
+    assert "is_instance_valid(instance: Variant)" in regression_responses[4]["result"]["signatures"][0]["label"]
+    assert regression_responses[5]["result"]["items"] == [], regression_responses[5]
+    assert regression_responses[6]["result"]["name"] == "int", regression_responses[6]
+    assert regression_responses[7]["result"]["name"] == "int", regression_responses[7]
+
 print("lsp smoke test passed")

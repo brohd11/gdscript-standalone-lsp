@@ -25,6 +25,5 @@ cmake --install build-cmake --config Release --prefix dist
 ```
 
 The Make and CMake install targets include both the executable and its bundled
-API metadata. Semantic GDScript addon tests remain a manual editor-console
-check. See [development](development.md) for the automated test and benchmark
+API metadata. See [development](development.md) for the automated test and benchmark
 commands.

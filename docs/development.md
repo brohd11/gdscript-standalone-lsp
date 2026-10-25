@@ -2,6 +2,8 @@
 
 ## Tests
 
+The standalone build and test suite do not require Godot editor addons.
+
 Run the core and JSON-RPC integration tests with:
 
 ```sh

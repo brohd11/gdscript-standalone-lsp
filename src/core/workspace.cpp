@@ -1579,14 +1579,7 @@ ResolvedType Workspace::infer_expression(std::string expression, const Document 
 	}
 	if (expression.empty()) return ResolvedType::unknown();
 	if (expression.starts_with("await ")) {
-		auto awaited = infer_expression(expression.substr(6), document, context, position, stack);
-		if (awaited.kind != TypeKind::Signal || awaited.signal_arguments.empty()) {
-			return {TypeKind::Variant, "Variant"};
-		}
-		if (awaited.signal_arguments.size() == 1) return awaited.signal_arguments.front();
-		ResolvedType result{TypeKind::Builtin, "Array"};
-		result.arguments.push_back({TypeKind::Variant, "Variant"});
-		return result;
+		return awaited_type(infer_expression(expression.substr(6), document, context, position, stack));
 	}
 	if (expression.starts_with("func") && expression.find('(') != std::string::npos) {
 		return {TypeKind::Callable, "Callable", "lambda"};
@@ -2267,6 +2260,17 @@ std::vector<CompletionItem> Workspace::semantic_completion_locked(const Document
 				!function.signature.arguments.empty() || function.signature.is_vararg, "builtin:" + std::string(function.name));
 			result.push_back(std::move(item));
 		}
+		std::vector<std::string> utility_names;
+		for (const auto &[name, signature] : native_api_.utility_functions()) {
+			(void)signature;
+			utility_names.push_back(name);
+		}
+		std::sort(utility_names.begin(), utility_names.end());
+		for (const auto &name : utility_names) if (names.insert(name).second) {
+			const auto &signature = native_api_.utility_functions().at(name);
+			result.push_back(completion_item(name, "func", {}, SymbolKind::Method,
+				!signature.arguments.empty() || signature.is_vararg, "utility:" + name));
+		}
 	}
 	for (size_t index = 0; index < result.size(); ++index) {
 		auto rank = std::to_string(index);
@@ -2834,7 +2838,7 @@ CompletionResult Workspace::completion_result(const std::string &uri, Position p
 	}
 
 	output.items = merge_front(std::move(additions), semantic_completion_locked(*document, position, site));
-	if (!site.suppressed_symbol.empty()) {
+	if (!site.member_access && !site.suppressed_symbol.empty()) {
 		std::erase_if(output.items, [&](const CompletionItem &item) {
 			return item.filter_text == site.suppressed_symbol;
 		});

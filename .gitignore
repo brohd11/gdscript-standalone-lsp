@@ -11,13 +11,5 @@
 __pycache__/
 *.pyc
 
-/addons/_lib/
-/addons/code_completions/
-/addons/editor_console/
-/addons/script_dock/
-/addons/syntax_plus/
-/addons/zyx_popup_wrapper/
-
-/tests_plugin/
 /test.gd
 /.vscode/

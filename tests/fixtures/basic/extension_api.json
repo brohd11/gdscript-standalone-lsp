@@ -111,7 +111,8 @@
     }
   ],
   "utility_functions": [
-    {"name": "print", "is_vararg": true, "arguments": [{"name": "arg1", "type": "Variant"}]}
+    {"name": "print", "is_vararg": true, "arguments": [{"name": "arg1", "type": "Variant"}]},
+    {"name": "is_instance_valid", "return_type": "bool", "arguments": [{"name": "instance", "type": "Variant"}]}
   ],
   "singletons": [{"name": "Engine", "type": "Engine"}],
   "global_constants": [],

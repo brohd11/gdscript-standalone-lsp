@@ -66,6 +66,13 @@ ResolvedType ResolvedType::unknown(std::string reason) {
 	return value;
 }
 
+ResolvedType awaited_type(const ResolvedType &operand) {
+	if (operand.kind != TypeKind::Signal) return operand;
+	if (operand.signal_arguments.empty()) return {TypeKind::Variant, "Variant"};
+	if (operand.signal_arguments.size() == 1) return operand.signal_arguments.front();
+	return {TypeKind::Builtin, "Array", {}, true, {{TypeKind::Variant, "Variant"}}};
+}
+
 bool is_type_level_member(const Symbol &symbol) {
 	return symbol.is_static || symbol.kind == SymbolKind::Constant ||
 		symbol.kind == SymbolKind::Enum || symbol.kind == SymbolKind::Class;

@@ -565,6 +565,10 @@ private:
 			result.type = {TypeKind::Enum, member.name, "nativeenum:" + member.owner + "." + member.name, false};
 		} else if (member.kind == SymbolKind::Event) {
 			result.type = {TypeKind::Signal, "Signal"};
+			if (member.signature) for (const auto &parameter : member.signature->arguments) {
+				auto argument = workspace.type_from_name(parameter.type, current_class);
+				result.type.signal_arguments.push_back(argument.known() ? argument : ResolvedType{TypeKind::Variant, "Variant"});
+			}
 		} else if (member.signature) {
 			result.type = {TypeKind::Callable, "Callable"};
 			result.signatures.push_back(*member.signature);
@@ -1171,7 +1175,12 @@ private:
 		}
 		if (node.kind == "parenthesized_expression" || node.kind == "unary_operator" || node.kind == "binary_operator")
 			return evaluate_operators(node, call_target, allow_pseudo_type);
-		if (node.kind == "await_expression") return node.children.empty() ? Value{} : require_value(evaluate(node.children.front()), node.children.front().range);
+		if (node.kind == "await_expression") {
+			if (node.children.empty()) return {};
+			auto operand = require_value(evaluate(node.children.front()), node.children.front().range);
+			if (operand.type.kind != TypeKind::Signal) return operand;
+			return {awaited_type(operand.type), {}, operand.resolved, false};
+		}
 		if (node.kind == "conditional_expression") {
 			auto condition = field(node, "condition") ? require_value(evaluate(*field(node, "condition")), field(node, "condition")->range) : Value{};
 			auto left = field(node, "left") ? require_value(evaluate(*field(node, "left")), field(node, "left")->range) : Value{};

@@ -375,6 +375,37 @@ void check_suppressed_contexts(Harness &harness) {
 		"completion resumes in a declaration initializer", initializer);
 }
 
+void check_initializer_and_utility_completion(Harness &harness) {
+	const auto namespace_source = prelude + "class UtilR:\n\tconst UEngine = Product\n\n";
+	for (auto prefix : {"", "UE", "UEngine"}) {
+		auto qualified = harness.probe(namespace_source + "const UEngine = UtilR." + prefix + "<caret>\n", CompletionProfile::Full);
+		expect_result(has_item(qualified, "UEngine"),
+			"initializer does not suppress a same-name member of another receiver", qualified);
+	}
+	auto bare = harness.probe(namespace_source + "const UEngine = <caret>\n", CompletionProfile::Full);
+	expect_result(!has_item(bare, "UEngine"), "initializer still suppresses its unqualified self-reference", bare);
+	auto property = harness.body("\tvar title = target.<caret>\n", CompletionProfile::Full);
+	expect_result(has_item(property, "title"), "same-name property completion survives in a local initializer", property);
+	auto recovery = harness.body("\tif flag:\n\t\t# unfinished\n\ttarget.<caret>\n", CompletionProfile::Full);
+	expect_result(has_item(recovery, "title"), "completion survives an empty control-flow suite", recovery);
+
+	auto globals = harness.body("\t<caret>\n", CompletionProfile::Full);
+	auto *utility = find_item(globals, "is_instance_valid");
+	expect_result(utility && utility->insert_text == "is_instance_valid(" && utility->opens_call &&
+		utility->symbol_id == "utility:is_instance_valid", "native utilities complete with callable metadata", globals);
+	expect_result(has_item(globals, "print"), "vararg native utilities also complete", globals);
+	auto *print = find_item(globals, "print");
+	expect(print && print->opens_call, "vararg utility opens its argument list");
+	auto shadowed = harness.body("\tvar is_instance_valid = true\n\t<caret>\n", CompletionProfile::Full);
+	auto *local = find_item(shadowed, "is_instance_valid");
+	expect_result(local && local->kind == SymbolKind::Variable && !local->opens_call,
+		"local symbols keep precedence over native utility completions", shadowed);
+	std::vector<std::string> utilities;
+	for (const auto &item : globals.items) if (item.symbol_id.starts_with("utility:")) utilities.push_back(item.filter_text);
+	expect(utilities == std::vector<std::string>{"is_instance_valid", "print"},
+		"utility completions have deterministic alphabetical order");
+}
+
 void check_overrides(Harness &harness) {
 	auto instance = harness.probe(prelude + "func <caret>\n", CompletionProfile::Helpers);
 	expect_result(instance.disposition == CompletionDisposition::Replace && instance.provider == "overrides" &&
@@ -429,6 +460,7 @@ int main() {
 	check_member_strings(harness);
 	check_private_filter(harness);
 	check_suppressed_contexts(harness);
+	check_initializer_and_utility_completion(harness);
 	check_overrides(harness);
 	if (failures) {
 		std::cerr << failures << " completion-provider test(s) failed\n";

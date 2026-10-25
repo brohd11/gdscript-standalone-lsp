@@ -89,6 +89,7 @@ public:
 	std::vector<const NativeMember *> members(std::string_view class_name,
 		MemberAccess access = MemberAccess::Instance) const;
 	const CallableSignature *find_utility_function(std::string_view name) const;
+	const std::unordered_map<std::string, CallableSignature> &utility_functions() const { return utility_functions_; }
 	const std::vector<CallableSignature> *constructors(std::string_view class_name) const;
 	std::optional<std::string> singleton_type(std::string_view name) const;
 	bool has_global_symbol(std::string_view name) const;

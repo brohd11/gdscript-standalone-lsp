@@ -123,6 +123,14 @@ def main():
             send('workspace/didChangeWatchedFiles', {'changes': [{'uri': dependency.as_uri(), 'type': 3}]})
             verify(['missing-preload'], 1)
 
+            empty_block = 'extends Node\nfunc test() -> void:\n    if true:\n        # unfinished\n    print("after")\n'
+            send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': 6},
+                                            'contentChanges': [{'text': empty_block}]})
+            verify(['syntax-error'], 1)
+            send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': 7},
+                                            'contentChanges': [{'text': empty_block.replace('# unfinished', 'pass')}]})
+            verify([])
+
             send('shutdown', {}, 99)
             take(lambda m: m.get('id') == 99)
             send('exit', {})
